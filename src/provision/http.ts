@@ -7,7 +7,8 @@ export class ProviderError extends Error {
   }
 }
 
-export interface Call { method?: string; headers?: Record<string, string>; body?: unknown; form?: Record<string, string>; ok?: number[] }
+/** `busy`: provider-specific statuses meaning "operation in progress, try later" (Neon 423); retried for about a minute. */
+export interface Call { method?: string; headers?: Record<string, string>; body?: unknown; form?: Record<string, string>; ok?: number[]; busy?: number[]; busyDelayMs?: number }
 
 export async function api<T = any>(provider: string, url: string, c: Call = {}): Promise<{ status: number; json: T }> {
   const ok = c.ok ?? [200, 201, 202, 204];
@@ -29,6 +30,7 @@ export async function api<T = any>(provider: string, url: string, c: Call = {}):
     const json = text ? (() => { try { return JSON.parse(text); } catch { return { raw: text.slice(0, 300) }; } })() : {};
     if (ok.includes(res.status)) return { status: res.status, json: json as T };
     if ((res.status === 429 || res.status >= 500) && attempt < 3) { await new Promise((r) => setTimeout(r, 500 * 2 ** attempt)); continue; }
+    if (c.busy?.includes(res.status) && attempt < 6) { await new Promise((r) => setTimeout(r, (c.busyDelayMs ?? 2000) * 2 ** Math.min(attempt, 3))); continue; }
     throw new ProviderError(provider, res.status, `HTTP ${res.status} on ${new URL(url).pathname}: ${JSON.stringify(json).slice(0, 300)}`);
   }
 }

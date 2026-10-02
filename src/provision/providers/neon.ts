@@ -15,7 +15,8 @@ export interface NeonProject { id: string; name: string }
 export class Neon {
   constructor(private readonly token: Secret, private readonly base = "https://console.neon.tech/api/v2") {}
   private call<T = any>(path: string, c: Parameters<typeof api>[2] = {}) {
-    return api<T>("Neon", this.base + path, { ...c, headers: { authorization: `Bearer ${this.token.reveal()}`, ...c.headers } });
+    // 423: the project still has operations running (for example right after creation); wait instead of failing.
+    return api<T>("Neon", this.base + path, { busy: [423], ...c, headers: { authorization: `Bearer ${this.token.reveal()}`, ...c.headers } });
   }
   async orgs() { return (await this.call<{ organizations: Array<{ id: string; name: string }> }>("/users/me/organizations")).json.organizations; }
   async findProject(name: string, orgId: string) {
