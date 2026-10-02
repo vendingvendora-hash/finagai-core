@@ -35,7 +35,9 @@ export interface Ctx {
 export interface Step { id: string; title: string; run(ctx: Ctx): Promise<string> }
 
 const REPO = "finagai-core", ENV = "production", GROUP = "finagai-core", WEB = "finagai-core", CRON = "finagai-scheduler";
-const gen = () => new Secret(randomBytes(32).toString("base64url"));
+/** Re-issue the passkey enrollment code just before its 15-minute lifetime ends. */
+const ENROLL_CODE_REISSUE_MS = 14 * 60_000;
+const gen = () =>new Secret(randomBytes(32).toString("base64url"));
 const need = (ctx: Ctx, k: string) => { const v = ctx.state.get(k); if (!v) throw new Error(`missing ${k}: run the earlier steps first`); return v; };
 
 async function secret(ctx: Ctx, key: string, question: string, validate?: (s: Secret) => Promise<string | null>): Promise<Secret> {
@@ -407,14 +409,21 @@ export const STEPS: Step[] = [
       const has = () => withMigrator(ctx, async (c) => (await c.query(
         `SELECT 1 FROM finagai.webauthn_credential WHERE principal_subject = $1 AND revoked_at IS NULL`, [principal])).rowCount! > 0);
       if (await has()) return "passkey already registered";
-      const code = await withMigrator(ctx, async (c) => {
-        const pool = { query: (q: string, p: unknown[]) => c.query(q, p) } as unknown as pg.Pool;
-        return mintEnrollmentCode(pool, principal);
-      });
-      await ctx.prompt.act("approval_passkey", { title: "Register your Finagai approval passkey", url: `${need(ctx, "base_url")}/approve/enroll`,
-        steps: ["Open the link and sign in with WorkOS.", `Enter this one-time code (valid 15 minutes): ${code}`, "Register the passkey when your device asks."],
-        waitFor: has, pollMs: ctx.pollMs });
-      return "passkey registered";
+      // Codes live 15 minutes; if Julian is away longer, issue a fresh one rather than wait on a dead code.
+      for (;;) {
+        const code = await withMigrator(ctx, async (c) => {
+          const pool = { query: (q: string, p: unknown[]) => c.query(q, p) } as unknown as pg.Pool;
+          return mintEnrollmentCode(pool, principal);
+        });
+        const expiresAt = Date.now() + ENROLL_CODE_REISSUE_MS;
+        let expired = false;
+        await ctx.prompt.act("approval_passkey", { title: "Register your Finagai approval passkey", url: `${need(ctx, "base_url")}/approve/enroll`,
+          steps: ["Open the link and sign in with WorkOS.", `Enter this one-time code (valid 15 minutes): ${code}`, "Register the passkey when your device asks."],
+          waitFor: async () => { if (await has()) return true; if (Date.now() >= expiresAt) { expired = true; return true; } return false; },
+          pollMs: ctx.pollMs });
+        if (!expired) return "passkey registered";
+        ctx.log("  That enrollment code expired unused; here is a new one.");
+      }
     },
   },
   {
