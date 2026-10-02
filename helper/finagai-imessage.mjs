@@ -225,6 +225,104 @@ export async function findEverything(queries) {
   return [...files, ...extra];
 }
 
+// ------------------------------------------------------------------------------ attachments (ADR-048)
+
+const OUT_ROOT = join(homedir(), "Pictures", "Finagai");          // Messages reliably sends files from ~/Pictures
+const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+const xmlEsc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const PALETTE = ["#2563eb", "#f59e0b", "#10b981", "#ef4444", "#8b5cf6", "#06b6d4"];
+
+/** A self-contained SVG chart (bar, line or pie); rendered to PNG with Quick Look. */
+export function chartSvg(spec) {
+  const W = 1200, H = 760, L = 110, R = 40, T = 110, B = 150;
+  const title = `<text x="${W / 2}" y="60" font-size="34" font-family="Helvetica" text-anchor="middle" font-weight="bold">${xmlEsc(spec.title)}</text>`;
+  const legend = spec.series.map((s, i) => `<rect x="${L + i * 220}" y="${H - 50}" width="22" height="22" fill="${PALETTE[i % 6]}"/><text x="${L + i * 220 + 30}" y="${H - 32}" font-size="22" font-family="Helvetica">${xmlEsc(s.name)}</text>`).join("");
+  if (spec.kind === "pie") {
+    const vals = spec.series[0].values.map((v) => Math.max(0, v));
+    const total = vals.reduce((a, b) => a + b, 0) || 1;
+    let a0 = -Math.PI / 2;
+    const cx = W / 2 - 150, cy = H / 2 + 20, r = 250;
+    const slices = vals.map((v, i) => {
+      const a1 = a0 + (v / total) * 2 * Math.PI;
+      const large = a1 - a0 > Math.PI ? 1 : 0;
+      const d = `M${cx},${cy} L${cx + r * Math.cos(a0)},${cy + r * Math.sin(a0)} A${r},${r} 0 ${large} 1 ${cx + r * Math.cos(a1)},${cy + r * Math.sin(a1)} Z`;
+      a0 = a1;
+      return `<path d="${d}" fill="${PALETTE[i % 6]}" stroke="white" stroke-width="2"/>`;
+    }).join("");
+    const keys = spec.labels.map((l, i) => `<rect x="${W - 420}" y="${170 + i * 40}" width="24" height="24" fill="${PALETTE[i % 6]}"/><text x="${W - 385}" y="${190 + i * 40}" font-size="24" font-family="Helvetica">${xmlEsc(l)} (${Math.round((vals[i] ?? 0) / total * 100)}%)</text>`).join("");
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}"><rect width="100%" height="100%" fill="white"/>${title}${slices}${keys}</svg>`;
+  }
+  const all = spec.series.flatMap((s) => s.values);
+  const max = Math.max(1, ...all), min = Math.min(0, ...all);
+  const pw = W - L - R, ph = H - T - B, n = spec.labels.length;
+  const y = (v) => T + ph - ((v - min) / (max - min)) * ph;
+  const grid = Array.from({ length: 5 }, (_, i) => { const v = min + ((max - min) * i) / 4; return `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="#e5e7eb"/><text x="${L - 12}" y="${y(v) + 8}" font-size="20" text-anchor="end" font-family="Helvetica">${Number(v.toFixed(2)).toLocaleString("en-US")}</text>`; }).join("");
+  const xl = spec.labels.map((l, i) => `<text x="${L + (i + 0.5) * (pw / n)}" y="${T + ph + 34}" font-size="20" text-anchor="middle" font-family="Helvetica">${xmlEsc(l).slice(0, 14)}</text>`).join("");
+  let marks = "";
+  if (spec.kind === "bar") {
+    const gw = pw / n, bw = (gw * 0.8) / spec.series.length;
+    marks = spec.series.map((s, si) => s.values.map((v, i) => `<rect x="${L + i * gw + gw * 0.1 + si * bw}" y="${Math.min(y(v), y(0))}" width="${bw - 2}" height="${Math.abs(y(0) - y(v))}" fill="${PALETTE[si % 6]}"/>`).join("")).join("");
+  } else {
+    marks = spec.series.map((s, si) => `<polyline fill="none" stroke="${PALETTE[si % 6]}" stroke-width="5" points="${s.values.map((v, i) => `${L + (i + 0.5) * (pw / n)},${y(v)}`).join(" ")}"/>`).join("");
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}"><rect width="100%" height="100%" fill="white"/>${title}${grid}${marks}${xl}${legend}</svg>`;
+}
+
+const expandHome = (p) => p.replace(/^~(?=\/)/, homedir());
+const allowedLocal = (p) => p.startsWith(homedir() + "/") && !EXCLUDED_PATH.some((r) => r.test(p)) && existsSync(p) && statSync(p).isFile() && statSync(p).size <= MAX_ATTACHMENT_BYTES;
+
+async function quickLookPng(src, outDir) {
+  await run("/usr/bin/qlmanage", ["-t", "-s", "1600", "-o", outDir, src], { timeout: 30_000 });
+  const png = join(outDir, `${src.split("/").pop()}.png`);
+  return existsSync(png) ? png : null;
+}
+
+async function pdfPagePng(src, page, highlight, out) {
+  const js = `ObjC.import('PDFKit');ObjC.import('AppKit');
+function run(a){var d=$.PDFDocument.alloc.initWithURL($.NSURL.fileURLWithPath(a[0]));if(!d||d.isNil())return 'nodoc';
+var i=Math.max(0,Math.min(parseInt(a[1],10)-1,d.pageCount-1));var p=d.pageAtIndex(i);
+if(a[3]){var sels=d.findStringWithOptions(a[3],1);for(var k=0;k<sels.count;k++){var s=sels.objectAtIndex(k);var ps=s.pages;for(var j=0;j<ps.count;j++){if(ps.objectAtIndex(j).isEqual(p)){var b=s.boundsForPage(p);var an=$.PDFAnnotation.alloc.initWithBoundsForTypeWithProperties(b,'Highlight',$());an.color=$.NSColor.yellowColor;p.addAnnotation(an);}}}}
+var box=p.boundsForBox(0);var sc=1600/Math.max(box.size.width,1);var img=p.thumbnailOfSizeForBox($.NSMakeSize(1600,box.size.height*sc),0);
+var rep=$.NSBitmapImageRep.imageRepWithData(img.TIFFRepresentation);var data=rep.representationUsingTypeProperties(4,$());data.writeToFileAtomically(a[2],true);return 'ok'}`;
+  const r = await run("/usr/bin/osascript", ["-l", "JavaScript", "-e", js, src, String(page), out, highlight ?? ""], { timeout: 40_000 });
+  return r.stdout.trim() === "ok" && existsSync(out) ? out : null;
+}
+
+/** Build every attachment of a draft on the Mac; returns the files ready to send (skips anything unsafe). */
+export async function buildAttachments(draftId, specs) {
+  const dir = join(OUT_ROOT, String(draftId).replace(/[^a-z0-9-]/gi, ""));
+  mkdirSync(dir, { recursive: true });
+  const files = [];
+  for (const [i, a] of (specs ?? []).entries()) {
+    try {
+      if (a.type === "file" || a.type === "preview" || a.type === "pdf_page") {
+        const src = expandHome(a.path);
+        if (!allowedLocal(src)) { log("attachment refused", { type: a.type }); continue; }
+        if (a.type === "file") { const dst = join(dir, src.split("/").pop()); copyFileSync(src, dst); files.push(dst); }
+        else if (a.type === "preview") { const png = await quickLookPng(src, dir); if (png) files.push(png); }
+        else { const png = await pdfPagePng(src, a.page, a.highlight, join(dir, `page-${a.page}-${i}.png`)); if (png) files.push(png); }
+      } else if (a.type === "chart") {
+        const svg = join(dir, `chart-${i}.svg`);
+        writeFileSync(svg, chartSvg(a));
+        const png = await quickLookPng(svg, dir); if (png) files.push(png);
+      } else if (a.type === "web_screenshot" && existsSync(CHROME) && /^https:\/\//.test(a.url)) {
+        const out = join(dir, `web-${i}.png`);
+        await run(CHROME, ["--headless=new", "--disable-gpu", "--hide-scrollbars", `--screenshot=${out}`, "--window-size=1280,1600", "--user-data-dir=" + join(dir, ".chrome"), a.url], { timeout: 45_000 });
+        rmSync(join(dir, ".chrome"), { recursive: true, force: true });
+        if (existsSync(out)) files.push(out);
+      }
+    } catch (err) { log("attachment failed", { type: a.type, error: String(err?.message ?? err).slice(0, 120) }); }
+  }
+  return files;
+}
+
+export async function sendIMessageFile(handle, path) {
+  const script = ["on run argv", "set theFile to POSIX file (item 1 of argv)", "set theHandle to item 2 of argv",
+    'tell application "Messages"', "set svc to 1st account whose service type = iMessage", "send theFile to participant theHandle of svc", "end tell", "end run"];
+  await run("/usr/bin/osascript", [...script.flatMap((l) => ["-e", l]), path, handle]);
+}
+
 // ------------------------------------------------------------------------------ I/O
 
 function loadConfig() {
@@ -327,8 +425,12 @@ async function tick(cfg, state) {
       drafts.push(...(r.drafts ?? []));
     }
     for (const d of drafts) {
-      await sendIMessage(cfg.selfHandles[0], draftNotice(d));
-      log("draft shown to Julian", { code: d.code, contact: d.label });
+      const files = d.attachments?.length ? await buildAttachments(d.id, d.attachments) : [];
+      state.attachments = { ...(state.attachments ?? {}), [d.id]: files };
+      saveState(state);
+      await sendIMessage(cfg.selfHandles[0], draftNotice(d) + (files.length ? `\n\n📎 ${files.length} attachment(s) below will be sent too.` : ""));
+      for (const f of files) await sendIMessageFile(cfg.selfHandles[0], f).catch(() => {});
+      log("draft shown to Julian", { code: d.code, contact: d.label, attachments: files.length });
     }
   }
   for (const text of commands) {
@@ -337,8 +439,11 @@ async function tick(cfg, state) {
     if (!allowed.has(normalizeHandle(r.handle))) { log("refused: handle not allow-listed", {}); await core(cfg, "/concierge/sent", { id: r.id, ok: false }); continue; }
     try {
       await sendIMessage(r.handle, r.body);
+      const files = (state.attachments ?? {})[r.id] ?? [];
+      for (const f of files) if (existsSync(f)) await sendIMessageFile(r.handle, f);
+      delete (state.attachments ?? {})[r.id];
       await core(cfg, "/concierge/sent", { id: r.id, ok: true });
-      log("reply sent", { contact: allowed.get(normalizeHandle(r.handle)) });
+      log("reply sent", { contact: allowed.get(normalizeHandle(r.handle)), attachments: files.length });
     } catch (err) {
       await core(cfg, "/concierge/sent", { id: r.id, ok: false });
       log("send failed", { error: String(err?.message ?? err).slice(0, 200) });

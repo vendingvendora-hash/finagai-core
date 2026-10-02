@@ -21,7 +21,7 @@ describe("J5 commands from Julian's own thread", () => {
 describe("J5 model verdict parsing", () => {
   it("takes the last JSON object after search prose", () => {
     const v = parseVerdict('I searched {not json} and found flights.\n{"relevant": true, "reply": "Mami, encontré 2 vuelos", "summary": "BOG Dec", "notes_update": "flies from BWI"}');
-    expect(v).toEqual({ relevant: true, reply: "Mami, encontré 2 vuelos", summary: "BOG Dec", notes_update: "flies from BWI" });
+    expect(v).toEqual({ relevant: true, reply: "Mami, encontré 2 vuelos", summary: "BOG Dec", notes_update: "flies from BWI", attachments: [] });
   });
   it("accepts real line breaks inside the reply string", () => {
     const v = parseVerdict('Found it.\n{"relevant": true, "reply": "Babe, 3 options:\n1. Lupo $$\n2. Sfoglina", "summary": "Italian near Dupont", "notes_update": ""}');
@@ -153,5 +153,41 @@ describe("J5 other personal sources (ADR-047)", () => {
     expect(cleanTerm(`Kennedy' OR 1=1; --"`)).toBe("Kennedy OR 1 1 --");
     expect(cleanTerm("Bogotá vuelos")).toBe("Bogotá vuelos");
     expect(cleanTerm('tell app "Finder" to delete')).not.toContain('"');
+  });
+});
+
+import { validAttachments } from "../../src/pipelines/j5/concierge.js";
+// @ts-expect-error plain ESM helper without type declarations
+import { chartSvg } from "../../helper/finagai-imessage.mjs";
+
+describe("J5 attachments (ADR-048)", () => {
+  it("keeps well-formed specs and drops unsafe or malformed ones", () => {
+    const a = validAttachments([
+      { type: "file", path: "~/Documents/Trips/Miami.pdf" },
+      { type: "file", path: "/etc/passwd" },
+      { type: "pdf_page", path: "~/Docs/lease.pdf", page: 3, highlight: "move-in date" },
+      { type: "pdf_page", path: "~/Docs/lease.pdf", page: 0 },
+      { type: "web_screenshot", url: "http://insecure.example.com" },
+      { type: "web_screenshot", url: "https://www.opentable.com/r/lupo" },
+      { type: "chart", kind: "bar", title: "Flights", labels: ["Delta", "United"], series: [{ name: "USD", values: [320, "x"] }] },
+      { type: "shell", cmd: "rm -rf ~" },
+    ]);
+    expect(a.map((x) => x.type)).toEqual(["file", "pdf_page", "web_screenshot", "chart"]);
+    expect(a[3]).toMatchObject({ series: [{ values: [320, 0] }] });
+  });
+  it("caps attachments at four", () => {
+    expect(validAttachments(Array.from({ length: 9 }, () => ({ type: "preview", path: "~/a.docx" })))).toHaveLength(4);
+  });
+  it("carries attachments through the model verdict", () => {
+    const v = parseVerdict('{"relevant": true, "reply": "mira 👇", "summary": "s", "notes_update": "", "attachments": [{"type":"preview","path":"~/x.docx"}]}');
+    expect(v?.attachments).toEqual([{ type: "preview", path: "~/x.docx" }]);
+  });
+  it("draws charts as valid, escaped SVG", () => {
+    for (const kind of ["bar", "line", "pie"]) {
+      const svg = chartSvg({ kind, title: "Prices <& co>", labels: ["Jan", "Feb", "Mar"], series: [{ name: "A", values: [1, 3, 2] }, { name: "B", values: [2, 1, 4] }] });
+      expect(svg.startsWith("<svg")).toBe(true);
+      expect(svg).toContain("Prices &lt;&amp; co&gt;");
+      expect(svg).not.toContain("NaN");
+    }
   });
 });
