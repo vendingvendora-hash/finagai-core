@@ -23,6 +23,10 @@ describe("J5 model verdict parsing", () => {
     const v = parseVerdict('I searched {not json} and found flights.\n{"relevant": true, "reply": "Mami, encontré 2 vuelos", "summary": "BOG Dec", "notes_update": "flies from BWI"}');
     expect(v).toEqual({ relevant: true, reply: "Mami, encontré 2 vuelos", summary: "BOG Dec", notes_update: "flies from BWI" });
   });
+  it("accepts real line breaks inside the reply string", () => {
+    const v = parseVerdict('Found it.\n{"relevant": true, "reply": "Babe, 3 options:\n1. Lupo $$\n2. Sfoglina", "summary": "Italian near Dupont", "notes_update": ""}');
+    expect(v?.reply).toBe("Babe, 3 options:\n1. Lupo $$\n2. Sfoglina");
+  });
   it("returns null without a verdict", () => {
     expect(parseVerdict("no json here")).toBeNull();
     expect(parseVerdict('{"reply": "x"}')).toBeNull();

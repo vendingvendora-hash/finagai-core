@@ -72,8 +72,36 @@ export interface ConciergeVerdict {
   notes_update: string;
 }
 
+/** Escape raw control characters inside JSON string literals (models often put real line breaks there). */
+export function escapeControlCharsInStrings(json: string): string {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (const ch of json) {
+    if (inString) {
+      if (escaped) { out += ch; escaped = false; continue; }
+      if (ch === "\\") { out += ch; escaped = true; continue; }
+      if (ch === '"') { inString = false; out += ch; continue; }
+      if (ch === "\n") { out += "\\n"; continue; }
+      if (ch === "\r") { out += "\\r"; continue; }
+      if (ch === "\t") { out += "\\t"; continue; }
+      if (ch < " ") { out += " "; continue; }
+      out += ch;
+    } else {
+      if (ch === '"') inString = true;
+      out += ch;
+    }
+  }
+  return out;
+}
+
 /** Extract the last JSON object from model text (search turns may add prose before it). */
 export function parseVerdict(text: string): ConciergeVerdict | null {
+  const strict = parseVerdictStrict(text);
+  return strict ?? parseVerdictStrict(escapeControlCharsInStrings(text));
+}
+
+function parseVerdictStrict(text: string): ConciergeVerdict | null {
   const end = text.lastIndexOf("}");
   if (end < 0) return null;
   for (let start = text.lastIndexOf("{", end); start >= 0; start = start === 0 ? -1 : text.lastIndexOf("{", start - 1)) {
@@ -108,6 +136,7 @@ Rules:
 - Write exactly as Julian texts ${label}: same language, tone, length and emoji habits as Julian's messages in the thread. Short, warm, human. Plain text and line breaks only, no markdown.
 - notes_update: the full updated notes about ${label}'s stable preferences and facts useful for future requests (home city, airports, budget, tastes, dietary needs), merging old notes with anything new; under 600 characters; empty string if nothing changes.
 
+Keep any text before the JSON to a minimum. Inside JSON strings write line breaks as \\n.
 Finish with ONLY this JSON object as the last thing in your answer:
 {"relevant": true, "reply": "<Julian's message>", "summary": "<one line for Julian: what was asked and what you answered or found>", "notes_update": "<notes>"}`;
 }
@@ -146,10 +175,11 @@ export async function draftForThread(deps: J5Deps, handle: string): Promise<NewD
       pipeline: "j5", step: "draft", purpose: "concierge", model: deps.modelId, promptVersion: J5_PROMPT_VERSION,
       system: systemPrompt(contact.label, contact.notes, today, deps.homeBase),
       messages: [{ role: "user", content: `iMessage thread between Julian and ${contact.label} (oldest first):\n\n${transcript(contact.label, rows, deps.timezone)}` }],
-      maxTokens: 1500,
+      maxTokens: 3000,
       ...(deps.maxSearches > 0 ? { webSearch: { maxUses: deps.maxSearches } } : {}),
     });
     verdict = parseVerdict(result.text);
+    if (!verdict) deps.log?.("concierge unparseable output", { stopReason: result.stopReason, textLength: result.text.length, searches: result.webSearchRequests ?? 0 });
   } catch (err) {
     if (err instanceof BudgetBlockedError) {
       await appendEvent(pool, { actor: "system", action: "concierge_budget_blocked", entityType: "concierge_contact", after: { contact: contact.label }, reason: err.message });
