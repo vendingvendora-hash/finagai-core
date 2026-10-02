@@ -52,7 +52,17 @@ export function messageText(text, attributedHex) {
   if (len === 0x81) { len = buf.readUInt16LE(p + 1); p += 3; }
   else if (len === 0x82) { len = buf.readUIntLE(p + 1, 3); p += 4; }
   else p += 1;
-  return buf.subarray(p, p + len).toString("utf8");
+  const direct = buf.subarray(p, p + len).toString("utf8");
+  if (direct && !direct.includes("\uFFFD")) return direct;
+  return fallbackText(buf, at + 8);
+}
+
+/** Fallback: the longest readable UTF-8 run after the NSString marker (format variations across macOS). */
+export function fallbackText(buf, from) {
+  const tail = buf.subarray(from).toString("utf8");
+  const runs = tail.split(/[\u0000-\u0008\u000E-\u001F\uFFFD]+/).map((r) => r.trim())
+    .filter((r) => r.length > 0 && !/^(NS|__kIM|streamtyped)/.test(r));
+  return runs.sort((a, b) => b.length - a.length)[0]?.replace(/^[+\x80-\xff]/, "") ?? "";
 }
 
 export const appleDateToIso = (d) => new Date(Number(d) / 1e6 + APPLE_EPOCH_MS).toISOString();
@@ -132,7 +142,16 @@ async function tick(cfg, state) {
   }
 
   const rows = await sql(`${BASE} AND m.ROWID > ${Number(state.lastRowId)} ORDER BY m.ROWID LIMIT 500`);
-  if (!rows.length) return;
+  const anyRows = await sql(`SELECT count(*) AS n, max(ROWID) AS max FROM message WHERE ROWID > ${Number(state.lastRowId)}`);
+  if (anyRows[0]?.n > 0) {
+    const seen = {};
+    for (const r of rows) { const h = normalizeHandle(r.chat); const k = allowed.get(h) ?? (self.has(h) ? "SELF" : `other:${h}`); seen[k] = (seen[k] ?? 0) + 1; }
+    log("new messages", { total: anyRows[0].n, oneToOne: rows.length, byThread: seen, empty: rows.filter((r) => !messageText(r.text, r.ab)).length });
+  }
+  if (!rows.length) {
+    if (anyRows[0]?.n > 0) { state.lastRowId = Number(anyRows[0].max); saveState(state); }
+    return;
+  }
   const contactMsgs = [];
   const commands = [];
   for (const r of rows) {
@@ -176,7 +195,8 @@ async function main() {
     return;
   }
   const state = loadState();
-  log("finagai imessage helper started", { contacts: cfg.contacts.map((c) => c.label) });
+  log("finagai imessage helper started", { contacts: cfg.contacts.map((c) => c.label), handles: cfg.contacts.map((c) => c.handle), self: cfg.selfHandles });
+  setInterval(() => log("alive", { lastRowId: state.lastRowId }), 600_000);
   let busy = false;
   const loop = async () => {
     if (busy) return;
