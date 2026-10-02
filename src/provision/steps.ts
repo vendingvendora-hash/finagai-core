@@ -11,7 +11,7 @@ import { migrate } from "../db/migrator.js";
 import { ProviderError } from "./http.js";
 import type { Log, Prompter } from "./io.js";
 import { GitHub } from "./providers/github.js";
-import { Neon } from "./providers/neon.js";
+import { Neon, needsPlanUpgrade } from "./providers/neon.js";
 import { authkitDiscovery, Cloudflare, probeClientSecret, Resend, validateAnthropicKey, WorkOS } from "./providers/others.js";
 import { Render } from "./providers/render.js";
 import { Secret } from "./secret.js";
@@ -150,8 +150,10 @@ export const STEPS: Step[] = [
       if (!project) {
         try { project = await neon.createProject("finagai", orgId); }
         catch (e) {
-          if (e instanceof ProviderError && (e.status === 402 || /plan|limit|billing/i.test(e.message))) {
-            await ctx.prompt.act("neon_billing", { title: "Neon billing", steps: ["Upgrade the Neon organization to the Launch plan and add a payment method."], url: "https://console.neon.tech/app/billing" });
+          if (needsPlanUpgrade(e)) {
+            await ctx.prompt.act("neon_billing", { title: "Neon billing", steps: [
+              "Upgrade the Neon organization to the Launch plan (ADR-028) and add a payment method. The Free plan allows only 6 hours of history; Finagai needs 7 days for point-in-time recovery.",
+            ], url: "https://console.neon.tech/app/billing" });
             project = await neon.createProject("finagai", orgId);
           } else throw e;
         }

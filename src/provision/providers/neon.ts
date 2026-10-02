@@ -1,6 +1,15 @@
 /** Neon API v2 adapter. */
-import { api } from "../http.js";
+import { api, ProviderError } from "../http.js";
 import type { Secret } from "../secret.js";
+
+/**
+ * True when Neon refused because the organization's plan is below Launch (ADR-028). Neon reports this as 402,
+ * or as a 400 naming a setting above the plan's maximum (Free allows 6 hours of history; we request 7 days).
+ */
+export function needsPlanUpgrade(e: unknown): boolean {
+  if (!(e instanceof ProviderError)) return false;
+  return e.status === 402 || /plan|limit|billing|exceeds allowed maximum/i.test(e.message);
+}
 
 export interface NeonProject { id: string; name: string }
 export class Neon {
