@@ -31,6 +31,8 @@ export interface AppDeps {
   onClientObserved?: (clientId: string) => Promise<void>;
   /** M5 approval page; when absent, /approve/* only validates the session (pre-M5 behavior). */
   approval?: (req: http.IncomingMessage, res: http.ServerResponse, url: URL) => Promise<void>;
+  /** J5 helper API (ADR-044); its own bearer secret, checked inside the handler. */
+  concierge?: (req: http.IncomingMessage, res: http.ServerResponse, path: string) => Promise<void>;
 }
 
 const MAX_MCP_BODY_BYTES = 1_000_000;
@@ -181,6 +183,11 @@ export function createHandler(cfg: Config, info: AppInfo, log: LogFn, deps: AppD
       if (!session) return send(res, 401, { error: "sign_in_required" });
       // Session valid. Sign-in, WebAuthn ceremony, and execution are implemented in M5.
       return send(res, 501, { error: "not_implemented" });
+    }
+
+    if (path.startsWith("/concierge/") && deps.concierge) {
+      void deps.concierge(req, res, path);
+      return;
     }
 
     return send(res, 404, { error: "not_found" });

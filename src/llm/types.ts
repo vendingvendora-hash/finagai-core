@@ -1,7 +1,7 @@
 import type { CallPurpose } from "../guards/budget.js";
 import type { TokenUsage } from "./pricing.js";
 
-export type Pipeline = "j2" | "j3" | "seed" | "eval_grader";
+export type Pipeline = "j2" | "j3" | "seed" | "eval_grader" | "j5";
 
 export interface ModelRequest {
   pipeline: Pipeline;
@@ -12,6 +12,8 @@ export interface ModelRequest {
   system: string;
   messages: Array<{ role: "user" | "assistant"; content: string }>;
   maxTokens: number;
+  /** Anthropic's server-side web search (J5 only). Each search is billed per request plus result tokens. */
+  webSearch?: { maxUses: number };
   captureId?: string;
   reviewId?: string;
   requestId?: string;
@@ -22,6 +24,8 @@ export interface ProviderResult {
   model: string;
   stopReason: string | null;
   usage: TokenUsage;
+  /** Server-side web searches performed during the call (billed per search). */
+  webSearchRequests?: number;
 }
 
 export interface ModelResult extends ProviderResult {

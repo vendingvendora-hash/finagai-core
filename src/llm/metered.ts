@@ -10,7 +10,7 @@
  */
 import { decideBudget, type BudgetDecision, type BudgetLimits, type CallPurpose } from "../guards/budget.js";
 import { worstCaseCostUsd, PER_CALL_MAX_USD } from "./estimate.js";
-import { costUsd, type TokenUsage } from "./pricing.js";
+import { costUsd, webSearchCostUsd, type TokenUsage } from "./pricing.js";
 import { withRetries } from "./retry.js";
 import { BudgetBlockedError, type ModelProvider, type ModelRequest, type ModelResult } from "./types.js";
 
@@ -96,7 +96,7 @@ export class MeteredModelClient {
         ...(this.opts.sleep ? { sleep: this.opts.sleep } : {}),
       });
       const latencyMs = Date.now() - started;
-      const cost = costUsd(req.model, value.usage);
+      const cost = Math.round((costUsd(req.model, value.usage) + webSearchCostUsd(value.webSearchRequests)) * 1_000_000) / 1_000_000;
       await this.recorder.settle(reservation.reservationId, { status: "ok", usage: value.usage, costUsd: cost, latencyMs, retries });
       return { ...value, costUsd: cost, retries, latencyMs };
     } catch (err) {

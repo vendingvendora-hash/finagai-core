@@ -26,6 +26,12 @@ export const configSchema = z.object({
   MODEL_J3_COMPOSE: z.string().default("claude-sonnet-5-5"),
   MODEL_J3_SHADOW: z.string().default("claude-opus-5-5"),
   MODEL_EVAL_GRADER: z.string().default("claude-opus-5-5"),
+  /** J5 ticket concierge (ADR-044). */
+  MODEL_J5_CONCIERGE: z.string().default("claude-sonnet-5-5"),
+  /** Shared secret of the Mac iMessage helper; J5 endpoints are disabled while unset. */
+  CONCIERGE_HELPER_TOKEN: z.string().min(32).optional(),
+  /** Searches allowed per concierge draft. */
+  CONCIERGE_MAX_SEARCHES: z.coerce.number().int().min(0).max(5).default(3),
   /** ADR-025 (clarified): normal Lean pilot budget. */
   MODEL_BUDGET_TARGET_USD_MONTH: z.coerce.number().positive().default(30),
   /** ADR-025 (clarified): absolute model-API ceiling; changed only by Julian. */
@@ -70,6 +76,7 @@ export const SECRET_KEYS = [
   "APPROVAL_CLIENT_SECRET",
   "SESSION_SECRET",
   "RESEND_API_KEY",
+  "CONCIERGE_HELPER_TOKEN",
 ] as const satisfies readonly (keyof Config)[];
 
 /** Keys that must hold real values (no angle-bracket placeholders) in production. */

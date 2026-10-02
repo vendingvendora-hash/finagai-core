@@ -26,4 +26,4 @@ INTEGRATION_MIGRATOR_URL="postgres://finagai_migrator@127.0.0.1:$PORT/finagai" \
 INTEGRATION_ADMIN_URL="postgres://postgres@127.0.0.1:$PORT/postgres" \
 INTEGRATION_MIGRATOR_TEMPLATE="postgres://finagai_migrator@127.0.0.1:$PORT/{db}" \
 INTEGRATION_APP_TEMPLATE="postgres://finagai_app@127.0.0.1:$PORT/{db}" \
-  npx vitest run test/integration --fileParallelism=false
+  npx vitest run ${INTEGRATION_FILES:-test/integration} --fileParallelism=false

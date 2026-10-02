@@ -34,3 +34,10 @@ export function costUsd(model: string, u: TokenUsage): number {
     u.outputTokens * (p.outputPerMTok / 1_000_000);
   return Math.round(cost * 1_000_000) / 1_000_000; // matches numeric(12,6)
 }
+
+/** Anthropic web search: $10 per 1,000 searches, on top of tokens. */
+export const WEB_SEARCH_USD_PER_REQUEST = 0.01;
+
+export function webSearchCostUsd(requests: number | undefined): number {
+  return Math.round((requests ?? 0) * WEB_SEARCH_USD_PER_REQUEST * 1_000_000) / 1_000_000;
+}

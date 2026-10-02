@@ -13,7 +13,7 @@
  *   > ceiling                      ceiling      nothing starts; J3 uses its zero-model degraded
  *                                               review and J2 defers captures (budget_deferred)
  */
-export type CallPurpose = "capture" | "seed" | "weekly_review" | "on_demand_review" | "shadow" | "eval";
+export type CallPurpose = "capture" | "seed" | "weekly_review" | "on_demand_review" | "shadow" | "eval" | "concierge";
 export type BudgetLevel = "normal" | "warning" | "restricted" | "ceiling";
 
 export interface BudgetLimits {

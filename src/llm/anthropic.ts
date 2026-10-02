@@ -26,12 +26,14 @@ export class AnthropicProvider implements ModelProvider {
         max_tokens: req.maxTokens,
         system: req.system,
         messages: req.messages,
-      });
+        ...(req.webSearch ? { tools: [{ type: "web_search_20250305", name: "web_search", max_uses: req.webSearch.maxUses }] as never } : {}),
+      }, req.webSearch ? { timeout: 180_000 } : undefined);
       const text = msg.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
       return {
         text,
         model: msg.model,
         stopReason: msg.stop_reason ?? null,
+        webSearchRequests: (msg.usage as { server_tool_use?: { web_search_requests?: number } }).server_tool_use?.web_search_requests ?? 0,
         usage: {
           inputTokens: msg.usage.input_tokens,
           outputTokens: msg.usage.output_tokens,
