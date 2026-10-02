@@ -11,7 +11,8 @@
  * Config: ~/.finagai/imessage-helper.json (written by setup.sh, mode 600). No dependencies.
  */
 import { execFile } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, readdirSync, copyFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -74,7 +75,9 @@ export function draftNotice(d) {
 // ------------------------------------------------------------------------------ local files (ADR-046)
 
 /** Never searched or read, whatever Spotlight returns. */
-export const EXCLUDED_PATH = [/\/Library\//, /\/\.[^/]+\//, /node_modules/, /\/Applications\//, /keychain/i, /password/i, /\bpasswords?\b/i,
+/** Cloud-drive folders live inside ~/Library but are Julian's documents (Google Drive, iCloud, OneDrive, Dropbox). */
+export const CLOUD_DIRS = ["Library/CloudStorage", "Library/Mobile Documents"];
+export const EXCLUDED_PATH = [/\/Library\/(?!CloudStorage\/|Mobile Documents\/)/, /\/\.[^/]+\//, /node_modules/, /\/Applications\//, /keychain/i, /password/i, /\bpasswords?\b/i,
   /\.ssh/, /\.gnupg/, /\/\.Trash\//, /\.(key|pem|p12|kdbx|keychain-db|sqlite|db)$/i, /finagai-core\//];
 const TEXT_EXT = /\.(txt|md|markdown|csv|tsv|json|eml|ics|vcf|log|xml|yaml|yml)$/i;
 const TEXTUTIL_EXT = /\.(rtf|rtfd|doc|docx|odt|html?|webarchive)$/i;
@@ -117,9 +120,11 @@ async function extractText(path) {
 /** Spotlight search across Julian's home folder; best files first (matches across queries, then recency). */
 export async function findFiles(queries) {
   const hits = new Map();
+  const roots = [homedir(), ...CLOUD_DIRS.map((d) => join(homedir(), d)).filter((d) => existsSync(d))];
   for (const q of queries.slice(0, 3)) {
-    const out = await run("/usr/bin/mdfind", ["-onlyin", homedir(), q], { maxBuffer: 8 * 1024 * 1024, timeout: 20_000 }).then((r) => r.stdout).catch(() => "");
-    for (const p of out.split("\n").filter(Boolean).slice(0, 300)) {
+    const out = (await Promise.all(roots.map((root) => run("/usr/bin/mdfind", ["-onlyin", root, q], { maxBuffer: 8 * 1024 * 1024, timeout: 20_000 })
+      .then((r) => r.stdout).catch(() => "")))).join("\n");
+    for (const p of [...new Set(out.split("\n").filter(Boolean))].slice(0, 400)) {
       if (EXCLUDED_PATH.some((r) => r.test(p))) continue;
       hits.set(p, (hits.get(p) ?? 0) + 1);
     }
@@ -137,6 +142,87 @@ export async function findFiles(queries) {
       text: scrubLocal(text ? passage(text, queries) : `(file found, contents not readable as text: ${name})`) });
   }
   return files;
+}
+
+// ------------------------------------------------------------------------------ other personal sources (ADR-047)
+
+/** Safe for SQL LIKE and AppleScript: letters, digits, spaces and a few separators only. */
+export const cleanTerm = (q) => String(q).normalize("NFC").replace(/[^\p{L}\p{N} .,&@_-]/gu, " ").replace(/\s+/g, " ").trim().slice(0, 60);
+
+const APP_SUPPORT = join(homedir(), "Library", "Application Support");
+const CHROMIUM = ["Google/Chrome", "Arc/User Data", "BraveSoftware/Brave-Browser", "Microsoft Edge"].map((d) => join(APP_SUPPORT, d));
+
+function chromiumProfiles() {
+  const out = [];
+  for (const base of CHROMIUM) {
+    if (!existsSync(base)) continue;
+    for (const d of readdirSync(base)) if (d === "Default" || /^Profile \d+$/.test(d)) out.push(join(base, d));
+  }
+  return out;
+}
+
+async function sqliteCopy(path, query) {
+  const tmp = join(tmpdir(), `finagai-${process.pid}-${Date.now()}.db`);
+  try { copyFileSync(path, tmp); return JSON.parse((await run("/usr/bin/sqlite3", ["-readonly", "-json", tmp, query], { timeout: 15_000 })).stdout || "[]"); }
+  catch { return []; } finally { try { rmSync(tmp); } catch { /* ignore */ } }
+}
+
+/** Browser history (Chromium browsers and Safari) and Chrome-family bookmarks matching the terms. */
+export async function searchBrowsers(terms) {
+  const lines = [];
+  const where = (cols) => terms.map((t) => `(${cols.map((c) => `${c} LIKE '%${t.replace(/'/g, "''")}%'`).join(" OR ")})`).join(" OR ");
+  for (const prof of chromiumProfiles()) {
+    const h = join(prof, "History");
+    if (existsSync(h)) for (const r of await sqliteCopy(h, `SELECT title, url, datetime(last_visit_time/1000000-11644473600,'unixepoch') AS at FROM urls WHERE ${where(["title", "url"])} ORDER BY last_visit_time DESC LIMIT 10`))
+      lines.push(`visited ${r.at}: ${r.title} <${r.url}>`);
+    const b = join(prof, "Bookmarks");
+    if (existsSync(b)) {
+      const walk = (n) => { if (!n) return; if (n.url && terms.some((t) => `${n.name} ${n.url}`.toLowerCase().includes(t.toLowerCase()))) lines.push(`bookmark: ${n.name} <${n.url}>`); (n.children ?? []).forEach(walk); };
+      try { Object.values(JSON.parse(readFileSync(b, "utf8")).roots ?? {}).forEach(walk); } catch { /* ignore */ }
+    }
+  }
+  const safari = join(homedir(), "Library", "Safari", "History.db");
+  if (existsSync(safari)) for (const r of await sqliteCopy(safari, `SELECT v.title AS title, i.url AS url, datetime(v.visit_time+978307200,'unixepoch') AS at FROM history_visits v JOIN history_items i ON i.id = v.history_item WHERE ${where(["v.title", "i.url"])} ORDER BY v.visit_time DESC LIMIT 10`))
+    lines.push(`visited ${r.at}: ${r.title} <${r.url}>`);
+  return [...new Set(lines)].slice(0, 25);
+}
+
+async function appleScript(lines, args, timeout = 25_000) {
+  return (await run("/usr/bin/osascript", [...lines.flatMap((l) => ["-e", l]), ...args], { timeout, maxBuffer: 8 * 1024 * 1024 })).stdout;
+}
+
+/** Apple Notes, Contacts and Calendar matches (the first use asks Julian to Allow each app once). */
+export async function searchApps(terms) {
+  const found = [];
+  for (const t of terms) {
+    const notes = await appleScript(["on run argv", "set q to item 1 of argv", "set out to \"\"",
+      'tell application "Notes"', "repeat with n in (every note whose name contains q or plaintext contains q)",
+      "set out to out & \"### \" & (name of n) & \" (\" & ((modification date of n) as string) & \")\" & linefeed & (plaintext of n) & linefeed",
+      "end repeat", "end tell", "return out", "end run"], [t]).catch(() => "");
+    if (notes.trim()) found.push({ name: `Apple Notes matching "${t}"`, text: notes });
+    const people = await appleScript(["on run argv", "set q to item 1 of argv", "set out to \"\"",
+      'tell application "Contacts"', "repeat with p in (every person whose name contains q or organization contains q)",
+      "set out to out & (name of p) & \" | phones: \" & ((value of phones of p) as string) & \" | emails: \" & ((value of emails of p) as string) & \" | addresses: \" & ((formatted address of addresses of p) as string) & linefeed",
+      "end repeat", "end tell", "return out", "end run"], [t]).catch(() => "");
+    if (people.trim()) found.push({ name: `Contacts matching "${t}"`, text: people });
+    const events = await appleScript(["on run argv", "set q to item 1 of argv", "set out to \"\"", "set d0 to (current date) - 90 * days", "set d1 to (current date) + 180 * days",
+      'tell application "Calendar"', "repeat with c in calendars", "repeat with e in (every event of c whose summary contains q and start date > d0 and start date < d1)",
+      "set out to out & (summary of e) & \" | \" & ((start date of e) as string) & \" | \" & (location of e as string) & linefeed",
+      "end repeat", "end repeat", "end tell", "return out", "end run"], [t], 40_000).catch(() => "");
+    if (events.trim()) found.push({ name: `Calendar events matching "${t}"`, text: events });
+  }
+  return found;
+}
+
+/** Everything Finagai may consult for one request: files first, then apps and browsers. */
+export async function findEverything(queries) {
+  const terms = [...new Set(queries.map(cleanTerm).filter((t) => t.length > 1))].slice(0, 3);
+  const [files, apps, browser] = await Promise.all([
+    findFiles(terms).catch(() => []), searchApps(terms).catch(() => []), searchBrowsers(terms).catch(() => []),
+  ]);
+  const extra = apps.map((a) => ({ name: a.name, path: a.name, text: scrubLocal(passage(a.text, terms)) }));
+  if (browser.length) extra.push({ name: "Browser history and bookmarks", path: "browsers", text: scrubLocal(browser.join("\n")) });
+  return [...files, ...extra];
 }
 
 // ------------------------------------------------------------------------------ I/O
@@ -235,7 +321,7 @@ async function tick(cfg, state) {
     const resp = await core(cfg, "/concierge/sync", { contacts: cfg.contacts, messages: contactMsgs, capabilities: ["files"] });
     const drafts = [...(resp.drafts ?? [])];
     for (const fr of resp.fileRequests ?? []) {
-      const files = await findFiles(fr.queries).catch(() => []);
+      const files = await findEverything(fr.queries).catch(() => []);
       log("searched files", { contact: allowed.get(fr.handle), queries: fr.queries.length, files: files.length });
       const r = await core(cfg, "/concierge/context", { handle: fr.handle, trigger: fr.trigger, files });
       drafts.push(...(r.drafts ?? []));

@@ -136,3 +136,22 @@ describe("J5 local files (ADR-046)", () => {
     expect(EXCLUDED_PATH.some((r: RegExp) => r.test("/Users/j/Documents/Trips/Bogota itinerary.pdf"))).toBe(false);
   });
 });
+
+// @ts-expect-error plain ESM helper without type declarations
+import { cleanTerm } from "../../helper/finagai-imessage.mjs";
+
+describe("J5 other personal sources (ADR-047)", () => {
+  it("cloud drives are searchable, but the same exclusions still apply inside them", () => {
+    const ok = (p: string) => !EXCLUDED_PATH.some((r: RegExp) => r.test(p));
+    expect(ok("/Users/j/Library/CloudStorage/GoogleDrive-j@gmail.com/My Drive/Trips/Miami.pdf")).toBe(true);
+    expect(ok("/Users/j/Library/Mobile Documents/com~apple~CloudDocs/Taxes/notes.txt")).toBe(true);
+    expect(ok("/Users/j/Library/CloudStorage/GoogleDrive-j@gmail.com/My Drive/passwords.txt")).toBe(false);
+    expect(ok("/Users/j/Library/Application Support/Google/Chrome/Default/Login Data")).toBe(false);
+    expect(ok("/Users/j/Library/Keychains/login.keychain-db")).toBe(false);
+  });
+  it("search terms cannot break out of SQL or AppleScript", () => {
+    expect(cleanTerm(`Kennedy' OR 1=1; --"`)).toBe("Kennedy OR 1 1 --");
+    expect(cleanTerm("Bogotá vuelos")).toBe("Bogotá vuelos");
+    expect(cleanTerm('tell app "Finder" to delete')).not.toContain('"');
+  });
+});
