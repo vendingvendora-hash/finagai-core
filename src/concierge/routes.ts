@@ -6,10 +6,11 @@
  *   POST /concierge/sync      contacts + new messages; returns drafts to show Julian
  *   POST /concierge/decision  Julian's "ok/no/edit <code>" from his own Messages thread
  *   POST /concierge/sent      the helper reports whether the approved reply went out
+ *   POST /concierge/context   passages from Julian's files that the helper found (ADR-046); returns a draft
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import type http from "node:http";
-import { decide, draftForThread, ingest, markSent, parseCommand, type J5Deps, type NewDraft, type SyncContact, type SyncMessage } from "../pipelines/j5/concierge.js";
+import { decide, draftForThread, ingest, markSent, parseCommand, processThread, type FileExcerpt, type FileRequest, type J5Deps, type NewDraft, type SyncContact, type SyncMessage } from "../pipelines/j5/concierge.js";
 
 const MAX_BODY = 512_000;
 const MAX_MESSAGES = 500;
@@ -47,15 +48,28 @@ export function createConciergeHandler(deps: J5Deps, token: string | undefined, 
         const contacts = Array.isArray(body.contacts) ? (body.contacts as SyncContact[]).slice(0, 50) : [];
         const messages = Array.isArray(body.messages) ? (body.messages as SyncMessage[]).slice(0, MAX_MESSAGES) : [];
         const touched = await ingest(deps.pool, contacts, messages);
+        const filesEnabled = body.capabilities !== undefined && Array.isArray(body.capabilities) && body.capabilities.includes("files");
         const drafts: NewDraft[] = [];
+        const fileRequests: FileRequest[] = [];
         for (const handle of touched) {
-          const d = await draftForThread(deps, handle).catch((err) => {
+          const r = await processThread({ ...deps, filesEnabled }, handle).catch((err) => {
             log("concierge draft failed", { error: err instanceof Error ? err.message.slice(0, 120) : "error" });
-            return null;
+            return {} as { draft?: NewDraft; fileRequest?: FileRequest };
           });
-          if (d) drafts.push(d);
+          if (r.draft) drafts.push(r.draft);
+          if (r.fileRequest) fileRequests.push(r.fileRequest);
         }
-        return json(res, 200, { drafts });
+        return json(res, 200, { drafts, fileRequests });
+      }
+      if (path === "/concierge/context") {
+        if (typeof body.handle !== "string" || typeof body.trigger !== "string") return json(res, 422, { error: "handle_and_trigger_required" });
+        const files = Array.isArray(body.files) ? (body.files as FileExcerpt[]).slice(0, 8) : [];
+        const d = await draftForThread(deps, body.handle, files, body.trigger).catch((err) => {
+          log("concierge draft failed", { error: err instanceof Error ? err.message.slice(0, 120) : "error" });
+          return null;
+        });
+        log("concierge drafted with files", { files: files.length, drafted: Boolean(d) });
+        return json(res, 200, { drafts: d ? [d] : [] });
       }
       if (path === "/concierge/decision") {
         const cmd = parseCommand(typeof body.text === "string" ? body.text : "");

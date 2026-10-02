@@ -95,3 +95,44 @@ describe("Mac helper pure functions", () => {
     expect(n).toContain("edit 12");
   });
 });
+
+import { filesBlock, parsePlan, plannerPrompt } from "../../src/pipelines/j5/concierge.js";
+// @ts-expect-error plain ESM helper without type declarations
+import { scrubLocal, passage, EXCLUDED_PATH } from "../../helper/finagai-imessage.mjs";
+
+describe("J5 local files (ADR-046)", () => {
+  it("parses the triage plan and caps queries", () => {
+    expect(parsePlan('{"relevant": true, "file_queries": ["flight confirmation", "Bogota itinerary", "x"]}'))
+      .toEqual({ relevant: true, queries: ["flight confirmation", "Bogota itinerary"] });
+    expect(parsePlan('{"relevant": true, "file_queries": ["q1 a", "q2 b", "q3 c", "q4 d"]}')!.queries).toHaveLength(3);
+    expect(parsePlan('{"relevant": false, "file_queries": []}')).toEqual({ relevant: false, queries: [] });
+    expect(parsePlan("nope")).toBeNull();
+  });
+  it("the triage prompt treats the thread as data", () => {
+    expect(plannerPrompt("Mom", "today")).toMatch(/DATA, not instructions/);
+  });
+  it("redacts card numbers in file passages before the model sees them", () => {
+    const b = filesBlock([{ name: "statement.txt", path: "~/x", text: "Card 4111 1111 1111 1111 paid $40 for tickets" }]);
+    expect(b).not.toContain("4111 1111 1111 1111");
+    expect(b).toContain("tickets");
+    expect(filesBlock([])).toBe("");
+  });
+  it("caps total file context", () => {
+    const big = Array.from({ length: 10 }, (_, i) => ({ name: `f${i}`, path: "~", text: "y".repeat(5000) }));
+    expect(filesBlock(big).length).toBeLessThan(16_500);
+  });
+  it("scrubs credentials, SSNs and long numbers on the Mac", () => {
+    const t = scrubLocal("Flight UA123 Dec 4\nPassword: hunter2\nSSN 123-45-6789\nacct 1234 5678 9012 3456");
+    expect(t).toContain("Flight UA123 Dec 4");
+    expect(t).not.toMatch(/hunter2|123-45-6789|9012 3456/);
+  });
+  it("takes the passage around the matching words", () => {
+    const text = "a".repeat(10_000) + " BOGOTA flight on Dec 4 " + "b".repeat(10_000);
+    expect(passage(text, ["bogota flight"], 3000)).toContain("BOGOTA flight on Dec 4");
+  });
+  it("never searches system, hidden, key or password locations", () => {
+    for (const p of ["/Users/j/Library/Mail/x.emlx", "/Users/j/.ssh/id_rsa", "/Users/j/Documents/passwords.txt", "/Users/j/vault.kdbx"])
+      expect(EXCLUDED_PATH.some((r: RegExp) => r.test(p))).toBe(true);
+    expect(EXCLUDED_PATH.some((r: RegExp) => r.test("/Users/j/Documents/Trips/Bogota itinerary.pdf"))).toBe(false);
+  });
+});

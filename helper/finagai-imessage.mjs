@@ -11,7 +11,7 @@
  * Config: ~/.finagai/imessage-helper.json (written by setup.sh, mode 600). No dependencies.
  */
 import { execFile } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -69,6 +69,74 @@ export const appleDateToIso = (d) => new Date(Number(d) / 1e6 + APPLE_EPOCH_MS).
 
 export function draftNotice(d) {
   return `${DRAFT_PREFIX} #${d.code} → ${d.label}\n${d.summary ? `(${d.summary})\n` : ""}\n${d.body}\n\nReply “ok ${d.code}” to send, “no ${d.code}” to discard, or “edit ${d.code} <your text>”.`;
+}
+
+// ------------------------------------------------------------------------------ local files (ADR-046)
+
+/** Never searched or read, whatever Spotlight returns. */
+export const EXCLUDED_PATH = [/\/Library\//, /\/\.[^/]+\//, /node_modules/, /\/Applications\//, /keychain/i, /password/i, /\bpasswords?\b/i,
+  /\.ssh/, /\.gnupg/, /\/\.Trash\//, /\.(key|pem|p12|kdbx|keychain-db|sqlite|db)$/i, /finagai-core\//];
+const TEXT_EXT = /\.(txt|md|markdown|csv|tsv|json|eml|ics|vcf|log|xml|yaml|yml)$/i;
+const TEXTUTIL_EXT = /\.(rtf|rtfd|doc|docx|odt|html?|webarchive)$/i;
+const PDF_EXT = /\.pdf$/i;
+const MAX_FILES = 6;
+const EXCERPT = 3000;
+
+/** Remove obvious secrets before anything leaves the Mac (Core redacts again before the model). */
+export function scrubLocal(text) {
+  return String(text)
+    .replace(/^.*\b(pass(word|code)?|pwd|pin|secret|api[_ -]?key|token)\b.*$/gim, "[line removed: credential]")
+    .replace(/\b\d{3}-\d{2}-\d{4}\b/g, "[redacted SSN]")
+    .replace(/\b(?:\d[ -]?){13,19}\b/g, "[redacted number]");
+}
+
+/** The passage around the first matching query word, so the model sees the relevant part. */
+export function passage(text, queries, size = EXCERPT) {
+  const t = String(text).replace(/\r/g, "");
+  if (t.length <= size) return t;
+  const lower = t.toLowerCase();
+  const words = queries.flatMap((q) => q.toLowerCase().split(/\s+/)).filter((w) => w.length > 2);
+  let at = -1;
+  for (const w of words) { at = lower.indexOf(w); if (at >= 0) break; }
+  const start = Math.max(0, (at < 0 ? 0 : at) - Math.floor(size / 3));
+  return t.slice(start, start + size);
+}
+
+async function extractText(path) {
+  try {
+    if (TEXT_EXT.test(path)) return readFileSync(path, "utf8").slice(0, 200_000);
+    if (TEXTUTIL_EXT.test(path)) return (await run("/usr/bin/textutil", ["-convert", "txt", "-stdout", path], { maxBuffer: 16 * 1024 * 1024, timeout: 20_000 })).stdout;
+    if (PDF_EXT.test(path)) {
+      const js = "ObjC.import('PDFKit');function run(a){var d=$.PDFDocument.alloc.initWithURL($.NSURL.fileURLWithPath(a[0]));if(!d||d.isNil())return '';var s=d.string;return s&&!s.isNil()?ObjC.unwrap(s).slice(0,200000):''}";
+      return (await run("/usr/bin/osascript", ["-l", "JavaScript", "-e", js, path], { maxBuffer: 16 * 1024 * 1024, timeout: 30_000 })).stdout;
+    }
+  } catch { /* unreadable: fall back to the name only */ }
+  return "";
+}
+
+/** Spotlight search across Julian's home folder; best files first (matches across queries, then recency). */
+export async function findFiles(queries) {
+  const hits = new Map();
+  for (const q of queries.slice(0, 3)) {
+    const out = await run("/usr/bin/mdfind", ["-onlyin", homedir(), q], { maxBuffer: 8 * 1024 * 1024, timeout: 20_000 }).then((r) => r.stdout).catch(() => "");
+    for (const p of out.split("\n").filter(Boolean).slice(0, 300)) {
+      if (EXCLUDED_PATH.some((r) => r.test(p))) continue;
+      hits.set(p, (hits.get(p) ?? 0) + 1);
+    }
+  }
+  const ranked = [];
+  for (const [p, n] of hits) {
+    try { const st = statSync(p); if (st.isFile() && st.size < 25 * 1024 * 1024) ranked.push({ p, n, m: st.mtimeMs }); } catch { /* gone */ }
+  }
+  ranked.sort((a, b) => b.n - a.n || b.m - a.m);
+  const files = [];
+  for (const { p, m } of ranked.slice(0, MAX_FILES)) {
+    const name = p.split("/").pop();
+    const text = await extractText(p);
+    files.push({ name, path: p.replace(homedir(), "~"), modified: new Date(m).toISOString(),
+      text: scrubLocal(text ? passage(text, queries) : `(file found, contents not readable as text: ${name})`) });
+  }
+  return files;
 }
 
 // ------------------------------------------------------------------------------ I/O
@@ -164,8 +232,15 @@ async function tick(cfg, state) {
   state.lastRowId = Math.max(...rows.map((r) => Number(r.rowid)));
 
   if (contactMsgs.length) {
-    const { drafts } = await core(cfg, "/concierge/sync", { contacts: cfg.contacts, messages: contactMsgs });
-    for (const d of drafts ?? []) {
+    const resp = await core(cfg, "/concierge/sync", { contacts: cfg.contacts, messages: contactMsgs, capabilities: ["files"] });
+    const drafts = [...(resp.drafts ?? [])];
+    for (const fr of resp.fileRequests ?? []) {
+      const files = await findFiles(fr.queries).catch(() => []);
+      log("searched files", { contact: allowed.get(fr.handle), queries: fr.queries.length, files: files.length });
+      const r = await core(cfg, "/concierge/context", { handle: fr.handle, trigger: fr.trigger, files });
+      drafts.push(...(r.drafts ?? []));
+    }
+    for (const d of drafts) {
       await sendIMessage(cfg.selfHandles[0], draftNotice(d));
       log("draft shown to Julian", { code: d.code, contact: d.label });
     }

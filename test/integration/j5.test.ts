@@ -6,7 +6,7 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { createPool } from "../../src/db/index.js";
 import type { ModelRequest, ModelResult } from "../../src/llm/types.js";
-import { decide, draftForThread, ingest, markSent, parseCommand, type J5Deps } from "../../src/pipelines/j5/concierge.js";
+import { decide, draftForThread, ingest, markSent, parseCommand, processThread, type J5Deps } from "../../src/pipelines/j5/concierge.js";
 
 const url = process.env.INTEGRATION_DATABASE_URL;
 const pool = url ? createPool(url) : undefined;
@@ -83,6 +83,35 @@ describe.skipIf(!pool)("J5 concierge", () => {
     const r = await decide(pool!, parseCommand(`edit ${d2!.code} babe, Sunday seats are cheaper, sending links`)!);
     expect(r).toMatchObject({ status: "send", handle: BF.handle, body: "babe, Sunday seats are cheaper, sending links" });
     expect(await decide(pool!, parseCommand("no 999999")!)).toEqual({ status: "not_found" });
+  });
+
+  it("triage asks the Mac for files, then drafts with the passages; a newer message cancels the stale lookup", async () => {
+    const DEN = { handle: "+12403755293", label: "Denis" };
+    await ingest(pool!, [MOM, BF, DEN], [msg("d1", DEN.handle, false, "when was that thing we booked for november?", "2026-10-02T18:00:00Z")]);
+    const calls: ModelRequest[] = [];
+    const model = { async complete(req: ModelRequest): Promise<ModelResult> {
+      calls.push(req);
+      const verdict = req.step === "triage" ? { relevant: true, file_queries: ["november booking", "confirmation"] }
+        : { relevant: true, reply: "It's Nov 14, the Kennedy Center 🎭", summary: "found booking", notes_update: "" };
+      return { text: JSON.stringify(verdict), model: req.model, stopReason: "end_turn", costUsd: 0.01, retries: 0, latencyMs: 1,
+        usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } };
+    } };
+    const d = { ...deps(new ScriptedModel({})), model, filesEnabled: true };
+    const r = await processThread(d, DEN.handle);
+    expect(r.fileRequest).toEqual({ handle: DEN.handle, trigger: "d1", queries: ["november booking", "confirmation"] });
+    expect(r.draft).toBeUndefined();
+    const draft = await draftForThread(d, DEN.handle, [{ name: "KC confirmation.pdf", path: "~/Documents", text: "Kennedy Center, Nov 14, 2 seats. Card 4111 1111 1111 1111" }], "d1");
+    expect(draft?.body).toContain("Nov 14");
+    const sent = calls[calls.length - 1]!.messages[0]!.content;
+    expect(sent).toContain("Kennedy Center, Nov 14");
+    expect(sent).not.toContain("4111 1111 1111 1111");
+    // Stale trigger: a newer message arrived, so the old lookup must not draft.
+    await ingest(pool!, [MOM, BF, DEN], [msg("d2", DEN.handle, false, "nvm found it", "2026-10-02T18:05:00Z")]);
+    expect(await draftForThread(d, DEN.handle, [], "d1")).toBeNull();
+    // Without file support the triage goes straight to drafting.
+    await ingest(pool!, [MOM, BF, DEN], [msg("d3", DEN.handle, false, "also what's the weather saturday?", "2026-10-02T18:10:00Z")]);
+    const r2 = await processThread({ ...d, filesEnabled: false }, DEN.handle);
+    expect(r2.draft).toBeDefined();
   });
 
   it("the app role cannot delete concierge history", async () => {
