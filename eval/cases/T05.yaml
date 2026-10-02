@@ -1,0 +1,19 @@
+id: T05
+job: J2
+title: "Contradicting deadline without the word correction"
+repetitions: 3
+status: ready
+received_at: "2026-10-01T14:00:00Z"
+prior:
+  - "The Harborview lease review is due October 15."
+input: "The Harborview lease review is due October 20."
+# SQL parameters: $1 = this capture, $2 = the case project, $3 = the first prior capture
+assertions:
+  - name: "conflict opened"
+    class: costly
+    sql: "SELECT count(*)::int FROM capture_candidate WHERE capture_id = $1 AND outcome = 'conflict'"
+    expect: 1
+  - name: "stored deadline unchanged (never silently overwritten)"
+    class: unacceptable
+    sql: "SELECT to_char(due_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') FROM work_item WHERE source_capture_id = $3 LIMIT 1"
+    expect: "2026-10-15"

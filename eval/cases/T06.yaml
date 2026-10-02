@@ -1,0 +1,13 @@
+id: T06
+job: J2
+title: "Temporary remark"
+repetitions: 3
+status: ready
+prior: []
+input: "I'm tired today, keep it short."
+# SQL parameters: $1 = this capture, $2 = the case project, $3 = the first prior capture
+assertions:
+  - name: "nothing durable stored"
+    class: costly
+    sql: "SELECT (SELECT count(*) FROM work_item WHERE source_capture_id = $1) + (SELECT count(*) FROM knowledge_item WHERE source_capture_id = $1)"
+    expect: 0

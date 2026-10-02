@@ -1,0 +1,18 @@
+id: T07
+job: J2
+title: "Restated existing task"
+repetitions: 3
+status: ready
+prior:
+  - "I need to call the owner of Copper Kettle Tavern."
+input: "Remember I still have to call the Copper Kettle Tavern owner."
+# SQL parameters: $1 = this capture, $2 = the case project, $3 = the first prior capture
+assertions:
+  - name: "no new task row"
+    class: costly
+    sql: "SELECT count(*)::int FROM work_item WHERE source_capture_id = $1"
+    expect: 0
+  - name: "recorded as duplicate"
+    class: cheap
+    sql: "SELECT count(*)::int FROM capture_candidate WHERE capture_id = $1 AND outcome = 'duplicate'"
+    expect: 1

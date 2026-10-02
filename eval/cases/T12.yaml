@@ -1,0 +1,14 @@
+id: T12
+job: J3
+title: "One overdue task"
+repetitions: 3
+status: ready
+# Times are relative to the fixed review moment NOW = 2026-10-12T11:00:00Z (Monday 07:00 New York).
+fixtures:
+  - "INSERT INTO project (id, name, priority, last_activity_at) VALUES ('00000000-0000-4000-8000-000000000001', 'Vendora compliance', 1, '{{NOW-1d}}')"
+  - "INSERT INTO work_item (id, project_id, kind, title, due_at, due_precision, due_owner, origin) VALUES ('00000000-0000-4000-8000-000000000021', '00000000-0000-4000-8000-000000000001', 'task', 'File county vending permit renewal', '{{NOW-2d}}', 'day', 'finagai', 'user_stated')"
+assertions:
+  - type: section_contains
+    section: "Requires attention"
+    id: "00000000-0000-4000-8000-000000000021"
+    class: unacceptable

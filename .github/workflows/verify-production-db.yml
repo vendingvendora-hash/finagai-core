@@ -1,0 +1,17 @@
+name: verify-production-db
+# Manual GATE 4 check: schema protections against the real Neon database as finagai_app, in a
+# transaction that is always rolled back. Uses the environment secret APP_DATABASE_URL.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y -q postgresql-client >/dev/null
+      - run: bash scripts/verify-production-db.sh | tee verify.log && ! grep -q "FAIL\|ERROR" verify.log
+        env:
+          APP_DATABASE_URL: ${{ secrets.APP_DATABASE_URL }}

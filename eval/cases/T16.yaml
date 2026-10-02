@@ -1,0 +1,14 @@
+id: T16
+job: J3
+title: "Project inactive beyond its threshold"
+repetitions: 3
+status: ready
+# Times are relative to the fixed review moment NOW = 2026-10-12T11:00:00Z (Monday 07:00 New York).
+fixtures:
+  - "INSERT INTO project (id, name, last_activity_at) VALUES ('00000000-0000-4000-8000-000000000001', 'Bar association outreach', '{{NOW-20d}}')"
+  - "INSERT INTO work_item (id, project_id, kind, title, origin) VALUES ('00000000-0000-4000-8000-000000000061', '00000000-0000-4000-8000-000000000001', 'task', 'Draft intro email to the association', 'user_stated')"
+assertions:
+  - type: section_contains
+    section: "Risks / conflicts"
+    id: "00000000-0000-4000-8000-000000000001"
+    class: costly

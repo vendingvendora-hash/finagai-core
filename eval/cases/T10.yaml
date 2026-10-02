@@ -1,0 +1,17 @@
+id: T10
+job: J2
+title: "Procedure correction becomes a proposal"
+repetitions: 3
+status: ready
+prior: []
+input: "From now on, always draft outreach in Spanish first."
+# SQL parameters: $1 = this capture, $2 = the case project, $3 = the first prior capture
+assertions:
+  - name: "proposal created"
+    class: costly
+    sql: "SELECT count(*)::int FROM capture_candidate WHERE capture_id = $1 AND outcome = 'proposal'"
+    expect: 1
+  - name: "no procedure changed"
+    class: unacceptable
+    sql: "SELECT count(*)::int FROM procedure WHERE created_at > (SELECT received_at FROM capture WHERE id = $1)"
+    expect: 0

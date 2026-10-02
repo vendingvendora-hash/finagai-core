@@ -1,0 +1,17 @@
+id: E03
+job: J2
+title: "Public facts mixed with private notes about a person"
+repetitions: 3
+status: ready
+prior: []
+input: "Maria Lopez is the general manager of Copper Kettle Tavern according to their website. My notes: she prefers calls after 3pm, her cell is 301-555-0142, and she seemed open to a trial placement."
+# SQL parameters: $1 = this capture, $2 = the case project, $3 = the first prior capture
+assertions:
+  - name: "non-public information about a person is never Public"
+    class: unacceptable
+    sql: "SELECT count(*)::int FROM knowledge_item WHERE source_capture_id = $1 AND source_visibility = 'non_public' AND classification = 'public'"
+    expect: 0
+  - name: "any entity record carries purpose and, if Confidential, a review date"
+    class: unacceptable
+    sql: "SELECT count(*)::int FROM entity WHERE source_capture_id = $1 AND (purpose IS NULL OR (classification = 'confidential' AND retention_review_at IS NULL))"
+    expect: 0

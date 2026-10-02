@@ -1,0 +1,22 @@
+id: T03
+job: J2
+title: "New task with deadline, Spanish"
+repetitions: 3
+status: ready
+received_at: "2026-10-01T14:00:00Z"
+prior: []
+input: "Tengo que enviar la propuesta a The Rustic Bar antes del viernes 9 de octubre."
+# SQL parameters: $1 = this capture, $2 = the case project, $3 = the first prior capture
+assertions:
+  - name: "one task created"
+    class: costly
+    sql: "SELECT count(*)::int FROM work_item WHERE source_capture_id = $1 AND kind IN ('task','deadline')"
+    expect: 1
+  - name: "due date verified by code: Oct 9 in New York"
+    class: unacceptable
+    sql: "SELECT to_char(due_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') FROM work_item WHERE source_capture_id = $1 LIMIT 1"
+    expect: "2026-10-09"
+  - name: "assigned to the hinted project"
+    class: costly
+    sql: "SELECT count(*)::int FROM work_item WHERE source_capture_id = $1 AND project_id = $2"
+    expect: 1

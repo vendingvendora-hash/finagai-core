@@ -1,0 +1,24 @@
+name: migrate
+# Manual only. Applies migrations to Neon using the finagai_migrator connection string stored as the
+# repository secret MIGRATOR_DATABASE_URL. The secret is never echoed.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "apply" to run migrations against the production database'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    if: github.event.inputs.confirm == 'apply'
+    runs-on: ubuntu-latest
+    environment: production   # configure a required reviewer (Julian) on this environment
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y -q postgresql-client >/dev/null
+      - run: bash scripts/migrate.sh
+        env:
+          MIGRATOR_DATABASE_URL: ${{ secrets.MIGRATOR_DATABASE_URL }}

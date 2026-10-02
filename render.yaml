@@ -1,0 +1,47 @@
+# Render Blueprint for Finagai Core (ADR-027). REFERENCE ONLY: `npm run provision` creates the same
+# services and environment group through the Render API (ADR-041) and writes every secret directly.
+# Render does not allow `sync: false` inside an environment group, so secrets are not declared here;
+# the bootstrapper sets DATABASE_URL, ANTHROPIC_API_KEY, APPROVAL_CLIENT_SECRET, RESEND_API_KEY and
+# SESSION_SECRET, plus the identity values below, via the API. The migration role is never on Render.
+envVarGroups:
+  - name: finagai-core
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
+      - key: FINAGAI_TIMEZONE
+        value: America/New_York
+      - key: ALLOWED_MCP_CLIENT_IDS        # empty until Claude's client ID is observed and pinned
+        value: ""
+      - key: MODEL_BUDGET_TARGET_USD_MONTH
+        value: "30"
+      - key: MODEL_HARD_CEILING_USD_MONTH  # raised only by Julian
+        value: "36"
+      - key: MAX_DEFERRED_CAPTURES
+        value: "200"
+
+services:
+  - type: web
+    name: finagai-core
+    runtime: node
+    plan: starter
+    region: virginia
+    # --include=dev: NODE_ENV=production would otherwise skip TypeScript and the build would fail.
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: node dist/src/server/index.js
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - fromGroup: finagai-core
+
+  - type: cron
+    name: finagai-scheduler
+    runtime: node
+    plan: starter
+    region: virginia
+    schedule: "*/15 * * * *"
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: node dist/src/jobs/scheduler.js
+    envVars:
+      - fromGroup: finagai-core

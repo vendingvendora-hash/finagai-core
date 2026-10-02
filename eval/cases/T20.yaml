@@ -1,0 +1,21 @@
+id: T20
+job: J3
+title: "New decision changes a project's next action"
+repetitions: 3
+status: ready
+# Times are relative to the fixed review moment NOW = 2026-10-12T11:00:00Z (Monday 07:00 New York).
+fixtures:
+  - "INSERT INTO project (id, name, priority, last_activity_at) VALUES ('00000000-0000-4000-8000-000000000001', 'Vendora targeting', 1, '{{NOW-1d}}')"
+  - "INSERT INTO work_item (id, project_id, kind, title, origin, created_at) VALUES ('00000000-0000-4000-8000-000000000091', '00000000-0000-4000-8000-000000000001', 'task', 'Pitch restaurants on Main Street', 'user_stated', '{{NOW-10d}}')"
+  - "INSERT INTO work_item (id, project_id, kind, title, rationale, due_at, due_precision, due_owner, priority, origin) VALUES ('00000000-0000-4000-8000-000000000092', '00000000-0000-4000-8000-000000000001', 'decision', 'Decided: target bars instead of restaurants', 'foot traffic peaks later at night', '{{NOW+1d}}', 'day', 'finagai', 1, 'user_stated')"
+assertions:
+  - type: recommendation_cites
+    id: "00000000-0000-4000-8000-000000000092"
+    class: costly
+  - type: recommendation_not_cites
+    id: "00000000-0000-4000-8000-000000000091"
+    class: costly
+  - type: rubric
+    criterion: "The recommended next actions follow the new decision rather than the superseded plan."
+    class: cheap
+    required: false  # qualitative; reported, not gating, until Julian sets a threshold

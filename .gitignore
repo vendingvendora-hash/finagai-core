@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.log
+eval/reports/local-*
+
+# Provisioning state and report (identifiers only, never secrets)
+.finagai/

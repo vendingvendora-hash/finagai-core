@@ -1,0 +1,37 @@
+name: restore-drill
+# Acceptance A6, automated monthly: restore the most recent backup into a fresh local database,
+# verify every table checksum, then run the full schema-protection suite against the restored data.
+on:
+  schedule:
+    - cron: "0 12 1 * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  drill:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version-file: .nvmrc, cache: npm }
+      - run: npm ci && npm run build
+      - name: find the latest successful backup run
+        id: latest
+        run: echo "run_id=$(gh run list --workflow backup.yml --status success --limit 1 --json databaseId -q '.[0].databaseId')" >> "$GITHUB_OUTPUT"
+        env: { GH_TOKEN: "${{ github.token }}" }
+      - uses: actions/download-artifact@v4
+        with: { name: finagai-backup, run-id: "${{ steps.latest.outputs.run_id }}", github-token: "${{ github.token }}" }
+      - name: restore into a fresh database and verify
+        env:
+          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+        run: |
+          PGBIN=$(ls -d /usr/lib/postgresql/*/bin | tail -1); W=$(mktemp -d)
+          $PGBIN/initdb -D $W/d -U postgres --auth=trust >/dev/null
+          $PGBIN/pg_ctl -D $W/d -o "-p 54390 -k $W -c listen_addresses=127.0.0.1" -l $W/log start >/dev/null
+          psql -h 127.0.0.1 -p 54390 -U postgres -q -c "CREATE ROLE finagai_migrator LOGIN; CREATE ROLE finagai_app LOGIN;" -c "CREATE DATABASE finagai OWNER finagai_migrator;"
+          MIGRATOR_DATABASE_URL="postgres://finagai_migrator@127.0.0.1:54390/finagai" bash scripts/migrate.sh
+          RESTORE_DATABASE_URL="postgres://finagai_migrator@127.0.0.1:54390/finagai" node dist/src/backup/cli.js restore $(ls *.fngb | tail -1)
+          APP_DATABASE_URL="postgres://finagai_app@127.0.0.1:54390/finagai" bash scripts/verify-production-db.sh | tee drill.log
+          ! grep -q "FAIL\|ERROR" drill.log

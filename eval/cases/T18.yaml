@@ -1,0 +1,38 @@
+id: T18
+job: J3
+title: "Many low-priority items and one important item"
+repetitions: 3
+status: ready
+# Times are relative to the fixed review moment NOW = 2026-10-12T11:00:00Z (Monday 07:00 New York).
+fixtures:
+  - "INSERT INTO project (id, name, last_activity_at) VALUES ('00000000-0000-4000-8000-000000000001', 'Admin backlog', '{{NOW-1d}}')"
+  - "INSERT INTO work_item (id, project_id, kind, title, origin) VALUES ('00000000-0000-4000-8000-000000000800', '00000000-0000-4000-8000-000000000001', 'task', 'Low priority chore 0', 'user_stated')"
+  - "INSERT INTO work_item (id, project_id, kind, title, origin) VALUES ('00000000-0000-4000-8000-000000000801', '00000000-0000-4000-8000-000000000001', 'task', 'Low priority chore 1', 'user_stated')"
+  - "INSERT INTO work_item (id, project_id, kind, title, origin) VALUES ('00000000-0000-4000-8000-000000000802', '00000000-0000-4000-8000-000000000001', 'task', 'Low priority chore 2', 'user_stated')"
+  - "INSERT INTO work_item (id, project_id, kind, title, origin) VALUES ('00000000-0000-4000-8000-000000000803', '00000000-0000-4000-8000-000000000001', 'task', 'Low priority chore 3', 'user_stated')"
+  - "INSERT INTO work_item (id, project_id, kind, title, origin) VALUES ('00000000-0000-4000-8000-000000000804', '00000000-0000-4000-8000-000000000001', 'task', 'Low priority chore 4', 'user_stated')"
+  - "INSERT INTO work_item (id, project_id, kind, title, origin) VALUES ('00000000-0000-4000-8000-000000000805', '00000000-0000-4000-8000-000000000001', 'task', 'Low priority chore 5', 'user_stated')"
+  - "INSERT INTO work_item (id, project_id, kind, title, origin) VALUES ('00000000-0000-4000-8000-000000000806', '00000000-0000-4000-8000-000000000001', 'task', 'Low priority chore 6', 'user_stated')"
+  - "INSERT INTO work_item (id, project_id, kind, title, origin) VALUES ('00000000-0000-4000-8000-000000000807', '00000000-0000-4000-8000-000000000001', 'task', 'Low priority chore 7', 'user_stated')"
+  - "INSERT INTO work_item (id, project_id, kind, title, origin) VALUES ('00000000-0000-4000-8000-000000000808', '00000000-0000-4000-8000-000000000001', 'task', 'Low priority chore 8', 'user_stated')"
+  - "INSERT INTO work_item (id, project_id, kind, title, origin) VALUES ('00000000-0000-4000-8000-000000000809', '00000000-0000-4000-8000-000000000001', 'task', 'Low priority chore 9', 'user_stated')"
+  - "INSERT INTO work_item (id, project_id, kind, title, origin) VALUES ('00000000-0000-4000-8000-000000000810', '00000000-0000-4000-8000-000000000001', 'task', 'Low priority chore 10', 'user_stated')"
+  - "INSERT INTO work_item (id, project_id, kind, title, origin) VALUES ('00000000-0000-4000-8000-000000000811', '00000000-0000-4000-8000-000000000001', 'task', 'Low priority chore 11', 'user_stated')"
+  - "INSERT INTO work_item (id, project_id, kind, title, due_at, due_precision, due_owner, priority, origin) VALUES ('00000000-0000-4000-8000-000000000081', '00000000-0000-4000-8000-000000000001', 'deadline', 'Renew business license', '{{NOW+2d}}', 'day', 'finagai', 1, 'user_stated')"
+assertions:
+  - type: section_contains
+    section: "Requires attention"
+    id: "00000000-0000-4000-8000-000000000081"
+    class: unacceptable
+  - type: section_order
+    before: "Requires attention"
+    after: "Lower priority / FYI"
+    class: costly
+  - type: section_not_contains
+    section: "Requires attention"
+    id: "00000000-0000-4000-8000-000000000800"
+    class: cheap
+  - type: rubric
+    criterion: "The single important item stands out; low-priority chores do not crowd it out."
+    class: cheap
+    required: false  # qualitative; reported, not gating, until Julian sets a threshold

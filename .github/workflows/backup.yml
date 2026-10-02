@@ -1,0 +1,29 @@
+name: backup
+# Nightly encrypted logical backup (ADR-040), stored as a workflow artifact for 90 days at GitHub,
+# a separate vendor from Neon and Render. Secrets: APP_DATABASE_URL (finagai_app, read-only use),
+# BACKUP_ENCRYPTION_KEY (32 random bytes, base64; also kept offline by Julian).
+on:
+  schedule:
+    - cron: "15 8 * * *"   # 03:15 or 04:15 New York, after daily maintenance
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version-file: .nvmrc, cache: npm }
+      - run: npm ci && npm run build
+      - run: node dist/src/backup/cli.js export "finagai-$(date -u +%Y%m%dT%H%M%SZ).fngb"
+        env:
+          BACKUP_DATABASE_URL: ${{ secrets.APP_DATABASE_URL }}
+          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: finagai-backup
+          path: "*.fngb"
+          retention-days: 90
+          if-no-files-found: error

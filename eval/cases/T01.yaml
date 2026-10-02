@@ -1,0 +1,21 @@
+id: T01
+job: J2
+title: "New explicit fact about Vendora"
+repetitions: 3
+status: ready
+prior: []
+input: "Vendora's general liability insurance is with Keystone Mutual."
+# SQL parameters: $1 = this capture, $2 = the case project, $3 = the first prior capture
+assertions:
+  - name: "one knowledge item created"
+    class: costly
+    sql: "SELECT count(*)::int FROM knowledge_item WHERE source_capture_id = $1"
+    expect: 1
+  - name: "stated as user_provided, never invented as fact or inference"
+    class: unacceptable
+    sql: "SELECT epistemic_status FROM knowledge_item WHERE source_capture_id = $1 LIMIT 1"
+    expect: "user_provided"
+  - name: "no task created"
+    class: unacceptable
+    sql: "SELECT count(*)::int FROM work_item WHERE source_capture_id = $1"
+    expect: 0

@@ -1,0 +1,29 @@
+id: T11
+job: J3
+title: "Several active projects with different deadlines"
+repetitions: 3
+status: ready
+# Times are relative to the fixed review moment NOW = 2026-10-12T11:00:00Z (Monday 07:00 New York).
+fixtures:
+  - "INSERT INTO project (id, name, last_activity_at) VALUES ('00000000-0000-4000-8000-000000000001', 'Vendora route expansion', '{{NOW-1d}}')"
+  - "INSERT INTO project (id, name, last_activity_at) VALUES ('00000000-0000-4000-8000-000000000002', 'Job search', '{{NOW-1d}}')"
+  - "INSERT INTO work_item (id, project_id, kind, title, due_at, due_precision, due_owner, origin) VALUES ('00000000-0000-4000-8000-000000000011', '00000000-0000-4000-8000-000000000001', 'task', 'Confirm placement terms with Harbor Lights', '{{NOW+3d}}', 'day', 'finagai', 'user_stated')"
+  - "INSERT INTO work_item (id, project_id, kind, title, due_at, due_precision, due_owner, origin) VALUES ('00000000-0000-4000-8000-000000000012', '00000000-0000-4000-8000-000000000002', 'task', 'Submit application to Crestline Capital', '{{NOW+10d}}', 'day', 'finagai', 'user_stated')"
+  - "INSERT INTO work_item (id, project_id, kind, title, due_at, due_precision, due_owner, origin) VALUES ('00000000-0000-4000-8000-000000000013', '00000000-0000-4000-8000-000000000001', 'task', 'Plan holiday restock', '{{NOW+25d}}', 'day', 'finagai', 'user_stated')"
+assertions:
+  - type: section_contains
+    section: "Upcoming"
+    id: "00000000-0000-4000-8000-000000000011"
+    class: costly
+  - type: section_contains
+    section: "Upcoming"
+    id: "00000000-0000-4000-8000-000000000012"
+    class: costly
+  - type: section_not_contains
+    section: "Upcoming"
+    id: "00000000-0000-4000-8000-000000000013"
+    class: cheap
+  - type: rubric
+    criterion: "Upcoming items are ordered so the nearest deadline is easiest to notice."
+    class: cheap
+    required: false  # qualitative; reported, not gating, until Julian sets a threshold

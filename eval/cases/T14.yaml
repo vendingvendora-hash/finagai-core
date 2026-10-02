@@ -1,0 +1,14 @@
+id: T14
+job: J3
+title: "Item waiting on another person"
+repetitions: 3
+status: ready
+# Times are relative to the fixed review moment NOW = 2026-10-12T11:00:00Z (Monday 07:00 New York).
+fixtures:
+  - "INSERT INTO project (id, name, last_activity_at) VALUES ('00000000-0000-4000-8000-000000000001', 'Vendora supplier', '{{NOW-1d}}')"
+  - "INSERT INTO work_item (id, project_id, kind, title, status, origin, updated_at) VALUES ('00000000-0000-4000-8000-000000000041', '00000000-0000-4000-8000-000000000001', 'task', 'Supplier quote for snack restock', 'waiting', 'user_stated', '{{NOW-9d}}')"
+assertions:
+  - type: section_contains
+    section: "Waiting / follow-up"
+    id: "00000000-0000-4000-8000-000000000041"
+    class: costly

@@ -1,0 +1,17 @@
+id: T04
+job: J2
+title: "Decision with rationale"
+repetitions: 3
+status: ready
+prior: []
+input: "We decided to target bars instead of restaurants because foot traffic peaks later at night."
+# SQL parameters: $1 = this capture, $2 = the case project, $3 = the first prior capture
+assertions:
+  - name: "one decision"
+    class: costly
+    sql: "SELECT count(*)::int FROM work_item WHERE source_capture_id = $1 AND kind = 'decision'"
+    expect: 1
+  - name: "rationale stored"
+    class: costly
+    sql: "SELECT (rationale IS NOT NULL AND length(rationale) > 5) FROM work_item WHERE source_capture_id = $1 AND kind = 'decision' LIMIT 1"
+    expect: true

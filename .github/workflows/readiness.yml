@@ -1,0 +1,51 @@
+name: readiness
+# ONE CLICK after provisioning: runs every automatable REAL-DATA READY check and uploads one report.
+#   Gate 3 (automatable part): smoke test of the deployed service and its identity provider
+#   Gate 4: schema protections against Neon as finagai_app (rolled back), no DELETE, app role in use
+#   Gate 1: real-model J2 evaluation (T01-T10, E01, E03 x3); plus the J3 evaluation (T11-T20 x3)
+# Variables (non-secret): FINAGAI_BASE_URL, OAUTH_ISSUER. Secrets: APP_DATABASE_URL, ANTHROPIC_EVAL_API_KEY.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  readiness:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version-file: .nvmrc, cache: npm }
+      - run: npm ci && npm run build
+      - name: gate 3 (automated part) - deployed service smoke test
+        id: smoke
+        continue-on-error: true
+        run: bash scripts/smoke-deployed.sh "${{ vars.FINAGAI_BASE_URL }}" "${{ vars.OAUTH_ISSUER }}" | tee smoke.log
+      - name: gate 4 - production database protections
+        id: db
+        continue-on-error: true
+        run: bash scripts/verify-production-db.sh | tee db.log && ! grep -q "FAIL\|ERROR" db.log
+        env: { APP_DATABASE_URL: "${{ secrets.APP_DATABASE_URL }}" }
+      - name: gate 1 - real-model J2 evaluation
+        id: j2
+        continue-on-error: true
+        run: bash scripts/eval-j2.sh | tee j2.log
+        env: { ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_EVAL_API_KEY }}" }
+      - name: J3 real-model evaluation
+        id: j3
+        continue-on-error: true
+        run: bash scripts/eval-j3.sh | tee j3.log
+        env: { ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_EVAL_API_KEY }}", EVAL_MAX_SPEND_USD: "5" }
+      - name: summary
+        run: |
+          { echo "## Finagai readiness"; echo
+            echo "| Check | Result |"; echo "| --- | --- |"
+            echo "| Gate 3 smoke (deployed service + identity provider) | ${{ steps.smoke.outcome }} |"
+            echo "| Gate 4 production database protections | ${{ steps.db.outcome }} |"
+            echo "| Gate 1 real-model J2 evaluation | ${{ steps.j2.outcome }} |"
+            echo "| J3 real-model evaluation | ${{ steps.j3.outcome }} |"; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: readiness-report, path: "*.log\neval/reports/*.json", retention-days: 90 }
+      - name: fail unless every gate passed
+        run: test "${{ steps.smoke.outcome }}${{ steps.db.outcome }}${{ steps.j2.outcome }}${{ steps.j3.outcome }}" = "successsuccesssuccesssuccess"

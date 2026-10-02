@@ -1,0 +1,14 @@
+id: T17
+job: J3
+title: "High-impact deadline in five days"
+repetitions: 3
+status: ready
+# Times are relative to the fixed review moment NOW = 2026-10-12T11:00:00Z (Monday 07:00 New York).
+fixtures:
+  - "INSERT INTO project (id, name, priority, last_activity_at) VALUES ('00000000-0000-4000-8000-000000000001', 'Vendora insurance', 1, '{{NOW-1d}}')"
+  - "INSERT INTO work_item (id, project_id, kind, title, due_at, due_precision, due_owner, origin) VALUES ('00000000-0000-4000-8000-000000000071', '00000000-0000-4000-8000-000000000001', 'deadline', 'Sign insurance binder', '{{NOW+5d}}', 'day', 'finagai', 'user_stated')"
+assertions:
+  - type: section_contains
+    section: "Requires attention"
+    id: "00000000-0000-4000-8000-000000000071"
+    class: unacceptable

@@ -1,0 +1,14 @@
+id: T19
+job: J3
+title: "No meaningful changes"
+repetitions: 3
+status: ready
+# Times are relative to the fixed review moment NOW = 2026-10-12T11:00:00Z (Monday 07:00 New York).
+fixtures: []
+assertions:
+  - type: rendered_contains
+    text: "Nothing material changed"
+    class: costly
+  - type: max_lines
+    lines: 8
+    class: cheap

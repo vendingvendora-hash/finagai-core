@@ -1,0 +1,21 @@
+id: T08
+job: J2
+title: "Fact plus inference"
+repetitions: 3
+status: ready
+prior: []
+input: "Bar Q's owner didn't reply to my two emails; I think they're not interested."
+# SQL parameters: $1 = this capture, $2 = the case project, $3 = the first prior capture
+assertions:
+  - name: "inference stored as inference"
+    class: unacceptable
+    sql: "SELECT count(*)::int FROM knowledge_item WHERE source_capture_id = $1 AND epistemic_status IN ('inference','hypothesis')"
+    expect: 1
+  - name: "fact stored as user_provided"
+    class: costly
+    sql: "SELECT count(*)::int FROM knowledge_item WHERE source_capture_id = $1 AND epistemic_status = 'user_provided'"
+    expect: 1
+  - name: "no task invented"
+    class: unacceptable
+    sql: "SELECT count(*)::int FROM work_item WHERE source_capture_id = $1"
+    expect: 0

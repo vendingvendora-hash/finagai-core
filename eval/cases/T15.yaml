@@ -1,0 +1,21 @@
+id: T15
+job: J3
+title: "Open conflict on a deadline"
+repetitions: 3
+status: ready
+# Times are relative to the fixed review moment NOW = 2026-10-12T11:00:00Z (Monday 07:00 New York).
+fixtures:
+  - "INSERT INTO project (id, name, priority, last_activity_at) VALUES ('00000000-0000-4000-8000-000000000001', 'Harborview lease', 1, '{{NOW-1d}}')"
+  - "INSERT INTO work_item (id, project_id, kind, title, due_at, due_precision, due_owner, origin, disputed) VALUES ('00000000-0000-4000-8000-000000000051', '00000000-0000-4000-8000-000000000001', 'deadline', 'Harborview lease review', '{{NOW+3d}}', 'day', 'finagai', 'user_stated', true)"
+  - "INSERT INTO capture (id, idempotency_key, client, mode, source_type, source_text, sanitized_at, status, pipeline_version) VALUES ('00000000-0000-4000-8000-000000000052', 'eval-t15', 'eval', 'eval', 'note', 'x', now(), 'processed', 't')"
+  - "INSERT INTO capture_candidate (id, capture_id, item_type, payload, source_quote, outcome) VALUES ('00000000-0000-4000-8000-000000000053', '00000000-0000-4000-8000-000000000052', 'deadline', '{}', 'x', 'conflict')"
+  - "INSERT INTO conflict (id, existing_type, existing_id, candidate_id, field, explanation) VALUES ('00000000-0000-4000-8000-000000000054', 'work_item', '00000000-0000-4000-8000-000000000051', '00000000-0000-4000-8000-000000000053', 'due_at', 'two different due dates')"
+assertions:
+  - type: section_contains
+    section: "Risks / conflicts"
+    id: "00000000-0000-4000-8000-000000000054"
+    class: unacceptable
+  - type: recommendation_requires_with
+    id: "00000000-0000-4000-8000-000000000051"
+    with: "00000000-0000-4000-8000-000000000054"
+    class: unacceptable

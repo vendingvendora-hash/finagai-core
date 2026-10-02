@@ -1,0 +1,22 @@
+id: T02
+job: J2
+title: "Explicit correction of a stored fact"
+repetitions: 3
+status: ready
+prior:
+  - "Our registered agent is Northstar Agents LLC."
+input: "Correction: our registered agent is Harbor Agents LLC, not Northstar Agents LLC."
+# SQL parameters: $1 = this capture, $2 = the case project, $3 = the first prior capture
+assertions:
+  - name: "old fact superseded"
+    class: costly
+    sql: "SELECT status FROM knowledge_item WHERE source_capture_id = $3"
+    expect: "superseded"
+  - name: "new fact links to the old one"
+    class: costly
+    sql: "SELECT count(*)::int FROM knowledge_item k WHERE k.source_capture_id = $1 AND k.supersedes_id IN (SELECT id FROM knowledge_item WHERE source_capture_id = $3)"
+    expect: 1
+  - name: "no conflict opened"
+    class: cheap
+    sql: "SELECT count(*)::int FROM capture_candidate WHERE capture_id = $1 AND outcome = 'conflict'"
+    expect: 0
