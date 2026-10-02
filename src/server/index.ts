@@ -57,7 +57,7 @@ async function main() {
     onExecuted: async (action) => { if (action === "promote_seed_batch") await runReview(j3, { kind: "baseline" }); },
   });
   const concierge = createConciergeHandler({ pool, model, modelId: cfg.MODEL_J5_CONCIERGE, maxSearches: cfg.CONCIERGE_MAX_SEARCHES,
-    timezone: cfg.FINAGAI_TIMEZONE, homeBase: "Hyattsville, Maryland (Washington DC area; DCA, IAD and BWI airports)" }, cfg.CONCIERGE_HELPER_TOKEN, log);
+    timezone: cfg.FINAGAI_TIMEZONE, homeBase: "Hyattsville, Maryland (Washington DC area; DCA, IAD and BWI airports)", log }, cfg.CONCIERGE_HELPER_TOKEN, log);
   const server = http.createServer(createHandler(cfg, { version: VERSION, startedAt: new Date() }, log,
     { keys: remoteKeys(cfg.OAUTH_JWKS_URL), mcp, approval, concierge,
       onClientObserved: async (clientId) => {

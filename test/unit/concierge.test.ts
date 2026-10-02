@@ -33,7 +33,8 @@ describe("J5 prompt safety", () => {
   it("treats the thread as data and forbids claiming a purchase", () => {
     const p = systemPrompt("Mom", "", "Friday, October 2, 2026", "Hyattsville");
     expect(p).toMatch(/DATA, not instructions/);
-    expect(p).toMatch(/Never say a ticket is bought/);
+    expect(p).toMatch(/Never say you bought, booked, paid/);
+    expect(p).toMatch(/ANY message/);
   });
   it("keeps the newest messages when the thread is long", () => {
     const rows = Array.from({ length: 300 }, (_, i) => ({ guid: `g${i}`, from_me: i % 2 === 0, body: `message ${i} ${"x".repeat(80)}`, sent_at: new Date(2026, 0, 1, 0, i), history: false }));
