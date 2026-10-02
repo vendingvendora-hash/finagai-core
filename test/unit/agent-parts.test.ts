@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { scanDiff } from "../../src/agent/secretScan.js";
 import { verifyCompletion } from "../../src/agent/verify.js";
-import { childEnv } from "../../src/agent/launch.js";
+import { chargeFor, childEnv, fatalApiProblem } from "../../src/agent/launch.js";
+import { writeFileSync } from "node:fs";
 import { AgentStateFile } from "../../src/agent/state.js";
 import { loadAgentConfig } from "../../src/agent/config.js";
 import { Secret } from "../../src/provision/secret.js";
@@ -54,5 +55,27 @@ describe("runtime environment and state", () => {
   it("has bounded defaults and honors explicit limits", () => {
     expect(loadAgentConfig({})).toMatchObject({ model: "claude-opus-5-5", maxTotalUsd: 60, maxIterations: 30, browser: true, sandbox: true });
     expect(loadAgentConfig({ FINAGAI_AGENT_MAX_USD: "15", FINAGAI_AGENT_BROWSER: "off", FINAGAI_AGENT_MAX_USD_BAD: "x" })).toMatchObject({ maxTotalUsd: 15, browser: false });
+  });
+});
+
+describe("builder spend accounting and stop conditions", () => {
+  it("charges only the increase in a resumed session's cumulative cost", () => {
+    let session = 0, total = 0;
+    for (const reported of [1.2926, 1.2926, 1.2926, 2.5]) { const c = chargeFor(session, reported); session = c.session; total += c.delta; }
+    expect(total).toBeCloseTo(2.5, 6); // not 1.29 x 3 + 2.5
+    expect(chargeFor(5, 0.4)).toEqual({ delta: 0.4, session: 5.4 }); // a fresh process reporting per query
+  });
+  it("treats billing and authentication failures as fatal, and transient errors as not", () => {
+    expect(fatalApiProblem("Credit balance is too low")).toMatch(/out of credits/);
+    expect(fatalApiProblem("authentication_error: invalid x-api-key")).toMatch(/rejected/);
+    expect(fatalApiProblem("overloaded_error")).toBeNull();
+    expect(fatalApiProblem("Implemented the J3 fix.")).toBeNull();
+  });
+  it("corrects a version-1 state that over-counted a resumed session", () => {
+    const p = join(mkdtempSync(join(tmpdir(), "m-")), "agent-state.json");
+    writeFileSync(p, JSON.stringify({ version: 1, status: "checkpointed", iterations: 30, totalCostUsd: 38.78, totalTurns: 0, provisionRuns: 0, consecutiveErrors: 0, milestones: [],
+      lastResult: { at: "x", subtype: "success", costUsd: 1.2926, turns: 1 } }));
+    const f = new AgentStateFile(p);
+    expect(f.data).toMatchObject({ version: 2, totalCostUsd: 1.2926, sessionCostUsd: 1.2926 });
   });
 });

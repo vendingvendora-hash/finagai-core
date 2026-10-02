@@ -34,7 +34,25 @@ export interface LaunchDeps {
   query?: typeof sdkQuery;
 }
 
-export interface LaunchResult { status: "complete" | "limit_reached" | "failed" | "checkpointed"; message: string }
+export interface LaunchResult { status: "complete" | "limit_reached" | "blocked" | "failed" | "checkpointed"; message: string }
+
+/** Results report the SESSION's cumulative cost; charge only the increase (a fresh process may report per query). */
+export function chargeFor(prevSessionCost: number, reported: number): { delta: number; session: number } {
+  if (reported >= prevSessionCost) return { delta: reported - prevSessionCost, session: reported };
+  return { delta: reported, session: prevSessionCost + reported };
+}
+
+/** Errors no retry can fix: stop at once and tell Julian. */
+export function fatalApiProblem(text: string): string | null {
+  if (/credit balance is too low|insufficient.{0,20}(credit|balance|funds)|billing/i.test(text)) {
+    return "The builder's Anthropic account is out of credits. Add credits in the Claude Console (Billing), then run npm run finagai:resume.";
+  }
+  if (/invalid (x-api-key|api key)|authentication_error|401\b|permission_error|api key.{0,20}(disabled|revoked|expired)/i.test(text)) {
+    return "The builder's Anthropic API key was rejected. Create a new key, then run npm run finagai:resume and enter it.";
+  }
+  if (/rate_limit|overloaded/i.test(text)) return null; // transient: the runtime retries
+  return null;
+}
 
 /** The child runtime gets only what it needs: never provider credentials, never the builder's own key. */
 const ENV_PASS = /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LC_\w+|TERM|TMPDIR|TMP|TEMP|TZ|NODE_OPTIONS|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|HTTPS?_PROXY|NO_PROXY|https?_proxy|no_proxy|SystemRoot|APPDATA|LOCALAPPDATA|USERPROFILE|PROGRAMFILES)$/;
@@ -67,7 +85,7 @@ export async function runBuilder(mode: "build" | "resume" | "fresh", d: LaunchDe
   const { repoDir, cfg, op } = d;
   const state = new AgentStateFile(join(repoDir, ".finagai", "agent-state.json"));
   if (state.data.status === "complete") return { status: "complete", message: COMPLETION_MARKER };
-  if (mode === "fresh") state.update((s) => { delete s.sessionId; });
+  if (mode === "fresh") state.update((s) => { delete s.sessionId; s.sessionCostUsd = 0; });
 
   // The builder's own Anthropic key reaches the runtime through apiKeyHelper, never through the shell environment.
   const keyValue = d.env.FINAGAI_BUILDER_ANTHROPIC_KEY ?? d.env.ANTHROPIC_API_KEY
@@ -114,6 +132,7 @@ export async function runBuilder(mode: "build" | "resume" | "fresh", d: LaunchDe
 
     const q = d.query ?? sdkQuery;
     let lastEnd = state.data.lastResult?.subtype ?? "nothing yet";
+    let lastText = "", sameNoProgress = 0;
     for (let iter = 0; ; iter++) {
       const remaining = cfg.maxTotalUsd - state.data.totalCostUsd;
       const stop = (status: LaunchResult["status"], message: string): LaunchResult => {
@@ -150,7 +169,7 @@ export async function runBuilder(mode: "build" | "resume" | "fresh", d: LaunchDe
           },
         })) {
           if (m.type === "system" && m.subtype === "init") {
-            if (m.session_id && m.session_id !== state.data.sessionId) state.update((s) => { s.sessionId = m.session_id; });
+            if (m.session_id && m.session_id !== state.data.sessionId) state.update((s) => { s.sessionId = m.session_id; s.sessionCostUsd = 0; });
           } else if (m.type === "assistant") {
             for (const b of m.message.content) {
               if (b.type === "text" && b.text.trim()) op.say(`[builder] ${b.text.trim().slice(0, 1500)}`);
@@ -159,6 +178,7 @@ export async function runBuilder(mode: "build" | "resume" | "fresh", d: LaunchDe
           } else if (m.type === "result") {
             gotResult = true; subtype = m.subtype; cost = m.total_cost_usd ?? 0; turns = m.num_turns ?? 0;
             resultText = m.subtype === "success" ? m.result : "";
+            if ((m as { is_error?: boolean }).is_error && !resultText) resultText = JSON.stringify((m as { errors?: unknown }).errors ?? "");
           }
         }
         state.update((s) => { s.consecutiveErrors = 0; });
@@ -170,12 +190,21 @@ export async function runBuilder(mode: "build" | "resume" | "fresh", d: LaunchDe
           state.update((s) => { s.consecutiveErrors++; });
         }
       }
+      const charge = chargeFor(state.data.sessionCostUsd ?? 0, cost);
       state.update((s) => {
-        s.iterations++; s.totalCostUsd = Number((s.totalCostUsd + cost).toFixed(6)); s.totalTurns += turns;
+        s.iterations++; s.totalCostUsd = Number((s.totalCostUsd + charge.delta).toFixed(6)); s.sessionCostUsd = charge.session; s.totalTurns += turns;
         s.lastResult = { at: new Date().toISOString(), subtype, costUsd: cost, turns };
       });
       lastEnd = subtype;
-      op.say(`[launcher] run ${state.data.iterations} ended: ${subtype}; $${cost.toFixed(4)} this run, $${state.data.totalCostUsd.toFixed(2)} of $${cfg.maxTotalUsd} total.`);
+      op.say(`[launcher] run ${state.data.iterations} ended: ${subtype}; $${charge.delta.toFixed(4)} this run, $${state.data.totalCostUsd.toFixed(2)} of $${cfg.maxTotalUsd} total.`);
+
+      const fatal = fatalApiProblem(`${resultText} ${subtype}`);
+      if (fatal) return stop("blocked", fatal);
+      // The same short answer twice with no work done means the loop is not progressing: stop instead of spinning.
+      const trimmed = resultText.trim();
+      sameNoProgress = turns <= 1 && trimmed && trimmed === lastText ? sameNoProgress + 1 : 0;
+      lastText = trimmed;
+      if (sameNoProgress >= 1) return stop("blocked", `The builder is not making progress (it answered "${redact(trimmed).slice(0, 160)}" twice without working). Checkpointed; fix the cause above, then run npm run finagai:resume.`);
 
       if (resultText.includes(COMPLETION_MARKER)) {
         op.say("[launcher] the builder reports completion; running the independent verification...");

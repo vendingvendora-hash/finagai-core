@@ -165,4 +165,16 @@ describe("autonomous builder on the real Claude Code runtime", () => {
     expect(readFileSync(join(ws, ".finagai", "agent-state.json"), "utf8")).not.toContain("canary-secret-value-987654321");
     expect(existsSync(join(ws, ".git", "hooks", "pre-commit"))).toBe(true);
   }, 120_000);
+
+  it("stops at once when the builder's Anthropic account is out of credits, without counting refused calls as spend", async () => {
+    const ws = workspace();
+    mock = await new MockClaude(() => ({ apiError: { status: 400, type: "invalid_request_error", message: "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits." } })).start();
+    const julian = new ScriptedJulian();
+    const res = await runBuilder("build", { repoDir: ws, cfg: cfgWith({ maxIterations: 30 }), op: julian, env, runtimeEnv: { ANTHROPIC_BASE_URL: mock.url } });
+    expect(res.status).toBe("blocked");
+    expect(res.message).toMatch(/out of credits/);
+    const st = JSON.parse(readFileSync(join(ws, ".finagai", "agent-state.json"), "utf8"));
+    expect(st.iterations).toBe(1);
+    expect(st.totalCostUsd).toBe(0);
+  }, 120_000);
 });

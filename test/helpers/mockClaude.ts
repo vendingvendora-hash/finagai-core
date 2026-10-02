@@ -5,7 +5,7 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 
-export type Reply = { text: string } | { tool: string; input: Record<string, unknown> };
+export type Reply = { text: string } | { tool: string; input: Record<string, unknown> } | { apiError: { status: number; type: string; message: string } };
 export interface MainRequest { body: any; system: string; apiKey: string; n: number }
 
 export class MockClaude {
@@ -32,10 +32,15 @@ export class MockClaude {
       this.requests.push(r);
       reply = this.script(r);
     }
+    if ("apiError" in reply) {
+      res.writeHead(reply.apiError.status, { "content-type": "application/json" });
+      res.end(JSON.stringify({ type: "error", error: { type: reply.apiError.type, message: reply.apiError.message } }));
+      return;
+    }
     this.respond(res, reply, Boolean(body.stream), body.model);
   }
 
-  private respond(res: http.ServerResponse, reply: Reply, stream: boolean, model: string) {
+  private respond(res: http.ServerResponse, reply: Exclude<Reply, { apiError: unknown }>, stream: boolean, model: string) {
     const isTool = "tool" in reply;
     const block = isTool ? { type: "tool_use", id: `toolu_${Math.random().toString(36).slice(2, 12)}`, name: reply.tool, input: reply.input } : { type: "text", text: reply.text };
     const msg = { id: `msg_${Date.now()}`, type: "message", role: "assistant", model, content: [block], stop_reason: isTool ? "tool_use" : "end_turn", stop_sequence: null, usage: this.usage };

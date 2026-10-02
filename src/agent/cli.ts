@@ -34,4 +34,4 @@ process.on("SIGINT", () => {
 });
 
 const result = await runBuilder(cmd, { repoDir, cfg: loadAgentConfig(process.env), op, env: process.env });
-process.exit(result.status === "complete" ? 0 : result.status === "checkpointed" ? 0 : 1);
+process.exit(result.status === "complete" || result.status === "checkpointed" ? 0 : 1);

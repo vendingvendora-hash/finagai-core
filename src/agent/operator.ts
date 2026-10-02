@@ -35,7 +35,15 @@ export class TerminalOperator implements Operator {
   say(text: string) { process.stdout.write(`${redact(text)}\n`); }
   ask(question: string) { return this.serial(() => this.q(`\n[Finagai needs you] ${question} `, false)); }
   askHidden(question: string) { return this.serial(() => this.q(`\n[Finagai needs you] ${question} (input hidden) `, true)); }
-  waitDone(prompt: string) { return this.serial(async () => { await this.q(`${prompt} Press Enter when done. `, false); }); }
+  /** Only the word "done" confirms: stray pasted lines or a bare Enter never complete a human action. */
+  waitDone(prompt: string) {
+    return this.serial(async () => {
+      for (;;) {
+        const a = await this.q(`${prompt} type done and press Enter: `, false);
+        if (a.trim().toLowerCase() === "done") return;
+      }
+    });
+  }
   showOnce(label: string, value: string) {
     return this.serial(async () => {
       process.stdout.write(`\n=== ${label} ===\n  ${value}\n`); // deliberate, the only unredacted output: Julian must save it
