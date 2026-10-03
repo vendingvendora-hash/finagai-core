@@ -32,7 +32,8 @@ export class AnthropicProvider implements ModelProvider {
             : { type: "image", source: { type: "base64", media_type: b.mediaType, data: b.dataBase64 } })),
         })) as never,
         ...(req.webSearch ? { tools: [{ type: "web_search_20250305", name: "web_search", max_uses: req.webSearch.maxUses }] as never } : {}),
-      }, req.webSearch ? { timeout: 180_000 } : undefined);
+        ...(req.thinkingTokens && req.thinkingTokens > 0 ? { thinking: { type: "enabled", budget_tokens: req.thinkingTokens } } as never : {}),
+      }, req.webSearch || req.thinkingTokens ? { timeout: 180_000 } : undefined);
       const text = msg.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
       return {
         text,

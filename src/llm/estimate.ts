@@ -32,14 +32,15 @@ export function maxInputTokens(req: Pick<ModelRequest, "system" | "messages">): 
  */
 export const WEB_SEARCH_TOKEN_ALLOWANCE = 40_000;
 
-export function worstCaseCostUsd(req: Pick<ModelRequest, "model" | "system" | "messages" | "maxTokens" | "webSearch">): number {
+export function worstCaseCostUsd(req: Pick<ModelRequest, "model" | "system" | "messages" | "maxTokens" | "webSearch" | "thinkingTokens">): number {
   const p = MODEL_PRICES[req.model];
   if (!p) throw new Error(`no price configured for model ${req.model}`);
   const inputRate = (p.inputPerMTok / 1_000_000) * Math.max(1, p.cacheWriteMultiplier);
   const searches = req.webSearch?.maxUses ?? 0;
   // Each search iteration re-reads the prompt and everything found so far.
   const searchInput = searches * (maxInputTokens(req) + WEB_SEARCH_TOKEN_ALLOWANCE * (searches + 1) / 2);
-  const cost = (maxInputTokens(req) + searchInput) * inputRate + req.maxTokens * (p.outputPerMTok / 1_000_000)
+  const thinking = (("thinkingTokens" in req ? (req as { thinkingTokens?: number }).thinkingTokens : 0) ?? 0);
+  const cost = (maxInputTokens(req) + searchInput) * inputRate + (req.maxTokens + thinking) * (p.outputPerMTok / 1_000_000)
     + searches * WEB_SEARCH_USD_PER_REQUEST;
   return Math.ceil(cost * 1_000_000) / 1_000_000;
 }

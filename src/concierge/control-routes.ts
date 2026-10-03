@@ -60,7 +60,10 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         const taskId = await taskIdFrom(body);
         if (!taskId) return json(res, 404, { error: "task_not_found" });
         const shot = typeof body.screenshot === "string" ? body.screenshot : null;
-        const r = await planNext(deps, taskId, shot, typeof body.lastResult === "string" ? body.lastResult : undefined);
+        const perception: { pageText?: string; axTree?: string } = {};
+        if (typeof body.pageText === "string") perception.pageText = body.pageText;
+        if (typeof body.axTree === "string") perception.axTree = body.axTree;
+        const r = await planNext(deps, taskId, shot, typeof body.lastResult === "string" ? body.lastResult : undefined, perception);
         log("control next", { status: r.status, kind: r.step?.kind });
         return json(res, 200, r);
       }

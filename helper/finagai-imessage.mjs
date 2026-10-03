@@ -327,6 +327,24 @@ export async function sendIMessageFile(handle, path) {
 
 const SHOT = join(tmpdir(), "finagai-shot.png");
 
+/** Best-effort page text + clickable elements of the frontmost window, so the planner reads, not guesses. */
+async function perception() {
+  const osa = (lines) => run("/usr/bin/osascript", lines.flatMap((l) => ["-e", l]), { timeout: 12_000, maxBuffer: 8 * 1024 * 1024 }).then((r) => r.stdout.trim()).catch(() => "");
+  // If Chrome is frontmost, pull the page's text and the tag/text/coords of links & buttons via JS.
+  const chromeText = await osa([
+    'tell application "System Events" to set fm to name of first process whose frontmost is true',
+    'if fm is "Google Chrome" then',
+    'tell application "Google Chrome" to set t to execute of active tab of front window javascript "document.body?document.body.innerText.slice(0,4000):\"\""',
+    'return t',
+    'end if', 'return ""']).catch(() => "");
+  const chromeAx = await osa([
+    'tell application "System Events" to set fm to name of first process whose frontmost is true',
+    'if fm is "Google Chrome" then',
+    'tell application "Google Chrome" to set a to execute of active tab of front window javascript "(function(){try{var e=[...document.querySelectorAll(\'a,button,[role=button],input,[role=link]\')].slice(0,60).map(function(x){var r=x.getBoundingClientRect();if(r.width<2||r.height<2)return null;var t=(x.innerText||x.value||x.getAttribute(\'aria-label\')||\'\').trim().slice(0,40);return t?((Math.round(r.left+r.width/2))+\',\'+(Math.round(r.top+r.height/2))+\' \'+t):null}).filter(Boolean);return e.join(\'\\n\')}catch(e){return\'\'}})()"',
+    'return a', 'end if', 'return ""']).catch(() => "");
+  return { pageText: chromeText || undefined, axTree: chromeAx || undefined };
+}
+
 /** Full-screen screenshot as base64 PNG (downscaled so uploads stay small). */
 async function screenshotB64() {
   await run("/usr/sbin/screencapture", ["-x", "-t", "png", SHOT], { timeout: 15_000 });
@@ -371,7 +389,8 @@ export async function driveControl(cfg, taskId) {
   let lastResult;
   for (let i = 0; i < 40; i++) {
     const shot = await screenshotB64().catch(() => null);
-    const r = await core(cfg, "/control/next", { taskId, screenshot: shot, lastResult });
+    const per = await perception().catch(() => ({}));
+    const r = await core(cfg, "/control/next", { taskId, screenshot: shot, lastResult, pageText: per.pageText, axTree: per.axTree });
     if (r.status === "done") {
       if (r.requester) {
         const handle = (cfg.contacts.find((c) => c.label === r.requester) || {}).handle;

@@ -19,6 +19,8 @@ export interface ModelRequest {
   maxTokens: number;
   /** Anthropic's server-side web search (J5 only). Each search is billed per request plus result tokens. */
   webSearch?: { maxUses: number };
+  /** Extended thinking: reason harder before answering (J6 planner). Tokens are billed as output. */
+  thinkingTokens?: number;
   captureId?: string;
   reviewId?: string;
   requestId?: string;

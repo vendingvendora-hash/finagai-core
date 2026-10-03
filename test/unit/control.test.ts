@@ -90,3 +90,30 @@ describe("J6 contact bridge (ADR-051)", () => {
     expect(parsePlan('{"relevant":true,"file_queries":[]}')).toMatchObject({ doOnMac: false }); // absent = false
   });
 });
+
+import { skillsFor } from "../../src/pipelines/j6/skills.js";
+import { systemPrompt } from "../../src/pipelines/j6/control.js";
+
+describe("J6 state-of-the-art thinking (ADR-055)", () => {
+  it("includes the right playbook for the request", () => {
+    expect(skillsFor("mándame la licencia de compliance de la carpeta de Drive")).toMatch(/FIND A FILE IN GOOGLE DRIVE/);
+    expect(skillsFor("read the confirmation email from Delta")).toMatch(/READ GMAIL/);
+    expect(skillsFor("fill out the Workday application")).toMatch(/FILL A FORM/);
+    expect(skillsFor("just say hi")).toBe("");
+  });
+  it("the planner prompt drives plan-act-reflect, multi-account Drive, and verification", () => {
+    const p = systemPrompt("EST", "today", "find the compliance license in Drive");
+    expect(p).toMatch(/reflect/i);
+    expect(p).toMatch(/\/u\/0\/, \/u\/1\/, \/u\/2\//);
+    expect(p).toMatch(/TRY THE OTHER ACCOUNTS/);
+    expect(p).toMatch(/Verify, don't assume/);
+    expect(p).toMatch(/FIND A FILE IN GOOGLE DRIVE/); // skill injected
+    expect(p).toMatch(/never type passwords/i);
+  });
+  it("parseStep captures reflection and expect", () => {
+    const s = parseStep('{"reflection":"last click did nothing","plan":"use search url","kind":"open_url","params":{"url":"https://drive.google.com/drive/u/1/search?q=x"},"risk":"write","summary":"Open Drive account 2 search","expect":"results list shows"}');
+    expect(s!.reflection).toMatch(/did nothing/);
+    expect(s!.expect).toMatch(/results list/);
+    expect(s!.kind).toBe("open_url");
+  });
+});

@@ -14,6 +14,7 @@ import type pg from "pg";
 import { appendEvent, withTransaction } from "../../db/index.js";
 import type { MeteredModelClient } from "../../llm/metered.js";
 import { BudgetBlockedError, type ContentBlock } from "../../llm/types.js";
+import { skillsFor } from "./skills.js";
 
 export const J6_PROMPT_VERSION = "j6-control-v2";
 export const MAX_STEPS_PER_TASK = 80;
@@ -32,12 +33,20 @@ export interface Step {
   summary: string;
   done?: boolean;
   question?: string;
+  /** Plan-act-reflect: the model's read of the last result and its short plan for the goal. */
+  reflection?: string;
+  /** What the model expects the screen to look like after this step, for post-action verification. */
+  expect?: string;
 }
 
 export interface ControlDeps {
   pool: pg.Pool;
   model: Pick<MeteredModelClient, "complete">;
   modelId: string;
+  /** Stronger model for the planning loop (ADR-055); falls back to modelId. */
+  plannerModel?: string;
+  /** Extended-thinking budget for the planner. */
+  thinkingTokens?: number;
   autoApprove?: boolean;           // per Julian's choice for a task; still never covers irreversible kinds
   log?: (msg: string, f?: Record<string, unknown>) => void;
   now?: () => Date;
@@ -61,35 +70,30 @@ export function needsApproval(step: Step, autoApprove: boolean): boolean {
   return false;
 }
 
-export function systemPrompt(timezone: string, today: string): string {
-  return `You are Finagai operating Julian's Mac for him, as if you were him. He has asked you to do a task. You act one step at a time and you SEE the screen through screenshots.
+export function systemPrompt(timezone: string, today: string, request: string): string {
+  return `You are Finagai operating Julian's Mac for him, as if you were him. You pursue his goal autonomously and only stop for things that genuinely need him. You SEE the screen through screenshots and you are also given the page's visible text and accessibility tree when available.
 
 Today is ${today} (${timezone}).
 
-Each turn, look at the latest screenshot and output the single next action as JSON:
-{"kind":"...","params":{...},"risk":"read|write","summary":"<one short line Julian would read>","done":false}
+THINK in a plan-act-reflect loop every turn:
+1) REFLECT on the previous result: did the last step achieve what you expected? If the screen did not change as expected, the step failed — diagnose why and change approach (don't repeat it).
+2) PLAN: in one line, the shortest path from here to the goal.
+3) ACT: choose the single next action.
+
+Output ONLY this JSON object:
+{"reflection":"<what the last result tells you / why it failed>","plan":"<one line to the goal>","kind":"...","params":{...},"risk":"read|write","summary":"<one line Julian could approve without seeing the screen>","expect":"<what the screen should show after this action>","done":false}
 
 Action kinds:
-- Observe (risk "read"): screenshot; read_text {}; list_apps {}; list_files {"dir":"~/..."}; read_file {"path":"~/..."}; wait {"seconds":N}; ask {"question":"..."} when you genuinely need Julian to decide; done {} when the task is finished.
-- Act (risk "write"): click {"x":N,"y":N}; double_click; right_click; move {"x","y"}; drag {"from":[x,y],"to":[x,y]}; scroll {"x","y","amount":N,"dir":"up|down"}; type {"text":"..."}; key {"key":"return|tab|esc|..."}; hotkey {"keys":["cmd","c"]}; open_app {"name":"Safari"}; open_url {"url":"https://..."}; open_path {"path":"~/..."}; run {"cmd":"..."} (a shell command); move_file {"from","to"}; trash_file {"path"}.
+- Observe (risk "read"): screenshot; read_text {}; list_apps {}; list_files {"dir":"~/..."}; read_file {"path":"~/..."}; wait {"seconds":N}; ask {"question":"..."} ONLY as a last resort; done {} when finished.
+- Act (risk "write"): click {"x":N,"y":N}; double_click; right_click; move {"x","y"}; drag {"from":[x,y],"to":[x,y]}; scroll {"x","y","amount":N,"dir":"up|down"}; type {"text":"..."}; key {"key":"return|tab|esc|..."}; hotkey {"keys":["cmd","c"]}; open_app {"name":"Safari"}; open_url {"url":"https://..."}; open_path {"path":"~/..."}; run {"cmd":"..."}; move_file {"from","to"}; trash_file {"path"}.
 
-How to find things (important): do exactly what Julian would do, and prefer the RELIABLE way over clicking around a web UI.
-- To find something in Google Drive: open_url to a Drive search URL, e.g. https://drive.google.com/drive/search?q=compliance (URL-encode the query). That lands directly on the results; you do not need to double-click through folders.
-- To open a specific Drive file or folder you can see a link for, open_url that link directly.
-- For Gmail: open_url https://mail.google.com/mail/u/0/#search/<terms>. For any site: open_url the page.
-- After an open_url, the next screenshot already shows the loaded page (it waits for load). READ it; do not reopen the same thing. If a page shows what you need, screenshot it and move on.
-- Never repeat the same action twice. If a click or double-click did not visibly change the screen, switch approach (type a URL, use search, press Enter once) rather than repeating.
-Julian is signed in to his accounts in Chrome, so you can reach whatever he can.
-
-Rules:
-- Coordinates are in the screenshot's own pixels; take a fresh screenshot after anything that changes the screen.
-- Set risk correctly: anything that changes files, apps, settings, or sends/posts/pays is "write".
-- Never enter passwords, card numbers or 2FA codes: if a login, payment confirmation or legal agreement is required, stop with ask {"question":"..."} so Julian does that part.
-- Prefer the smallest safe step. If unsure what Julian wants, ask instead of guessing.
-- summary must let Julian approve safely without seeing the screen (e.g. 'Click "Send" on the email to Maria', not 'click at 812,440').
-- When the task is complete, output done with a summary of what you accomplished.
-
-Output ONLY the JSON object.`;
+Operating principles:
+- Be autonomous. Exhaust the obvious routes yourself before asking Julian. Prefer typing URLs and using on-page search over clicking through UIs.
+- Julian is signed in to his Google accounts in Chrome; Drive/Gmail number accounts as /u/0/, /u/1/, /u/2/. If one account doesn't have something, TRY THE OTHER ACCOUNTS before giving up.
+- Verify, don't assume: use "expect" to say what should happen, and check it next turn via the screenshot/text.
+- Never repeat an action that didn't change the screen — switch approach.
+- Passwords, payment confirmations and legal "I agree" are the only things you must hand to Julian with ask{}. You never type passwords.
+- When the task is done, output done with a summary.${skillsFor(request)}`;
 }
 
 export function parseStep(text: string): Step | null {
@@ -106,6 +110,8 @@ export function parseStep(text: string): Step | null {
   const risk = classifyRisk(kind) === "write" || raw.risk === "write" ? "write" : "read";
   const step: Step = { kind, params, risk, summary, done: raw.done === true || kind === "done" };
   if (kind === "ask") step.question = String(raw.question ?? raw.summary ?? "").slice(0, 500);
+  if (typeof raw.reflection === "string") step.reflection = raw.reflection.slice(0, 600);
+  if (typeof raw.expect === "string") step.expect = raw.expect.slice(0, 300);
   return step;
 }
 
@@ -137,7 +143,7 @@ export interface NextResult {
  * Returns the next thing for the helper to do: run a read step now, run a step Julian already approved,
  * or wait while a write step is queued for approval.
  */
-export async function planNext(deps: ControlDeps, taskId: string, screenshotB64: string | null, lastResult?: string): Promise<NextResult> {
+export async function planNext(deps: ControlDeps, taskId: string, screenshotB64: string | null, lastResult?: string, perception?: { pageText?: string; axTree?: string }): Promise<NextResult> {
   const { pool } = deps;
   const task = (await pool.query<{ request: string; status: string; auto: boolean; requester: string | null }>(
     `SELECT request, status, true AS auto, requester FROM control_task WHERE id = $1`, [taskId])).rows[0];
@@ -154,15 +160,20 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
   const history = prior.map((s) => `${s.seq}. [${s.status}] ${s.summary}${s.result ? ` -> ${s.result.slice(0, 200)}` : ""}`).join("\n");
   const now = (deps.now ?? (() => new Date()))();
   const today = now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  const percept = [
+    perception?.pageText ? `Visible page text (truncated):\n${perception.pageText.slice(0, 4000)}` : "",
+    perception?.axTree ? `Accessibility tree / clickable elements (truncated):\n${perception.axTree.slice(0, 4000)}` : "",
+  ].filter(Boolean).join("\n\n");
   const content: ContentBlock[] = [{ type: "text",
-    text: `Task from Julian: ${task.request}\n\nSteps so far:\n${history || "(none yet)"}${lastResult ? `\n\nResult of the last step:\n${lastResult.slice(0, 2000)}` : ""}\n\nHere is the current screen. What is the single next action?` }];
+    text: `Task from Julian: ${task.request}\n\nSteps so far:\n${history || "(none yet)"}${lastResult ? `\n\nResult of the last step:\n${lastResult.slice(0, 2000)}` : ""}${percept ? `\n\n${percept}` : ""}\n\nHere is the current screen. Reflect, plan, then give the single next action.` }];
   if (screenshotB64) content.push({ type: "image", mediaType: "image/png", dataBase64: screenshotB64 });
 
   let step: Step | null;
   try {
     const r = await deps.model.complete({
-      pipeline: "j6", step: "plan", purpose: "concierge", model: deps.modelId, promptVersion: J6_PROMPT_VERSION,
-      system: systemPrompt(now.toTimeString().slice(9), today), messages: [{ role: "user", content }], maxTokens: 700,
+      pipeline: "j6", step: "plan", purpose: "concierge", model: deps.plannerModel ?? deps.modelId, promptVersion: J6_PROMPT_VERSION,
+      system: systemPrompt(now.toTimeString().slice(9), today, task.request), messages: [{ role: "user", content }], maxTokens: 1200,
+      ...(deps.thinkingTokens && deps.thinkingTokens > 0 ? { thinkingTokens: deps.thinkingTokens } : {}),
     });
     step = parseStep(r.text);
   } catch (err) {
@@ -197,7 +208,7 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
       [taskId, seq, step!.kind, JSON.stringify(step!.params), step!.risk, step!.summary, approval ? "proposed" : (step!.risk === "write" ? "approved" : "approved")]);
     const r0 = ins.rows[0]!;
     await appendEvent(tx, { actor: "j6", action: "control_step_proposed", entityType: "control_step", entityId: r0.id,
-      after: { code: Number(r0.code), kind: step!.kind, risk: step!.risk, summary: step!.summary, approval } });
+      after: { code: Number(r0.code), kind: step!.kind, risk: step!.risk, summary: step!.summary, approval, reflection: step!.reflection ?? null, expect: step!.expect ?? null } });
     if (approval) await tx.query(`UPDATE control_task SET status = 'waiting_approval', updated_at = now() WHERE id = $1`, [taskId]);
     return r0;
   });

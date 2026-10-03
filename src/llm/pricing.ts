@@ -12,6 +12,7 @@ export interface ModelPrice {
 
 export const MODEL_PRICES: Readonly<Record<string, ModelPrice>> = {
   "claude-opus-5-5": { inputPerMTok: 4, outputPerMTok: 20, cacheReadMultiplier: 0.1, cacheWriteMultiplier: 1.25 },
+  "claude-opus-4-1": { inputPerMTok: 15, outputPerMTok: 75, cacheReadMultiplier: 0.1, cacheWriteMultiplier: 1.25 },
   "claude-sonnet-5-5": { inputPerMTok: 2, outputPerMTok: 10, cacheReadMultiplier: 0.1, cacheWriteMultiplier: 1.25 },
   "claude-haiku-4-5-20251001": { inputPerMTok: 1, outputPerMTok: 5, cacheReadMultiplier: 0.1, cacheWriteMultiplier: 1.25 },
 };
