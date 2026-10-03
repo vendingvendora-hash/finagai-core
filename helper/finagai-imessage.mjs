@@ -433,7 +433,7 @@ function loadConfig() {
   c.selfHandles = c.selfHandles.map(normalizeHandle);
   return c;
 }
-const loadState = () => (existsSync(STATE) ? JSON.parse(readFileSync(STATE, "utf8")) : { lastRowId: null, backfilled: [] });
+const loadState = () => (existsSync(STATE) ? JSON.parse(readFileSync(STATE, "utf8")) : { lastRowId: null, backfilled: [], seenGuids: [] });
 const saveState = (s) => { mkdirSync(DIR, { recursive: true }); writeFileSync(STATE, JSON.stringify(s), { mode: 0o600 }); };
 const log = (msg, f = {}) => console.log(JSON.stringify({ at: new Date().toISOString(), msg, ...f }));
 
@@ -494,12 +494,28 @@ async function tick(cfg, state) {
     log("backfilled style history", { contact: c.label, messages: messages.length });
   }
 
-  const rows = await sql(`${BASE} AND m.ROWID > ${Number(state.lastRowId)} ORDER BY m.ROWID LIMIT 500`);
+  // Self-heal: if the saved cursor is somehow ahead of the DB's real max ROWID (iCloud rewrites,
+  // DB swap, a bad earlier max), reset it so we don't silently skip everything forever.
+  const [{ dbmax }] = await sql(`SELECT max(ROWID) AS dbmax FROM message`);
+  if (Number(dbmax ?? 0) < Number(state.lastRowId)) {
+    log("cursor ahead of db; resetting", { was: state.lastRowId, dbmax });
+    state.lastRowId = Math.max(0, Number(dbmax ?? 0) - 50);
+    saveState(state);
+  }
+
+  // Primary: new rows by ROWID. Secondary: anything in the last 12 minutes we haven't seen, so a stuck
+  // or drifting cursor can never make us miss a real message (Apple messages via Messages/MessagesInAppStore).
+  const APPLE_12MIN_AGO = `((strftime('%s','now') - 720 - 978307200) * 1000000000)`;
+  const rowsById = await sql(`${BASE} AND m.ROWID > ${Number(state.lastRowId)} ORDER BY m.ROWID LIMIT 500`);
+  const rowsByTime = await sql(`${BASE} AND m.date > ${APPLE_12MIN_AGO} ORDER BY m.ROWID DESC LIMIT 100`);
+  const byGuid = new Map();
+  for (const r of [...rowsById, ...rowsByTime]) if (!state.seenGuids?.includes(r.guid)) byGuid.set(r.guid, r);
+  const rows = [...byGuid.values()].sort((a, b) => Number(a.rowid) - Number(b.rowid));
   const anyRows = await sql(`SELECT count(*) AS n, max(ROWID) AS max FROM message WHERE ROWID > ${Number(state.lastRowId)}`);
-  if (anyRows[0]?.n > 0) {
+  if (rows.length || anyRows[0]?.n > 0) {
     const seen = {};
     for (const r of rows) { const h = normalizeHandle(r.chat); const k = allowed.get(h) ?? (self.has(h) ? "SELF" : `other:${h}`); seen[k] = (seen[k] ?? 0) + 1; }
-    log("new messages", { total: anyRows[0].n, oneToOne: rows.length, byThread: seen, empty: rows.filter((r) => !messageText(r.text, r.ab)).length });
+    log("new messages", { byId: rowsById.length, byTime: rowsByTime.length, toProcess: rows.length, byThread: seen });
   }
   if (!rows.length) {
     if (anyRows[0]?.n > 0) { state.lastRowId = Number(anyRows[0].max); saveState(state); }
@@ -514,7 +530,10 @@ async function tick(cfg, state) {
     if (self.has(h)) { if (!text.startsWith(DRAFT_PREFIX)) commands.push(text); continue; }
     if (allowed.has(h)) contactMsgs.push(toMsg(r, false));
   }
-  state.lastRowId = Math.max(...rows.map((r) => Number(r.rowid)));
+  state.lastRowId = Math.max(Number(state.lastRowId), ...rows.map((r) => Number(r.rowid)));
+  // Remember recently processed guids (bounded) so the time-window query doesn't re-handle them.
+  state.seenGuids = [...(state.seenGuids ?? []), ...rows.map((r) => r.guid)].slice(-400);
+  saveState(state);
 
   // J6: pick up any control tasks Julian started from a Claude chat, and drive them.
   const pending = await core(cfg, "/control/pending", {}).catch(() => null);
