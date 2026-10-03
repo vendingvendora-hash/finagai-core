@@ -19,6 +19,11 @@ import { promisify } from "node:util";
 import { macDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTree, captureScreen } from "./mac-perception.mjs";
 
 const run = promisify(execFile);
+const HELPER_VERSION = "selfthread-dedup-1";
+const sentTextLog = [];
+const normText = (t) => String(t || "").replace(/\s+/g, " ").trim().toLowerCase();
+function rememberSent(t) { const n = normText(t); if (!n) return; sentTextLog.push(n); if (sentTextLog.length > 200) sentTextLog.splice(0, sentTextLog.length - 200); }
+function wasRecentlySent(t) { return sentTextLog.includes(normText(t)); }
 const DIR = join(homedir(), ".finagai");
 const CONFIG = join(DIR, "imessage-helper.json");
 const STATE = join(DIR, "imessage-state.json");
@@ -269,6 +274,7 @@ export async function runMacChart(cfg, requested, taskId) {
   // Return the PNG to the chat (store on the task) and to iMessage.
   const pngB64 = readFileSync(png).toString("base64");
   await core(cfg, "/mac/chart-done", { taskId, imageB64: pngB64, summary: resp.message });
+  await core(cfg, "/artifact/register", { kind: "chart", mime: "image/png", storageRef: png, summary: resp.message, conversation: "self" }).catch(() => {});
   await sendIMessage(cfg.selfHandles[0], `📈 ${resp.message}`);
   await sendIMessageFile(cfg.selfHandles[0], png).catch(() => {});
   return { ok: true, message: resp.message, png };
@@ -529,6 +535,7 @@ export async function sendIMessage(handle, text) {
     "end tell",
     "end run",
   ];
+  rememberSent(text);
   await run("/usr/bin/osascript", [...script.flatMap((l) => ["-e", l]), text, handle]);
 }
 
@@ -588,7 +595,12 @@ async function tick(cfg, state) {
     const h = normalizeHandle(r.chat);
     const text = messageText(r.text, r.ab);
     if (!text) continue;
-    if (self.has(h)) { if (!text.startsWith(DRAFT_PREFIX)) commands.push({ text, guid: r.guid }); continue; }
+    if (self.has(h)) {
+      if (text.startsWith(DRAFT_PREFIX)) continue;
+      if (wasRecentlySent(text)) { log("skip self-echo of our reply", { text: text.slice(0, 40) }); continue; }
+      commands.push({ text, guid: r.guid });
+      continue;
+    }
     if (allowed.has(h)) contactMsgs.push(toMsg(r, false));
   }
   state.lastRowId = Math.max(Number(state.lastRowId), ...rows.map((r) => Number(r.rowid)));
@@ -619,6 +631,18 @@ async function tick(cfg, state) {
       drafts.push(...(r.drafts ?? []));
     }
     for (const t of resp.controlTasks ?? []) {
+      const _req = String(t.request ?? "");
+      const _chartLike = /\b(chart|trend|graph|plot|gr[aá]fico|visuali[sz]e)\b/i.test(_req) && /\b(excel|xlsx|workbook|spreadsheet|\.xls|file|archivo|hoja)\b/i.test(_req);
+      if (_chartLike) {
+        const m = _req.match(/([A-Za-z0-9 _.\-()]+\.(?:xlsx|xlsm|xls))/i) || _req.match(/\b(Altarum[A-Za-z0-9_\-]*)/i) || _req.match(/file is ([A-Za-z0-9_\-]+)/i);
+        const filename = (m ? m[1] : _req).trim();
+        taskCodeCache[t.taskId] = t.taskCode;
+        log("routing contact request to mac chart", { label: t.label, filename });
+        await sendIMessage(cfg.selfHandles[0], `🖥️ ${t.label} asked Finagai to chart “${filename}”. Building it now.`);
+        const rr = await runMacChart(cfg, filename, t.taskId).catch((e) => { log("contact mac chart failed", { error: String(e?.message ?? e).slice(0,160) }); return { ok:false }; });
+        if (rr?.ok) await sendIMessage(cfg.selfHandles[0], `Reply “send ${t.label}” to forward the chart to ${t.label}.`);
+        continue;
+      }
       taskCodeCache[t.taskId] = t.taskCode;
       await sendIMessage(cfg.selfHandles[0], `🖥️ ${t.label} asked Finagai to do something on your Mac:\n“${t.request}”\nFinagai will start; it will ask you to approve each step that changes anything. “stop ${t.taskCode}” to cancel.`);
       await driveControl(cfg, t.taskId).catch((e) => log("contact control drive failed", { error: String(e?.message ?? e).slice(0, 160) }));
@@ -632,7 +656,50 @@ async function tick(cfg, state) {
       log("draft shown to Julian", { code: d.code, contact: d.label, attachments: files.length });
     }
   }
-  for (const text of commands) {
+  const seenCmdText = new Set();
+  for (const cmd of commands) {
+    const text = cmd.text;
+    const _nk = normText(text);
+    if (seenCmdText.has(_nk)) { log("skip duplicate self-command", { text: text.slice(0,40) }); continue; }
+    seenCmdText.add(_nk);
+    if (cmd.guid) {
+      const claim = await core(cfg, "/interaction/claim", { guid: cmd.guid, handle: cfg.selfHandles[0] }).catch(() => ({ claim: true }));
+      if (!claim.claim) { log("skip duplicate command (claimed)", { guid: cmd.guid }); continue; }
+      await core(cfg, "/interaction/finish", { guid: cmd.guid, ok: true }).catch(() => {});
+    }
+    // "send <contact>": forward the recent chart artifact to an allow-listed contact.
+    const sendM = text.trim().match(/^send\s+(.+)$/i);
+    if (sendM) {
+      const label = sendM[1].trim().toLowerCase();
+      const contact = cfg.contacts.find((c) => c.label.toLowerCase() === label);
+      if (!contact) { await sendIMessage(cfg.selfHandles[0], `I don't have a contact named “${sendM[1].trim()}”. Try: ${cfg.contacts.map((c)=>c.label).join(", ")}.`); continue; }
+      const art = await core(cfg, "/artifact/recent", { conversation: "self", kind: "chart" }).catch(() => null);
+      const path = art && art.artifact && existsSync(art.artifact.storageRef) ? art.artifact.storageRef : null;
+      if (!path) { await sendIMessage(cfg.selfHandles[0], "I don't have a recent chart to send. Ask me to make one first."); continue; }
+      try { await sendIMessageFile(contact.handle, path); await sendIMessage(cfg.selfHandles[0], `✅ Sent the chart to ${contact.label}.`); if (art.artifact) await core(cfg, "/artifact/sent", { id: art.artifact.id }).catch(()=>{}); log("forwarded chart to contact", { contact: contact.label }); }
+      catch (e) { await sendIMessage(cfg.selfHandles[0], `⚠️ Couldn't send to ${contact.label}: ${String(e?.message ?? e).slice(0,120)}`); }
+      continue;
+    }
+    // "mac doctor": capability diagnostic.
+    if (/^(mac doctor|finagai doctor)$/i.test(text.trim())) {
+      const tmp = join(OUT_ROOT, "doctor-" + Date.now() + ".png"); mkdirSync(OUT_ROOT, { recursive: true });
+      const doc = await macDoctor(run, tmp).catch((e) => ({ checks: [{ name: "doctor", ok: false, detail: String(e?.message ?? e).slice(0,120) }], allPass: false }));
+      const lines = ["🩺 Finagai Mac doctor"];
+      for (const c of doc.checks) lines.push(`${c.ok ? "✅" : "❌"} ${c.name}${c.ok ? "" : ` — ${c.detail}${c.settingsHint ? ` → ${c.settingsHint}` : ""}`}`);
+      if (!doc.allPass) lines.push("Fix the ❌ items in System Settings → Privacy & Security, then run “mac doctor” again.");
+      await sendIMessage(cfg.selfHandles[0], lines.join("\n"));
+      continue;
+    }
+    // "what am I looking at": current context.
+    if (/^(what(?:'s| is| am i)?(?: on)?(?: my)? (?:screen|looking at|open)|current context)\b/i.test(text.trim())) {
+      const fm = await getFrontmost(run).catch(() => ({ ok:false }));
+      const tab = await browserActiveTab(run).catch(() => ({ ok:false }));
+      const parts = [];
+      if (fm.ok) parts.push(`Frontmost: ${fm.app}${fm.window ? ` — “${fm.window}”` : ""}`);
+      if (tab.ok) parts.push(`Browser: ${tab.title || tab.url}`);
+      await sendIMessage(cfg.selfHandles[0], parts.length ? `🖥️ ${parts.join("\n")}` : "Couldn't read screen context (run “mac doctor”).");
+      continue;
+    }
     // Control commands first (ok/no/stop <code>): approve a Mac step or cancel a task.
     const cr = await core(cfg, "/control/decision", { text }).catch(() => null);
     if (cr && (cr.status === "approved" || cr.status === "rejected")) {
@@ -674,7 +741,7 @@ async function main() {
     return;
   }
   const state = loadState();
-  log("finagai imessage helper started", { contacts: cfg.contacts.map((c) => c.label), handles: cfg.contacts.map((c) => c.handle), self: cfg.selfHandles });
+  log("finagai imessage helper started", { version: HELPER_VERSION, contacts: cfg.contacts.map((c) => c.label), handles: cfg.contacts.map((c) => c.handle), self: cfg.selfHandles });
   setInterval(() => log("alive", { lastRowId: state.lastRowId }), 600_000);
   let busy = false;
   const loop = async () => {
