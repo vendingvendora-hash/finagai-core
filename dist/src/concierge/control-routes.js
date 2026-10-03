@@ -7,7 +7,7 @@
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import { cancelTask, createTask, decideStep, getStep, getTaskResult, parseControlCommand, planNext, recordRun } from "../pipelines/j6/control.js";
-const MAX_BODY = 12 * 1024 * 1024; // screenshots
+const MAX_BODY = 24 * 1024 * 1024; // screenshots + perception
 function json(res, status, body) {
     res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", "x-content-type-options": "nosniff" });
     res.end(JSON.stringify(body));
@@ -108,7 +108,9 @@ export function createControlHandler(deps, token, log) {
             return json(res, 404, { error: "not_found" });
         }
         catch (err) {
-            return json(res, 400, { error: "bad_request", reason: err instanceof Error ? err.message.slice(0, 120) : "error" });
+            const reason = err instanceof Error ? err.message.slice(0, 200) : "error";
+            log("control route bad_request", { path, reason });
+            return json(res, 400, { error: "bad_request", reason });
         }
     };
 }

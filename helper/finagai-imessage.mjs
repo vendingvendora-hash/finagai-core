@@ -342,14 +342,15 @@ async function perception() {
     'if fm is "Google Chrome" then',
     'tell application "Google Chrome" to set a to execute of active tab of front window javascript "(function(){try{var e=[...document.querySelectorAll(\'a,button,[role=button],input,[role=link]\')].slice(0,60).map(function(x){var r=x.getBoundingClientRect();if(r.width<2||r.height<2)return null;var t=(x.innerText||x.value||x.getAttribute(\'aria-label\')||\'\').trim().slice(0,40);return t?((Math.round(r.left+r.width/2))+\',\'+(Math.round(r.top+r.height/2))+\' \'+t):null}).filter(Boolean);return e.join(\'\\n\')}catch(e){return\'\'}})()"',
     'return a', 'end if', 'return ""']).catch(() => "");
-  return { pageText: chromeText || undefined, axTree: chromeAx || undefined };
+  const clean = (x) => (x ? String(x).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " ").slice(0, 4000) : undefined);
+  return { pageText: clean(chromeText), axTree: clean(chromeAx) };
 }
 
 /** Full-screen screenshot as base64 PNG (downscaled so uploads stay small). */
 async function screenshotB64() {
   await run("/usr/sbin/screencapture", ["-x", "-t", "png", SHOT], { timeout: 15_000 });
   // Downscale to 1600px wide via sips to keep tokens and upload size reasonable.
-  await run("/usr/bin/sips", ["-Z", "1600", SHOT], { timeout: 15_000 }).catch(() => {});
+  await run("/usr/bin/sips", ["-Z", "1200", SHOT], { timeout: 15_000 }).catch(() => {});
   return readFileSync(SHOT).toString("base64");
 }
 
@@ -387,10 +388,21 @@ export async function runControlStep(step) {
 /** Drive one control task to a natural stopping point: runs reads and approved steps; stops to wait on approvals. */
 export async function driveControl(cfg, taskId) {
   let lastResult;
+  let failures = 0;
   for (let i = 0; i < 40; i++) {
     const shot = await screenshotB64().catch(() => null);
     const per = await perception().catch(() => ({}));
-    const r = await core(cfg, "/control/next", { taskId, screenshot: shot, lastResult, pageText: per.pageText, axTree: per.axTree });
+    let r;
+    try {
+      r = await core(cfg, "/control/next", { taskId, screenshot: shot, lastResult, pageText: per.pageText, axTree: per.axTree });
+    } catch (e) {
+      failures++;
+      log("control next failed", { attempt: failures, error: String(e?.message ?? e).slice(0, 120) });
+      if (failures >= 3) { await sendIMessage(cfg.selfHandles[0], "⚠️ Finagai couldn't run that task (server error). I've stopped it; please try again."); return; }
+      await new Promise((res) => setTimeout(res, 2000));
+      continue;
+    }
+    failures = 0;
     if (r.status === "done") {
       // Send the final artifact image to Julian's thread (and it is also returned to the chat via control_result).
       const dir = join(OUT_ROOT, "done-" + Date.now()); mkdirSync(dir, { recursive: true });
