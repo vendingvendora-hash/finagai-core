@@ -147,7 +147,7 @@ export function createHandler(cfg, info, log, deps) {
             void deps.concierge(req, res, path);
             return;
         }
-        if (path.startsWith("/control/") && deps.control) {
+        if ((path.startsWith("/control/") || path.startsWith("/mac/")) && deps.control) {
             void deps.control(req, res, path);
             return;
         }
