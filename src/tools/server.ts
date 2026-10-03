@@ -9,6 +9,7 @@ import type pg from "pg";
 import { z } from "zod";
 import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import { appendEvent } from "../db/index.js";
+import { getTaskResult, latestTask } from "../pipelines/j6/control.js";
 import { capResponse, filterByTier, type Tier } from "../guards/output.js";
 import { runCapture, type J2Deps } from "../pipelines/j2/capture.js";
 import { stageGovernanceRequest, type TargetRef } from "../governance/stage.js";
@@ -301,6 +302,21 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
       after: { code: Number(row.code), request: request.slice(0, 200) }, client: deps.client });
     return ok("control_mac", { taskCode: Number(row.code),
       note: "Task queued. Finagai's Mac helper will carry it out and message Julian to approve any step that changes something." });
+  });
+
+  server.registerTool("control_result", {
+    description: "Read the result of a Mac task started with control_mac. Returns its status and, when finished, the summary and the information Finagai gathered (so you can use it in the chat, e.g. build a chart). Omit task_code to read the most recent task.",
+    inputSchema: z.object({ task_code: z.number().int().positive().optional() }),
+  }, async ({ task_code }) => {
+    const r = task_code ? await getTaskResult(deps.pool, task_code) : await latestTask(deps.pool);
+    if (!r) return ok("control_result", { found: false, note: "No such task." });
+    return ok("control_result", {
+      found: true, status: r.status, request: r.request,
+      done: r.status === "done", summary: r.summary, detail: r.detail,
+      note: r.status === "done" ? "Task finished; summary and detail hold what Finagai gathered."
+        : r.status === "waiting_approval" ? "Finagai is waiting for Julian to approve a step in his Messages thread."
+        : r.status === "active" ? "Still running; check again shortly." : `Task is ${r.status}.`,
+    });
   });
 
   deps.extend?.(server, helpers);

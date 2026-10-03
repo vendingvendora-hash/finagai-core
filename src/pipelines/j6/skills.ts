@@ -1,46 +1,86 @@
 /**
- * J6 skill playbooks (ADR-055). Encoded know-how the planner is given based on what the task looks like.
- * This is where "state of the art" lives in practice: reliable procedures, not just a bigger model.
+ * J6 skill playbooks (ADR-055/057). Encoded know-how the planner is given based on the task.
+ * Reliable procedures are where real-world agent quality comes from, more than raw model size.
+ * Each skill: a trigger and a short play. Keep plays concrete and action-oriented.
  */
 export interface Skill { name: string; when: RegExp; play: string }
 
 export const SKILLS: Skill[] = [
   {
     name: "find-in-drive",
-    when: /\b(drive|carpeta|folder|documento|document|archivo|file|licencia|license|pdf|good standing|compliance)\b/i,
+    when: /\b(drive|carpeta|folder|documento|document|archivo|file|licencia|license|pdf|good standing|compliance|contrato|contract)\b/i,
     play: `FIND A FILE IN GOOGLE DRIVE:
-- Julian may have several Google accounts in Chrome. Drive numbers them: /u/0/, /u/1/, /u/2/ ...
-- Go straight to search, do not click through folders: open_url https://drive.google.com/drive/u/0/search?q=<terms> (URL-encode). If no results, try /u/1/ then /u/2/ with the same query.
-- Vendora's files live in a separate Vendora Google account — if the personal account (/u/0/) has nothing, switch to the other account's Drive by changing the /u/N/ number BEFORE asking Julian.
-- When you see the file in results, open it (open_url its link or click it once), let it load, then screenshot to read/send it.
-- Only ask Julian if every account's Drive search returns nothing.`,
+- Julian has several Google accounts in Chrome, numbered /u/0/, /u/1/, /u/2/. Vendora's files are in a SEPARATE Vendora account.
+- Go straight to search: open_url https://drive.google.com/drive/u/0/search?q=<terms> (URL-encode). If empty, repeat with /u/1/ then /u/2/ BEFORE asking Julian.
+- Read the results from the page text. Open the best match, let it load, screenshot it.
+- Report back the file name and what it contains. Only ask Julian if every account returns nothing.`,
+  },
+  {
+    name: "read-or-build-spreadsheet",
+    when: /\b(excel|xlsx|spreadsheet|hoja de c[aá]lculo|utilization|utilizaci[oó]n|numbers|sheet|csv|data|datos|chart|gr[aá]fico|graph)\b/i,
+    play: `READ A SPREADSHEET / GET NUMBERS FOR A CHART:
+- If the file is on the Mac: open_path it (or open in the right app) and read the values from the screen; or if it's a .csv/.xlsx you can read as text, use read_file.
+- Capture the exact figures (labels, %, targets, categories) as the step result so the chat can chart them.
+- If asked to make a chart, gather the numbers first; charts are built in the chat from the data you report. Do not fabricate numbers — read them.`,
   },
   {
     name: "read-gmail",
-    when: /\b(email|correo|gmail|mail|mensaje de|confirmation|confirmaci[oó]n|recibo|receipt|invoice|factura)\b/i,
+    when: /\b(email|correo|gmail|mail|mensaje de|confirmation|confirmaci[oó]n|recibo|receipt|invoice|factura|boleto|ticket)\b/i,
     play: `READ GMAIL:
-- open_url https://mail.google.com/mail/u/0/#search/<terms> (URL-encode). Try /u/1/ etc. if the first account has nothing.
-- Open the matching thread, let it load, screenshot to read it. Never send or reply unless Julian's task says to.`,
+- open_url https://mail.google.com/mail/u/0/#search/<terms> (URL-encode). Try /u/1/ etc. if empty.
+- Open the matching thread, let it load, read it from the page text, report the key facts. Never send/reply unless the task says to (and that needs Julian's ok).`,
+  },
+  {
+    name: "calendar",
+    when: /\b(calendar|calendario|agenda|schedule|meeting|reuni[oó]n|cita|appointment|evento|event|free time|disponibilidad)\b/i,
+    play: `CHECK THE CALENDAR:
+- open_url https://calendar.google.com/calendar/u/0/r (or /u/1/). Read events from the page. Report dates, times, titles, locations. Creating/editing an event is a write and needs Julian's ok.`,
   },
   {
     name: "fill-a-form",
-    when: /\b(form|formulario|apply|aplicar|application|registrar|sign ?up|checkout|rellenar|fill)\b/i,
-    play: `FILL A FORM:
-- Click each field, then type its value. Tab or click to move between fields.
-- Stop and ask Julian for anything you don't have or shouldn't guess (passwords, payment details, personal IDs).
-- Do NOT click the final submit/pay/confirm button on your own — that step needs Julian's approval.`,
+    when: /\b(form|formulario|apply|aplicar|application|registrar|sign ?up|checkout|rellenar|fill|workday|greenhouse|lever)\b/i,
+    play: `FILL A FORM / JOB APPLICATION:
+- Click each field, type its value, Tab or click to the next. Read labels from the page to map fields correctly.
+- Use Julian's profile facts you were given; never invent personal data.
+- Stop with ask{} for anything you don't have or must not guess (passwords, SSN, payment, 2FA).
+- NEVER click the final submit/pay/confirm button yourself — leave it for Julian's approval.`,
   },
   {
     name: "make-a-doc",
-    when: /\b(doc|documento|deck|slides|presentaci[oó]n|presentation|sheet|hoja|spreadsheet|write up|draft a)\b/i,
+    when: /\b(doc|documento|deck|slides|presentaci[oó]n|presentation|memo|carta|letter|draft a|escribe|write a|report|informe)\b/i,
     play: `CREATE A DOCUMENT:
-- Prefer the app Julian already uses (Google Docs/Sheets/Slides in the browser, or Pages/Numbers/Keynote).
-- Build the content step by step; save to the place Julian asked. Saving/downloading is fine; sending it to someone needs approval.`,
+- Use the app Julian uses (Google Docs/Sheets/Slides in the browser, or Pages/Numbers/Keynote).
+- Build content step by step; save where Julian asked (saving/downloading is fine). Sending it to someone needs approval.`,
+  },
+  {
+    name: "download-a-file",
+    when: /\b(download|descargar|bajar|save the|guarda|export|descarga)\b/i,
+    play: `DOWNLOAD / SAVE A FILE:
+- From a web page, use its download control; files land in ~/Downloads. Confirm the file appears (list_files ~/Downloads) and report the path. Moving/deleting afterward needs approval.`,
+  },
+  {
+    name: "organize-files",
+    when: /\b(organize|organizar|rename|renombrar|mover|move|clean up|ordenar|desktop|escritorio|downloads)\b/i,
+    play: `ORGANIZE FILES:
+- list_files the folder first, decide the plan, then act. Renaming via Finder or a single run{} command is efficient but run{} and move_file/trash_file each need Julian's ok. Prefer small, reversible moves; never trash without ok.`,
+  },
+  {
+    name: "research-web",
+    when: /\b(research|investiga|busca en|look up|precio|price|compare|compara|find out|aver[ií]gua|news|noticias)\b/i,
+    play: `RESEARCH ON THE WEB:
+- open_url the site or a search URL; read results from the page text; open the best sources; report concrete facts with the source. Confirm fast-changing facts (prices, availability) on the real page.`,
+  },
+  {
+    name: "vendora",
+    when: /\b(vendora|compliance|licencia|license|sales and use|tobacco|liquor|venue|bar|vending)\b/i,
+    play: `VENDORA CONTEXT:
+- Vendora's documents live in a SEPARATE Vendora Google account/Drive — check /u/1/ and /u/2/ Drive, not just the personal /u/0/.
+- Licenses/compliance docs are usually PDFs in a compliance folder. Search each account before concluding something is missing.`,
   },
 ];
 
-/** The playbooks whose triggers match the request, joined for the system prompt. */
+/** The playbooks whose triggers match the request, joined for the system prompt (cap to keep the prompt tight). */
 export function skillsFor(request: string): string {
-  const hits = SKILLS.filter((s) => s.when.test(request)).map((s) => s.play);
+  const hits = SKILLS.filter((s) => s.when.test(request)).slice(0, 4).map((s) => s.play);
   return hits.length ? `\nRelevant playbooks:\n${hits.join("\n\n")}` : "";
 }

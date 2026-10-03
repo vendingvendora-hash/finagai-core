@@ -6,7 +6,7 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { createPool } from "../../src/db/index.js";
 import type { ModelRequest, ModelResult } from "../../src/llm/types.js";
-import { cancelTask, createTask, decideStep, getStep, planNext, recordRun, type ControlDeps } from "../../src/pipelines/j6/control.js";
+import { cancelTask, createTask, decideStep, getStep, getTaskResult, latestTask, planNext, recordRun, type ControlDeps } from "../../src/pipelines/j6/control.js";
 
 const url = process.env.INTEGRATION_DATABASE_URL;
 const pool = url ? createPool(url) : undefined;
@@ -108,5 +108,23 @@ describe.skipIf(!pool)("J6 control lifecycle", () => {
     expect(dec.status).toBe("approved");
     const ev = (await pool!.query(`SELECT actor FROM event WHERE action = 'control_step_approved' ORDER BY id DESC LIMIT 1`)).rows[0];
     expect(ev.actor).toBe("julian");                 // approval is Julian's, never the contact's
+  });
+
+  it("a finished task stores a summary and detail the chat can read (ADR-056)", async () => {
+    const task = await createTask(pool!, "read the utilization number", "chat");
+    const model = new Script([
+      { kind: "screenshot", params: {}, risk: "read", summary: "look" },
+      { kind: "read_file", params: { path: "~/x.csv" }, risk: "read", summary: "read the file" },
+      { kind: "done", summary: "Utilization is 72% vs 80% target" },
+    ]);
+    const d = deps(model);
+    const a = await planNext(d, task.id, "s"); await recordRun(pool!, a.step!.id, true, "screen");
+    const b = await planNext(d, task.id, "s", "screen"); await recordRun(pool!, b.step!.id, true, "Q1 72%, Q2 75%, target 80%");
+    const c = await planNext(d, task.id, "s", "Q1 72%, Q2 75%, target 80%");
+    expect(c.status).toBe("done");
+    const r = await getTaskResult(pool!, task.code);
+    expect(r!.summary).toMatch(/72%/);
+    expect(r!.detail).toMatch(/Q1 72%, Q2 75%, target 80%/);
+    expect((await latestTask(pool!))!.code).toBe(task.code);
   });
 });

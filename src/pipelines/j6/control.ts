@@ -16,7 +16,7 @@ import type { MeteredModelClient } from "../../llm/metered.js";
 import { BudgetBlockedError, type ContentBlock } from "../../llm/types.js";
 import { skillsFor } from "./skills.js";
 
-export const J6_PROMPT_VERSION = "j6-control-v2";
+export const J6_PROMPT_VERSION = "j6-control-v3";
 export const MAX_STEPS_PER_TASK = 80;
 
 /** Actions that only observe. Everything else is a WRITE and needs Julian's approval. */
@@ -93,7 +93,8 @@ Operating principles:
 - Verify, don't assume: use "expect" to say what should happen, and check it next turn via the screenshot/text.
 - Never repeat an action that didn't change the screen — switch approach.
 - Passwords, payment confirmations and legal "I agree" are the only things you must hand to Julian with ask{}. You never type passwords.
-- When the task is done, output done with a summary.${skillsFor(request)}`;
+- As you go, when a read step reveals the answer (a value, a file's contents, an event), state it plainly in the step result so it can be used later.
+- When the task is done, output done with a summary that CONTAINS the answer (the numbers, the file name, what you found), not just "done".${skillsFor(request)}`;
 }
 
 export function parseStep(text: string): Step | null {
@@ -183,7 +184,10 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
   if (!step) { await setTaskStatus(pool, taskId, "failed"); return { status: "failed", message: "could not plan the next step" }; }
 
   if (step.done) {
-    await setTaskStatus(pool, taskId, "done");
+    // Gather what the read steps found so the chat can read the answer (ADR-056).
+    const detail = prior.filter((x) => x.result && x.result.trim()).map((x) => `- ${x.summary}: ${x.result!.slice(0, 1200)}`).join("\n").slice(0, 20000);
+    await pool.query(`UPDATE control_task SET status = 'done', result_summary = $2, result_detail = $3, updated_at = now() WHERE id = $1`,
+      [taskId, step.summary.slice(0, 1000), detail || null]);
     await appendEvent(pool, { actor: "j6", action: "control_task_done", entityType: "control_task", entityId: taskId, after: { summary: step.summary } });
     return task.requester ? { status: "done", message: step.summary, requester: task.requester } : { status: "done", message: step.summary };
   }
@@ -272,6 +276,23 @@ export async function getStep(pool: pg.Pool, stepId: string): Promise<{ id: stri
   const r = await pool.query<{ id: string; kind: string; params: Record<string, unknown>; summary: string }>(
     `SELECT id, kind, params, summary FROM control_step WHERE id = $1 AND status = 'approved'`, [stepId]);
   return r.rows[0] ?? null;
+}
+
+export interface TaskResult { code: number; status: string; request: string; summary: string | null; detail: string | null; updatedAt: string }
+
+/** Read a task's current state and result, for the chat that started it (ADR-056). */
+export async function getTaskResult(pool: pg.Pool, code: number): Promise<TaskResult | null> {
+  const r = await pool.query<{ code: number; status: string; request: string; result_summary: string | null; result_detail: string | null; updated_at: Date }>(
+    `SELECT code, status, request, result_summary, result_detail, updated_at FROM control_task WHERE code = $1`, [code]);
+  const t = r.rows[0];
+  if (!t) return null;
+  return { code: Number(t.code), status: t.status, request: t.request, summary: t.result_summary, detail: t.result_detail, updatedAt: t.updated_at.toISOString() };
+}
+
+/** The latest task, so the chat can check "the task I just started" without needing its code. */
+export async function latestTask(pool: pg.Pool): Promise<TaskResult | null> {
+  const r = await pool.query<{ code: number }>(`SELECT code FROM control_task ORDER BY created_at DESC LIMIT 1`);
+  return r.rows[0] ? getTaskResult(pool, Number(r.rows[0].code)) : null;
 }
 
 export async function recordRun(pool: pg.Pool, stepId: string, ok: boolean, result: string): Promise<void> {

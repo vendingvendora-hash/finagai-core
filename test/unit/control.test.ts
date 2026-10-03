@@ -99,6 +99,9 @@ describe("J6 state-of-the-art thinking (ADR-055)", () => {
     expect(skillsFor("mándame la licencia de compliance de la carpeta de Drive")).toMatch(/FIND A FILE IN GOOGLE DRIVE/);
     expect(skillsFor("read the confirmation email from Delta")).toMatch(/READ GMAIL/);
     expect(skillsFor("fill out the Workday application")).toMatch(/FILL A FORM/);
+    expect(skillsFor("read my utilization excel and chart it")).toMatch(/READ A SPREADSHEET/);
+    expect(skillsFor("what's on my calendar tomorrow")).toMatch(/CHECK THE CALENDAR/);
+    expect(skillsFor("find Vendora's compliance license")).toMatch(/VENDORA CONTEXT/);
     expect(skillsFor("just say hi")).toBe("");
   });
   it("the planner prompt drives plan-act-reflect, multi-account Drive, and verification", () => {
