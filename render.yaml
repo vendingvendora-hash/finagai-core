@@ -28,7 +28,7 @@ services:
     plan: starter
     region: virginia
     # --include=dev: NODE_ENV=production would otherwise skip TypeScript and the build would fail.
-    buildCommand: npm ci --include=dev && npm run build
+    buildCommand: npm ci --omit=dev
     startCommand: node dist/src/server/index.js
     healthCheckPath: /health
     autoDeploy: true
@@ -41,7 +41,7 @@ services:
     plan: starter
     region: virginia
     schedule: "*/15 * * * *"
-    buildCommand: npm ci --include=dev && npm run build
+    buildCommand: npm ci --omit=dev
     startCommand: node dist/src/jobs/scheduler.js
     envVars:
       - fromGroup: finagai-core
