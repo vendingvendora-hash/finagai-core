@@ -62,9 +62,17 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         const taskId = await taskIdFrom(body);
         if (!taskId) return json(res, 404, { error: "task_not_found" });
         const shot = typeof body.screenshot === "string" ? body.screenshot : null;
-        const perception: { pageText?: string; axTree?: string } = {};
+        const perception: { pageText?: string; axTree?: string; context?: { app?: string; window?: string; url?: string } } = {};
         if (typeof body.pageText === "string") perception.pageText = body.pageText;
         if (typeof body.axTree === "string") perception.axTree = body.axTree;
+        if (body.context && typeof body.context === "object") {
+          const c = body.context as Record<string, unknown>;
+          perception.context = {
+            ...(typeof c.app === "string" ? { app: c.app } : {}),
+            ...(typeof c.window === "string" ? { window: c.window } : {}),
+            ...(typeof c.url === "string" ? { url: c.url } : {}),
+          };
+        }
         const r = await planNext(deps, taskId, shot, typeof body.lastResult === "string" ? body.lastResult : undefined, perception);
         log("control next", { status: r.status, kind: r.step?.kind });
         return json(res, 200, r);

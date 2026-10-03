@@ -144,7 +144,7 @@ export interface NextResult {
  * Returns the next thing for the helper to do: run a read step now, run a step Julian already approved,
  * or wait while a write step is queued for approval.
  */
-export async function planNext(deps: ControlDeps, taskId: string, screenshotB64: string | null, lastResult?: string, perception?: { pageText?: string; axTree?: string }): Promise<NextResult> {
+export async function planNext(deps: ControlDeps, taskId: string, screenshotB64: string | null, lastResult?: string, perception?: { pageText?: string; axTree?: string; context?: { app?: string; window?: string; url?: string } }): Promise<NextResult> {
   // The latest screenshot doubles as the artifact image if the agent declares done this turn.
   const { pool } = deps;
   const task = (await pool.query<{ request: string; status: string; auto: boolean; requester: string | null }>(
@@ -162,7 +162,12 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
   const history = prior.map((s) => `${s.seq}. [${s.status}] ${s.summary}${s.result ? ` -> ${s.result.slice(0, 200)}` : ""}`).join("\n");
   const now = (deps.now ?? (() => new Date()))();
   const today = now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  const ctx = perception?.context;
+  const ctxLine = ctx && (ctx.app || ctx.window || ctx.url)
+    ? `Current Mac context — frontmost app: ${ctx.app ?? "?"}${ctx.window ? `; active window: “${ctx.window}”` : ""}${ctx.url ? `; browser URL: ${ctx.url}` : ""}. Use this to resolve "this"/"the open document"/"the spreadsheet I have open" when Julian is vague.`
+    : "";
   const percept = [
+    ctxLine,
     perception?.pageText ? `Visible page text (truncated):\n${perception.pageText.slice(0, 4000)}` : "",
     perception?.axTree ? `Accessibility tree / clickable elements (truncated):\n${perception.axTree.slice(0, 4000)}` : "",
   ].filter(Boolean).join("\n\n");

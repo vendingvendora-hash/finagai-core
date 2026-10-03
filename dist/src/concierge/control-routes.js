@@ -77,6 +77,14 @@ export function createControlHandler(deps, token, log) {
                     perception.pageText = body.pageText;
                 if (typeof body.axTree === "string")
                     perception.axTree = body.axTree;
+                if (body.context && typeof body.context === "object") {
+                    const c = body.context;
+                    perception.context = {
+                        ...(typeof c.app === "string" ? { app: c.app } : {}),
+                        ...(typeof c.window === "string" ? { window: c.window } : {}),
+                        ...(typeof c.url === "string" ? { url: c.url } : {}),
+                    };
+                }
                 const r = await planNext(deps, taskId, shot, typeof body.lastResult === "string" ? body.lastResult : undefined, perception);
                 log("control next", { status: r.status, kind: r.step?.kind });
                 return json(res, 200, r);

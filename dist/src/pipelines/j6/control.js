@@ -113,7 +113,12 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
     const history = prior.map((s) => `${s.seq}. [${s.status}] ${s.summary}${s.result ? ` -> ${s.result.slice(0, 200)}` : ""}`).join("\n");
     const now = (deps.now ?? (() => new Date()))();
     const today = now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+    const ctx = perception?.context;
+    const ctxLine = ctx && (ctx.app || ctx.window || ctx.url)
+        ? `Current Mac context — frontmost app: ${ctx.app ?? "?"}${ctx.window ? `; active window: “${ctx.window}”` : ""}${ctx.url ? `; browser URL: ${ctx.url}` : ""}. Use this to resolve "this"/"the open document"/"the spreadsheet I have open" when Julian is vague.`
+        : "";
     const percept = [
+        ctxLine,
         perception?.pageText ? `Visible page text (truncated):\n${perception.pageText.slice(0, 4000)}` : "",
         perception?.axTree ? `Accessibility tree / clickable elements (truncated):\n${perception.axTree.slice(0, 4000)}` : "",
     ].filter(Boolean).join("\n\n");

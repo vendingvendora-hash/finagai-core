@@ -398,7 +398,14 @@ async function perception() {
     'tell application "Google Chrome" to set a to execute of active tab of front window javascript "(function(){try{var e=[...document.querySelectorAll(\'a,button,[role=button],input,[role=link]\')].slice(0,60).map(function(x){var r=x.getBoundingClientRect();if(r.width<2||r.height<2)return null;var t=(x.innerText||x.value||x.getAttribute(\'aria-label\')||\'\').trim().slice(0,40);return t?((Math.round(r.left+r.width/2))+\',\'+(Math.round(r.top+r.height/2))+\' \'+t):null}).filter(Boolean);return e.join(\'\\n\')}catch(e){return\'\'}})()"',
     'return a', 'end if', 'return ""']).catch(() => "");
   const clean = (x) => (x ? String(x).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " ").slice(0, 4000) : undefined);
-  return { pageText: clean(chromeText), axTree: clean(chromeAx) };
+  // Current context: frontmost app + active window (reliable JXA), plus browser URL when applicable.
+  const fm = await getFrontmost(run).catch(() => ({ ok: false }));
+  const tab = await browserActiveTab(run).catch(() => ({ ok: false }));
+  const context = {};
+  if (fm.ok && fm.app) context.app = fm.app;
+  if (fm.ok && fm.window) context.window = fm.window;
+  if (tab.ok && tab.url) context.url = tab.url;
+  return { pageText: clean(chromeText), axTree: clean(chromeAx), context };
 }
 
 /** Full-screen screenshot as base64 PNG (downscaled so uploads stay small). */
@@ -449,7 +456,7 @@ export async function driveControl(cfg, taskId) {
     const per = await perception().catch(() => ({}));
     let r;
     try {
-      r = await core(cfg, "/control/next", { taskId, screenshot: shot, lastResult, pageText: per.pageText, axTree: per.axTree });
+      r = await core(cfg, "/control/next", { taskId, screenshot: shot, lastResult, pageText: per.pageText, axTree: per.axTree, context: per.context });
     } catch (e) {
       failures++;
       log("control next failed", { attempt: failures, error: String(e?.message ?? e).slice(0, 120) });
