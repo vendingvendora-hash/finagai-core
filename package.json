@@ -8,7 +8,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "node --max-old-space-size=400 ./node_modules/typescript/bin/tsc -p tsconfig.build.json",
+    "build": "tsc --version && tsc -p tsconfig.build.json --pretty false",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run test/unit",
     "verify:migrations": "bash scripts/verify-migrations.sh",
