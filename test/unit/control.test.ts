@@ -17,9 +17,12 @@ describe("J6 approval gate (the core safety property)", () => {
     expect(needsApproval(step({ kind: "screenshot", risk: "read" }), false)).toBe(false);
     expect(needsApproval(step({ kind: "screenshot", risk: "read" }), true)).toBe(false);
   });
-  it("with approval off (auto mode off), every write step needs an ok", () => {
+  it("navigation (click/type/scroll/open) runs on its own in auto mode", () => {
+    for (const kind of ["click", "double_click", "type", "key", "scroll", "open_app", "open_url", "move", "hotkey"])
+      expect(needsApproval(step({ kind, summary: "navigate" }), true)).toBe(false);
+  });
+  it("without auto mode, writes still confirm (used for sensitive tasks)", () => {
     expect(needsApproval(step({ kind: "click" }), false)).toBe(true);
-    expect(needsApproval(step({ kind: "type" }), false)).toBe(true);
   });
   it("even in auto mode, running commands and file deletion always need an ok", () => {
     for (const kind of ALWAYS_CONFIRM) expect(needsApproval(step({ kind }), true)).toBe(true);
@@ -28,6 +31,8 @@ describe("J6 approval gate (the core safety property)", () => {
     expect(needsApproval(step({ kind: "click", summary: 'Click "Send" to email Maria' }), true)).toBe(true);
     expect(needsApproval(step({ kind: "click", summary: "Confirm purchase of the flight" }), true)).toBe(true);
     expect(needsApproval(step({ kind: "click", summary: "Post the tweet" }), true)).toBe(true);
+    expect(needsApproval(step({ kind: "click", summary: "Enviar el mensaje a Santiago" }), true)).toBe(true);
+    expect(needsApproval(step({ kind: "click", summary: "Borrar el archivo" }), true)).toBe(true);
   });
   it("in auto mode, an ordinary click (open a menu, focus a field) can run without an ok", () => {
     expect(needsApproval(step({ kind: "click", summary: "Open the File menu" }), true)).toBe(false);

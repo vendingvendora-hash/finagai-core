@@ -45,7 +45,7 @@ export interface ControlDeps {
 
 /** Irreversible or high-blast-radius actions ALWAYS need an explicit per-step ok, even in auto mode. */
 export const ALWAYS_CONFIRM = new Set(["run", "trash_file", "move_file"]);
-const IRREVERSIBLE_HINT = /\b(send|pay|transfer|delete|remove|post|publish|submit|confirm purchase|place order|buy|wire)\b/i;
+const IRREVERSIBLE_HINT = /\b(send|enviar|mandar|pay|pagar|transfer|transferir|delete|borrar|eliminar|remove|post|publish|publicar|submit|enviar formulario|confirm purchase|place order|buy|comprar|wire|reply all)\b/i;
 
 export function classifyRisk(kind: string): "read" | "write" {
   return READ_KINDS.has(kind) ? "read" : "write";
@@ -73,7 +73,13 @@ Action kinds:
 - Observe (risk "read"): screenshot; read_text {}; list_apps {}; list_files {"dir":"~/..."}; read_file {"path":"~/..."}; wait {"seconds":N}; ask {"question":"..."} when you genuinely need Julian to decide; done {} when the task is finished.
 - Act (risk "write"): click {"x":N,"y":N}; double_click; right_click; move {"x","y"}; drag {"from":[x,y],"to":[x,y]}; scroll {"x","y","amount":N,"dir":"up|down"}; type {"text":"..."}; key {"key":"return|tab|esc|..."}; hotkey {"keys":["cmd","c"]}; open_app {"name":"Safari"}; open_url {"url":"https://..."}; open_path {"path":"~/..."}; run {"cmd":"..."} (a shell command); move_file {"from","to"}; trash_file {"path"}.
 
-How to find things (important): do exactly what Julian would do. If something lives in Google Drive, Gmail, or any website — including files that are only on the web, or anything behind a login — OPEN THE BROWSER (open_url to drive.google.com, mail.google.com, or the site), navigate, use the on-page search, open the item, and read it from the screen or screenshot it. Julian is already signed in to his accounts in his browser, so you can reach whatever he can reach. Don't give up saying a file isn't on the Mac: look for it the way he would, in the browser.
+How to find things (important): do exactly what Julian would do, and prefer the RELIABLE way over clicking around a web UI.
+- To find something in Google Drive: open_url to a Drive search URL, e.g. https://drive.google.com/drive/search?q=compliance (URL-encode the query). That lands directly on the results; you do not need to double-click through folders.
+- To open a specific Drive file or folder you can see a link for, open_url that link directly.
+- For Gmail: open_url https://mail.google.com/mail/u/0/#search/<terms>. For any site: open_url the page.
+- After an open_url, the next screenshot already shows the loaded page (it waits for load). READ it; do not reopen the same thing. If a page shows what you need, screenshot it and move on.
+- Never repeat the same action twice. If a click or double-click did not visibly change the screen, switch approach (type a URL, use search, press Enter once) rather than repeating.
+Julian is signed in to his accounts in Chrome, so you can reach whatever he can.
 
 Rules:
 - Coordinates are in the screenshot's own pixels; take a fresh screenshot after anything that changes the screen.
@@ -134,7 +140,7 @@ export interface NextResult {
 export async function planNext(deps: ControlDeps, taskId: string, screenshotB64: string | null, lastResult?: string): Promise<NextResult> {
   const { pool } = deps;
   const task = (await pool.query<{ request: string; status: string; auto: boolean; requester: string | null }>(
-    `SELECT request, status, false AS auto, requester FROM control_task WHERE id = $1`, [taskId])).rows[0];
+    `SELECT request, status, true AS auto, requester FROM control_task WHERE id = $1`, [taskId])).rows[0];
   if (!task) return { status: "failed", message: "unknown task" };
   if (task.status === "cancelled") return { status: "cancelled" };
 
@@ -171,6 +177,16 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
     return task.requester ? { status: "done", message: step.summary, requester: task.requester } : { status: "done", message: step.summary };
   }
   if (step.kind === "ask") { await setTaskStatus(pool, taskId, "waiting_approval"); return { status: "ask", message: step.question ?? step.summary }; }
+
+  // Loop guard: the same action repeating means the agent can't tell it made progress.
+  const recent = prior.slice(-4).map((x) => `${x.kind}|${x.summary}`.toLowerCase());
+  const sig = `${step.kind}|${step.summary}`.toLowerCase();
+  const repeats = recent.filter((r) => r === sig).length;
+  if (repeats >= 2) {
+    await setTaskStatus(pool, taskId, "waiting_approval");
+    deps.log?.("control loop detected", { kind: step.kind });
+    return { status: "ask", message: `I keep trying the same step ("${step.summary}") without it working. Tell me how to proceed, or stop ${""}.` };
+  }
 
   const seq = prior.length + 1;
   const approval = needsApproval(step, task.auto);

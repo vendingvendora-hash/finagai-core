@@ -25,13 +25,13 @@ const deps = (m: Script): ControlDeps => ({ pool: pool!, model: m, modelId: "cla
 describe.skipIf(!pool)("J6 control lifecycle", () => {
   afterAll(async () => { await pool?.end(); });
 
-  it("read runs without approval; write waits; approval is one-shot; done closes the task", async () => {
-    const task = await createTask(pool!, "Open Notes and add a reminder", "chat");
+  it("navigation auto-runs; a send step still waits; approval one-shot; done closes the task", async () => {
+    const task = await createTask(pool!, "Open Drive and send Santiago the file", "chat");
     const model = new Script([
       { kind: "screenshot", params: {}, risk: "read", summary: "Look at the screen" },
-      { kind: "open_app", params: { name: "Notes" }, risk: "write", summary: "Open the Notes app" },
-      { kind: "type", params: { text: "Reminder" }, risk: "write", summary: "Type the reminder" },
-      { kind: "done", summary: "Added the reminder" },
+      { kind: "open_url", params: { url: "https://drive.google.com/drive/search?q=x" }, risk: "write", summary: "Open Drive search" },
+      { kind: "click", params: { x: 1, y: 1 }, risk: "write", summary: "Enviar el archivo a Santiago" },
+      { kind: "done", summary: "Sent" },
     ]);
     const d = deps(model);
 
@@ -40,28 +40,31 @@ describe.skipIf(!pool)("J6 control lifecycle", () => {
     await recordRun(pool!, r1.step!.id, true, "screenshot taken");
 
     const r2 = await planNext(d, task.id, "shot2", "screenshot taken");
-    expect(r2.status).toBe("await_approval");
-    expect(r2.step!.summary).toMatch(/Open the Notes app/);
-    // Not yet runnable: getStep only returns approved steps.
-    expect(await getStep(pool!, r2.step!.id)).toBeNull();
-    // Task is blocked on approval.
-    expect((await pool!.query(`SELECT status FROM control_task WHERE id = $1`, [task.id])).rows[0].status).toBe("waiting_approval");
+    expect(r2.status).toBe("run_approved");                 // open_url auto-runs in auto mode
+    expect(await getStep(pool!, r2.step!.id)).not.toBeNull();
+    await recordRun(pool!, r2.step!.id, true, "opened Drive");
 
-    const dec = await decideStep(pool!, r2.step!.code, true);
+    const r3 = await planNext(d, task.id, "shot3", "opened Drive");
+    expect(r3.status).toBe("await_approval");               // "enviar ... a Santiago" still confirms
+    const dec = await decideStep(pool!, r3.step!.code, true);
     expect(dec.status).toBe("approved");
-    expect(await decideStep(pool!, r2.step!.code, true)).toEqual({ status: "already_handled" }); // one-shot
-    const step = await getStep(pool!, r2.step!.id);
-    expect(step!.kind).toBe("open_app");
-    await recordRun(pool!, r2.step!.id, true, "opened Notes");
+    expect(await decideStep(pool!, r3.step!.code, true)).toEqual({ status: "already_handled" });
+    await recordRun(pool!, r3.step!.id, true, "sent");
 
-    const r3 = await planNext(d, task.id, "shot3", "opened Notes");
-    expect(r3.status).toBe("await_approval");
-    await decideStep(pool!, r3.step!.code, false); // reject this one
-    expect((await pool!.query(`SELECT status FROM control_step WHERE id = $1`, [r3.step!.id])).rows[0].status).toBe("rejected");
-
-    const r4 = await planNext(d, task.id, "shot4", "user skipped typing");
+    const r4 = await planNext(d, task.id, "shot4", "sent");
     expect(r4.status).toBe("done");
-    expect((await pool!.query(`SELECT status FROM control_task WHERE id = $1`, [task.id])).rows[0].status).toBe("done");
+  });
+
+  it("stops asking when a step repeats (loop guard)", async () => {
+    const task = await createTask(pool!, "Open the compliance folder", "chat");
+    const model = new Script([{ kind: "double_click", params: { x: 5, y: 5 }, risk: "write", summary: "Open the compliance folder" }]);
+    const d = deps(model);
+    // First two identical steps auto-run; the third identical one trips the guard and asks.
+    const a = await planNext(d, task.id, "s"); await recordRun(pool!, a.step!.id, true, "nothing changed");
+    const b = await planNext(d, task.id, "s", "nothing changed"); await recordRun(pool!, b.step!.id, true, "nothing changed");
+    const c = await planNext(d, task.id, "s", "nothing changed");
+    expect(c.status).toBe("ask");
+    expect(c.message).toMatch(/same step/i);
   });
 
   it("the database refuses a write step marked done without a decision", async () => {
@@ -99,8 +102,8 @@ describe.skipIf(!pool)("J6 control lifecycle", () => {
     const row = (await pool!.query(`SELECT origin, requester FROM control_task WHERE id = $1`, [task.id])).rows[0];
     expect(row.origin).toBe("contact");
     expect(row.requester).toBe("Santiago");
-    const r = await planNext(deps(new Script([{ kind: "open_app", params: { name: "Numbers" }, risk: "write", summary: "Open Numbers" }])), task.id, "shot");
-    expect(r.status).toBe("await_approval");         // a contact's request never auto-runs a write step
+    const r = await planNext(deps(new Script([{ kind: "click", params: { x: 1, y: 1 }, risk: "write", summary: "Enviar el chart a Santiago" }])), task.id, "shot");
+    expect(r.status).toBe("await_approval");         // sending to the contact always needs Julian's ok
     const dec = await decideStep(pool!, r.step!.code, true);
     expect(dec.status).toBe("approved");
     const ev = (await pool!.query(`SELECT actor FROM event WHERE action = 'control_step_approved' ORDER BY id DESC LIMIT 1`)).rows[0];
