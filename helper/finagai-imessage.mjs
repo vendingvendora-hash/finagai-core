@@ -639,10 +639,19 @@ async function tick(cfg, state) {
     }
     for (const t of resp.controlTasks ?? []) {
       const _req = String(t.request ?? "");
-      const _chartLike = /\b(chart|trend|graph|plot|gr[aá]fico|visuali[sz]e)\b/i.test(_req) && /\b(excel|xlsx|workbook|spreadsheet|\.xls|file|archivo|hoja)\b/i.test(_req);
+      // A chart/graph/plot word ALONE is enough — don't also require the word "spreadsheet".
+      const _chartLike = /\b(chart|trend|graph|plot|gr[aá]fico|visuali[sz]e|diagram)\b/i.test(_req);
       if (_chartLike) {
-        const m = _req.match(/([A-Za-z0-9 _.\-()]+\.(?:xlsx|xlsm|xls))/i) || _req.match(/\b(Altarum[A-Za-z0-9_\-]*)/i) || _req.match(/file is ([A-Za-z0-9_\-]+)/i);
-        const filename = (m ? m[1] : _req).trim();
+        // Extract the subject: an explicit .xls name, a quoted title, or the text between the chart verb
+        // and a trailing "and send…/for…/to me" clause.
+        let filename = "";
+        const em = _req.match(/([A-Za-z0-9 _.\-()]+\.(?:xlsx|xlsm|xls))/i) || _req.match(/[“"']([^”"']{2,80})[”"']/);
+        if (em) filename = em[1].trim();
+        if (!filename) {
+          const vm = _req.match(/\b(?:chart|graph|plot|visuali[sz]e|diagram|trend(?:\s+chart)?)\s+(?:of\s+|the\s+|a\s+|my\s+)?(.+?)(?:\s+(?:and|then|,|for me|for Santiago|and send.*|to me|please)\b.*)?$/i);
+          if (vm) filename = vm[1].replace(/\s+(excel|xlsx|workbook|spreadsheet|file|sheet)\b.*$/i, "").trim();
+        }
+        if (!filename) filename = _req.trim();
         taskCodeCache[t.taskId] = t.taskCode;
         log("routing contact request to mac chart", { label: t.label, filename });
         await sendIMessage(cfg.selfHandles[0], `🖥️ ${t.label} asked Finagai to chart “${filename}”. Building it now.`);
