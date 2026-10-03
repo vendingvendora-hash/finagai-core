@@ -474,6 +474,9 @@ export async function driveControl(cfg, taskId) {
       if (b64) { png = join(dir, "result.png"); writeFileSync(png, Buffer.from(b64, "base64")); }
       await sendIMessage(cfg.selfHandles[0], `✅ Finagai finished${r.requester ? ` ${r.requester}'s task` : ""}: ${r.message || "done"}`);
       if (png) await sendIMessageFile(cfg.selfHandles[0], png).catch(() => {});
+      // Register the result image as an artifact (kind "result") so "send <contact>" can forward it too,
+      // not just charts.
+      if (png) await core(cfg, "/artifact/register", { kind: "result", mime: "image/png", storageRef: png, summary: r.message || "task result", conversation: "self" }).catch(() => {});
       if (r.requester && png) {
         const handle = (cfg.contacts.find((c) => c.label === r.requester) || {}).handle;
         if (handle) await sendIMessage(cfg.selfHandles[0], `Reply “send ${r.requester}” to forward this to ${r.requester}.`);
@@ -689,10 +692,11 @@ async function tick(cfg, state) {
       const label = sendM[1].trim().toLowerCase();
       const contact = cfg.contacts.find((c) => c.label.toLowerCase() === label);
       if (!contact) { await sendIMessage(cfg.selfHandles[0], `I don't have a contact named “${sendM[1].trim()}”. Try: ${cfg.contacts.map((c)=>c.label).join(", ")}.`); continue; }
-      const art = await core(cfg, "/artifact/recent", { conversation: "self", kind: "chart" }).catch(() => null);
+      // Resolve the most recent artifact of ANY kind (chart, Drive screenshot, task result), not just charts.
+      const art = await core(cfg, "/artifact/recent", { conversation: "self" }).catch(() => null);
       const path = art && art.artifact && existsSync(art.artifact.storageRef) ? art.artifact.storageRef : null;
-      if (!path) { await sendIMessage(cfg.selfHandles[0], "I don't have a recent chart to send. Ask me to make one first."); continue; }
-      try { await sendIMessageFile(contact.handle, path); await sendIMessage(cfg.selfHandles[0], `✅ Sent the chart to ${contact.label}.`); if (art.artifact) await core(cfg, "/artifact/sent", { id: art.artifact.id }).catch(()=>{}); log("forwarded chart to contact", { contact: contact.label }); }
+      if (!path) { await sendIMessage(cfg.selfHandles[0], "I don't have anything recent to send. Ask me to make or find something first."); continue; }
+      try { await sendIMessageFile(contact.handle, path); await sendIMessage(cfg.selfHandles[0], `✅ Sent it to ${contact.label}.`); if (art.artifact) await core(cfg, "/artifact/sent", { id: art.artifact.id }).catch(()=>{}); log("forwarded artifact to contact", { contact: contact.label, kind: art.artifact?.kind }); }
       catch (e) { await sendIMessage(cfg.selfHandles[0], `⚠️ Couldn't send to ${contact.label}: ${String(e?.message ?? e).slice(0,120)}`); }
       continue;
     }
