@@ -254,6 +254,29 @@ export function buildMcpServer(deps) {
         return ok("control_mac", { taskCode: Number(row.code),
             note: "Task queued. Finagai's Mac helper will carry it out and message Julian to approve any step that changes something." });
     });
+    server.registerTool("make_mac_chart", {
+        description: "Find a spreadsheet on Julian's Mac by (approximate) name, read it, detect the best trend, generate a real chart, and return the chart image. Use when Julian asks to chart/visualize data from a named local Excel/workbook. After calling this, read the result with control_result to show the image.",
+        inputSchema: z.object({ filename: z.string().min(1).max(200), title: z.string().max(200).optional() }),
+    }, async ({ filename, title }) => {
+        const t = await deps.pool.query(`INSERT INTO control_task (request, origin) VALUES ($1, 'chat') RETURNING id, code`, [`mac_chart:${filename}${title ? `::${title}` : ""}`]);
+        const row = t.rows[0];
+        await appendEvent(deps.pool, { actor: "julian", action: "control_task_created", entityType: "control_task", entityId: row.id, after: { code: Number(row.code), kind: "mac_chart", filename } });
+        // Same-turn: wait for the Mac helper to find->parse->chart->return (bounded). Then hand back the image.
+        const deadline = Date.now() + 90_000;
+        while (Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 2500));
+            const q = await deps.pool.query(`SELECT status, result_summary, result_image_b64 FROM control_task WHERE id = $1`, [row.id]);
+            const t0 = q.rows[0];
+            if (t0 && (t0.status === "done" || t0.status === "failed")) {
+                await audit("make_mac_chart", "ok");
+                const content = [{ type: "text", text: JSON.stringify({ taskCode: Number(row.code), status: t0.status, summary: t0.result_summary, hasImage: Boolean(t0.result_image_b64) }) }];
+                if (t0.result_image_b64)
+                    content.push({ type: "image", data: t0.result_image_b64, mimeType: "image/png" });
+                return { content };
+            }
+        }
+        return ok("make_mac_chart", { taskCode: Number(row.code), note: "Started; the Mac helper is still working. Read control_result with this taskCode in a moment to show the image." });
+    });
     server.registerTool("control_result", {
         description: "Read the result of a Mac task started with control_mac. Returns its status and, when finished, the summary, the information Finagai gathered, AND the final screenshot/chart image so you can show it to Julian directly in the chat. Omit task_code to read the most recent task.",
         inputSchema: z.object({ task_code: z.number().int().positive().optional() }),

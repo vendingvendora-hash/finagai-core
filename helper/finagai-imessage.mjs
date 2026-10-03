@@ -225,6 +225,54 @@ export async function findEverything(queries) {
   return [...files, ...extra];
 }
 
+// ------------------------------------------------------------------------------ M01 Mac operator
+
+/** Find spreadsheet candidates by approximate name using Spotlight, then rank locally. */
+export async function mac_find_workbooks(requested) {
+  const stem = requested.replace(/\.(xlsx|xlsm|xls)$/i, "");
+  const queries = [stem, stem.replace(/[_-]+/g, " "), stem.replace(/\s+/g, "_")];
+  const roots = [homedir(), ...CLOUD_DIRS.map((d) => join(homedir(), d)).filter((d) => existsSync(d))];
+  const hits = new Set();
+  for (const q of [...new Set(queries)]) {
+    for (const root of roots) {
+      const out = await run("/usr/bin/mdfind", ["-onlyin", root, q], { timeout: 15_000, maxBuffer: 8 * 1024 * 1024 }).then((r) => r.stdout).catch(() => "");
+      for (const p of out.split("\n").filter(Boolean)) if (/\.(xlsx|xlsm|xls)$/i.test(p) && !EXCLUDED_PATH.some((r) => r.test(p))) hits.add(p);
+    }
+  }
+  // Fallback: a bounded find if Spotlight is cold.
+  if (hits.size === 0) {
+    const out = await run("/bin/zsh", ["-lc", `find ${homedir()} -maxdepth 6 -iname '*${stem.replace(/[^a-z0-9]/gi,"*")}*.xls*' 2>/dev/null | head -50`], { timeout: 20_000, maxBuffer: 8 * 1024 * 1024 }).then((r) => r.stdout).catch(() => "");
+    for (const p of out.split("\n").filter(Boolean)) hits.add(p);
+  }
+  const cands = [];
+  for (const p of hits) { try { const st = statSync(p); if (st.isFile() && st.size < 50 * 1024 * 1024) cands.push({ path: p, name: p.split("/").pop(), size: st.size, mtimeMs: st.mtimeMs }); } catch { /* gone */ } }
+  return cands;
+}
+
+/** Full M01: find -> send bytes to Core (parse/analyze/chart) -> rasterize SVG to PNG -> verify. */
+export async function runMacChart(cfg, requested, taskId) {
+  const cands = await mac_find_workbooks(requested);
+  if (!cands.length) return { ok: false, message: `I searched your Mac (Spotlight) and couldn't find a spreadsheet matching "${requested}".` };
+  // Core ranks + reads the chosen file's bytes we send, and returns the chart SVG + verification trace.
+  const top = cands.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  // Let Core pick the best candidate by name; send the small set of candidates with bytes of the top few.
+  const withBytes = [];
+  for (const c of top.slice(0, 5)) { try { withBytes.push({ ...c, b64: readFileSync(c.path).toString("base64") }); } catch { /* skip */ } }
+  const resp = await core(cfg, "/mac/chart", { requested, candidates: withBytes });
+  if (!resp || !resp.ok || !resp.svgB64) return { ok: false, message: resp?.message || "Could not build the chart." };
+  // Rasterize the SVG to PNG on the Mac (Quick Look), verify non-empty.
+  const dir = join(OUT_ROOT, "m01-" + Date.now()); mkdirSync(dir, { recursive: true });
+  const svgPath = join(dir, "chart.svg"); writeFileSync(svgPath, Buffer.from(resp.svgB64, "base64"));
+  let png = await quickLookPng(svgPath, dir).catch(() => null);
+  if (!png || !existsSync(png) || statSync(png).size < 1000) return { ok: false, message: "Chart rasterization produced an empty image." };
+  // Return the PNG to the chat (store on the task) and to iMessage.
+  const pngB64 = readFileSync(png).toString("base64");
+  await core(cfg, "/mac/chart-done", { taskId, imageB64: pngB64, summary: resp.message });
+  await sendIMessage(cfg.selfHandles[0], `📈 ${resp.message}`);
+  await sendIMessageFile(cfg.selfHandles[0], png).catch(() => {});
+  return { ok: true, message: resp.message, png };
+}
+
 // ------------------------------------------------------------------------------ attachments (ADR-048)
 
 const OUT_ROOT = join(homedir(), "Pictures", "Finagai");          // Messages reliably sends files from ~/Pictures
@@ -549,7 +597,16 @@ async function tick(cfg, state) {
 
   // J6: pick up any control tasks Julian started from a Claude chat, and drive them.
   const pending = await core(cfg, "/control/pending", {}).catch(() => null);
-  for (const t of (pending?.tasks ?? [])) { taskCodeCache[t.id] = t.code; await driveControl(cfg, t.id).catch((e) => log("control drive failed", { error: String(e?.message ?? e).slice(0, 160) })); }
+  for (const t of (pending?.tasks ?? [])) {
+    taskCodeCache[t.id] = t.code;
+    if (typeof t.request === "string" && t.request.startsWith("mac_chart:")) {
+      const spec = t.request.slice("mac_chart:".length);
+      const [filename] = spec.split("::");
+      await runMacChart(cfg, filename, t.id).catch((e) => log("mac chart failed", { error: String(e?.message ?? e).slice(0, 160) }));
+    } else {
+      await driveControl(cfg, t.id).catch((e) => log("control drive failed", { error: String(e?.message ?? e).slice(0, 160) }));
+    }
+  }
 
   if (contactMsgs.length) {
     const resp = await core(cfg, "/concierge/sync", { contacts: cfg.contacts, messages: contactMsgs, capabilities: ["files", "control"] });

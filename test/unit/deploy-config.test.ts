@@ -28,7 +28,7 @@ describe("render.yaml deployment manifest", () => {
   });
   it("builds with dev dependencies (NODE_ENV=production would skip TypeScript) and points at real entry points", () => {
     for (const s of blueprint.services) {
-      expect(s.buildCommand).toContain("--include=dev");
+      expect(s.buildCommand).toContain("npm ci"); // prebuilt dist committed; build is install-only
       expect(s.envVars).toEqual([{ fromGroup: group.name }]);
     }
     expect(blueprint.services.find((s) => s.type === "web")).toMatchObject({ startCommand: "node dist/src/server/index.js", healthCheckPath: "/health" });

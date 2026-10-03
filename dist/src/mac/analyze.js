@@ -1,0 +1,75 @@
+/**
+ * Time-series detection + chart data selection (M01). Given parsed sheets, pick the best primary trend:
+ * an ordered period/date column + a numeric measure with enough valid points.
+ */
+import { excelSerialToDate } from "./xlsx.js";
+function looksDateHeader(h) { return /date|day|week|month|quarter|year|period|time|fecha|mes|a[nñ]o/i.test(h); }
+function looksMeasureHeader(h) { return /price|cost|amount|total|revenue|sales|value|qty|quantity|rate|usd|\$|margin|util|precio|monto|ingreso/i.test(h); }
+/** Choose the best trend series across all sheets, or null if no usable numeric series exists. */
+export function detectSeries(sheets) {
+    let best = null;
+    let bestScore = -1;
+    for (const sheet of sheets) {
+        if (sheet.rows.length < 2)
+            continue;
+        // header row = first non-empty row
+        const headerRowIdx = sheet.rows.findIndex((r) => r.some((c) => c != null && String(c).trim() !== ""));
+        if (headerRowIdx < 0)
+            continue;
+        const header = sheet.rows[headerRowIdx].map((c) => (c == null ? "" : String(c)));
+        const dataRows = sheet.rows.slice(headerRowIdx + 1).filter((r) => r.some((c) => c != null));
+        if (dataRows.length < 2)
+            continue;
+        const ncol = header.length;
+        // classify columns
+        const numericCols = [];
+        for (let c = 0; c < ncol; c++) {
+            const vals = dataRows.map((r) => r[c]).filter((v) => typeof v === "number");
+            if (vals.length >= Math.max(2, Math.floor(dataRows.length * 0.6)))
+                numericCols.push(c);
+        }
+        // Pick the x/label column. Priority: a date-named column (even if its cells are numeric serials);
+        // then any non-numeric text column; else row index.
+        const dateNamedCol = header.findIndex((h) => looksDateHeader(h));
+        const textCol = header.findIndex((h, i) => !numericCols.includes(i) && String(h).trim() !== "");
+        let labelCol = dateNamedCol >= 0 ? dateNamedCol : (textCol >= 0 ? textCol : -1);
+        const labelIsDateSerial = labelCol >= 0 && looksDateHeader(header[labelCol] ?? "");
+        for (const vc of numericCols) {
+            if (vc === labelCol)
+                continue;
+            if (vc === dateNamedCol)
+                continue;
+            const pairs = [];
+            dataRows.forEach((r, i) => {
+                const v = r[vc];
+                if (typeof v !== "number")
+                    return;
+                let label;
+                const lc = labelCol >= 0 ? r[labelCol] : null;
+                if (typeof lc === "number" && labelIsDateSerial && lc > 20000 && lc < 80000)
+                    label = excelSerialToDate(lc);
+                else if (lc != null && String(lc).trim() !== "")
+                    label = String(lc);
+                else
+                    label = `#${i + 1}`;
+                pairs.push({ label, value: v });
+            });
+            if (pairs.length < 2)
+                continue;
+            const hdr = header[vc] || `Column ${vc + 1}`;
+            const lblHdr = labelCol >= 0 ? (header[labelCol] || "Row") : "Row";
+            const timeLike = labelCol >= 0 && (labelIsDateSerial || looksDateHeader(lblHdr) || pairs.every((p) => /^\d{4}-\d\d-\d\d$|\bQ[1-4]\b|\b(19|20)\d\d\b|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec/i.test(p.label)));
+            // score: prefer measure-named numeric cols, time-like x, more points
+            const score = (looksMeasureHeader(hdr) ? 3 : 0) + (timeLike ? 3 : 0) + Math.min(pairs.length, 12) / 4;
+            if (score > bestScore) {
+                bestScore = score;
+                best = { sheet: sheet.name, labelColumn: lblHdr, valueColumn: hdr,
+                    labels: pairs.map((p) => p.label), values: pairs.map((p) => p.value),
+                    isTimeLike: timeLike,
+                    reason: `Chose "${hdr}" over ${lblHdr} on sheet "${sheet.name}" (${pairs.length} points${timeLike ? ", time-ordered" : ""}).` };
+            }
+        }
+    }
+    return best;
+}
+//# sourceMappingURL=analyze.js.map

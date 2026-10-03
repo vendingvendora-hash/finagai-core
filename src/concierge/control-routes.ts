@@ -7,7 +7,8 @@
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import type http from "node:http";
-import { cancelTask, createTask, decideStep, getStep, getTaskResult, parseControlCommand, planNext, recordRun, type ControlDeps } from "../pipelines/j6/control.js";
+import { cancelTask, createTask, decideStep, getStep, getTaskResult, parseControlCommand, planNext, recordRun, setResultImage, type ControlDeps } from "../pipelines/j6/control.js";
+import { analyzeWorkbookToChart, rankCandidates, type Candidate } from "../mac/operator.js";
 
 const MAX_BODY = 24 * 1024 * 1024; // screenshots + perception
 
@@ -51,7 +52,7 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         return json(res, 200, { taskId: t.id, taskCode: t.code });
       }
       if (path === "/control/pending") {
-        const r = await deps.pool.query(`SELECT id, code FROM control_task WHERE status = 'active'
+        const r = await deps.pool.query(`SELECT id, code, request FROM control_task WHERE status = 'active'
           AND NOT EXISTS (SELECT 1 FROM control_step s WHERE s.task_id = control_task.id AND s.status IN ('proposed','running'))
           ORDER BY created_at LIMIT 5`);
         return json(res, 200, { tasks: r.rows });
@@ -83,6 +84,26 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         if (!Number.isInteger(code)) return json(res, 422, { error: "taskCode_required" });
         const r = await getTaskResult(deps.pool, code);
         return json(res, 200, { imageB64: r?.imageB64 ?? null });
+      }
+      if (path === "/mac/chart") {
+        const requested = typeof body.requested === "string" ? body.requested : "";
+        const cands = Array.isArray(body.candidates) ? body.candidates as Array<Candidate & { b64: string }> : [];
+        if (!requested || !cands.length) return json(res, 200, { ok: false, message: "No workbook candidates were provided." });
+        const ranked = rankCandidates(cands, requested);
+        const top = ranked[0] as (Candidate & { b64?: string }) | undefined;
+        const withBytes = top ? cands.find((c) => c.path === top.path) : undefined;
+        if (!top || !withBytes?.b64) return json(res, 200, { ok: false, message: "No readable spreadsheet candidate matched." });
+        const result = analyzeWorkbookToChart({ path: top.path, name: top.name, size: top.size, mtimeMs: top.mtimeMs }, Buffer.from(withBytes.b64, "base64"), "Altarum pricing case");
+        log("mac chart", { ok: result.ok, stages: result.stages.map((st) => `${st.stage}:${st.ok ? "ok" : "fail"}`).join(",") });
+        return json(res, 200, { ok: result.ok, message: result.message, svgB64: result.svg ? Buffer.from(result.svg, "utf8").toString("base64") : null,
+          chosen: result.chosen ? { name: result.chosen.name } : null, pick: result.pick ?? null, stages: result.stages });
+      }
+      if (path === "/mac/chart-done") {
+        if (typeof body.taskId === "string" && typeof body.imageB64 === "string") {
+          await setResultImage(deps.pool, body.taskId, body.imageB64);
+          await deps.pool.query(`UPDATE control_task SET status = 'done', result_summary = $2, updated_at = now() WHERE id = $1`, [body.taskId, String(body.summary ?? "chart ready").slice(0, 1000)]);
+        }
+        return json(res, 200, { ok: true });
       }
       if (path === "/control/ran") {
         if (typeof body.stepId !== "string") return json(res, 422, { error: "stepId_required" });
