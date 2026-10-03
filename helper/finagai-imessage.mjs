@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { macDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTree, captureScreen } from "./mac-perception.mjs";
 
 const run = promisify(execFile);
 const DIR = join(homedir(), ".finagai");
