@@ -14,9 +14,14 @@ export const MESSAGE_OVERHEAD_TOKENS = 64;
 /** Hard ceiling on any single call; requests that could exceed it are refused (G20). */
 export const PER_CALL_MAX_USD = 1.0;
 
+/** A screenshot bills around 1,500 tokens; count it generously so the budget bound stays conservative. */
+export const IMAGE_TOKENS_BYTES_EQUIV = 1_600 * 4;
+
 export function maxInputTokens(req: Pick<ModelRequest, "system" | "messages">): number {
   const bytes = Buffer.byteLength(req.system, "utf8") +
-    req.messages.reduce((n, m) => n + Buffer.byteLength(m.content, "utf8"), 0);
+    req.messages.reduce((n, m) => n + (typeof m.content === "string"
+      ? Buffer.byteLength(m.content, "utf8")
+      : m.content.reduce((k, b) => k + (b.type === "text" ? Buffer.byteLength(b.text, "utf8") : IMAGE_TOKENS_BYTES_EQUIV), 0)), 0);
   return bytes + MESSAGE_OVERHEAD_TOKENS * (req.messages.length + 1);
 }
 

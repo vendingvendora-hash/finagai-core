@@ -33,6 +33,8 @@ export interface AppDeps {
   approval?: (req: http.IncomingMessage, res: http.ServerResponse, url: URL) => Promise<void>;
   /** J5 helper API (ADR-044); its own bearer secret, checked inside the handler. */
   concierge?: (req: http.IncomingMessage, res: http.ServerResponse, path: string) => Promise<void>;
+  /** J6 control API (ADR-050); same helper secret. */
+  control?: (req: http.IncomingMessage, res: http.ServerResponse, path: string) => Promise<void>;
 }
 
 const MAX_MCP_BODY_BYTES = 1_000_000;
@@ -187,6 +189,11 @@ export function createHandler(cfg: Config, info: AppInfo, log: LogFn, deps: AppD
 
     if (path.startsWith("/concierge/") && deps.concierge) {
       void deps.concierge(req, res, path);
+      return;
+    }
+
+    if (path.startsWith("/control/") && deps.control) {
+      void deps.control(req, res, path);
       return;
     }
 

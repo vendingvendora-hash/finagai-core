@@ -290,6 +290,19 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     }),
   }, async (a) => ok("seed_answer", await answer(deps.j2, a.batch_id, a.answers)));
 
+  server.registerTool("control_mac", {
+    description: "Start a task that operates Julian's Mac for him (J6): open apps, click, type, run commands, use his logged-in sessions. Finagai works step by step and asks Julian to approve anything that changes or sends something. Use when Julian asks you to DO something on his computer, not just look it up.",
+    inputSchema: z.object({ request: z.string().min(1).max(4000) }),
+  }, async ({ request }) => {
+    const t = await deps.pool.query<{ id: string; code: string }>(
+      `INSERT INTO control_task (request, origin) VALUES ($1, 'chat') RETURNING id, code`, [request.slice(0, 4000)]);
+    const row = t.rows[0]!;
+    await appendEvent(deps.pool, { actor: "julian", action: "control_task_created", entityType: "control_task", entityId: row.id,
+      after: { code: Number(row.code), request: request.slice(0, 200) }, client: deps.client });
+    return ok("control_mac", { taskCode: Number(row.code),
+      note: "Task queued. Finagai's Mac helper will carry it out and message Julian to approve any step that changes something." });
+  });
+
   deps.extend?.(server, helpers);
   return server;
 }

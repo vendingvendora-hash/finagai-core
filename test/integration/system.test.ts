@@ -11,6 +11,7 @@
  * input, stale governance request. Ends with a synthetic cold start through approved promotion.
  */
 import http from "node:http";
+import { messageText } from "../../src/llm/content.js";
 import type { AddressInfo } from "node:net";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -63,7 +64,7 @@ class SimulatedClaude implements ModelProvider {
     return { text: JSON.stringify(body), model: req.model, stopReason: "end_turn", usage };
   }
   private extract(req: ModelRequest) {
-    const { text, received_at } = JSON.parse(req.messages[0]!.content) as { text: string; received_at: string };
+    const { text, received_at } = JSON.parse(messageText(req.messages[0]!.content)) as { text: string; received_at: string };
     const candidates = text.split(/(?<=[.!?])\s+|\n+/).map((s) => s.trim()).filter((s) => s && /[.!?]$/.test(s)).map((sentence, i) => {
       const quote = sentence.replace(/[.!?]$/, "");
       const base = { temp_id: `c${i}`, fields: {} as Record<string, string | null>, source_quote: quote, explicitly_stated: true, stated_by: "julian",
@@ -87,7 +88,7 @@ class SimulatedClaude implements ModelProvider {
     return { language: "en", candidates };
   }
   private classify(req: ModelRequest) {
-    const items = JSON.parse(req.messages[0]!.content) as Array<{ temp_id: string; fields: Record<string, string>; matches: Array<{ id: string; text: string }> }>;
+    const items = JSON.parse(messageText(req.messages[0]!.content)) as Array<{ temp_id: string; fields: Record<string, string>; matches: Array<{ id: string; text: string }> }>;
     const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
     return { judgments: items.map((i) => {
       const same = i.matches.find((m) => norm(m.text) === norm(i.fields.title ?? i.fields.claim ?? i.fields.name ?? ""));
@@ -95,7 +96,7 @@ class SimulatedClaude implements ModelProvider {
     }) };
   }
   private compose(req: ModelRequest) {
-    const items = JSON.parse(req.messages[0]!.content) as Array<{ id: string; section: string; must_mention: boolean; title: string; note: string | null }>;
+    const items = JSON.parse(messageText(req.messages[0]!.content)) as Array<{ id: string; section: string; must_mention: boolean; title: string; note: string | null }>;
     const sections = new Map<string, object[]>();
     for (const i of items) {
       const l = sections.get(i.section) ?? [];

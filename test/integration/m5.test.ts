@@ -5,6 +5,7 @@
  * a fake OIDC provider and a TEST-ONLY software authenticator stand in for WorkOS and Julian's device.
  */
 import http from "node:http";
+import { messageText } from "../../src/llm/content.js";
 import type { AddressInfo } from "node:net";
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -310,7 +311,7 @@ describe.skipIf(!url || !migratorUrl)("M7 seeding: staged until Julian's approve
   const scripted = (candidates: Candidate[], relation: (t: { temp_id: string; matches: Array<{ id: string }> }) => object = (i) => ({ temp_id: i.temp_id, relation: "new", target_id: null, changed_fields: [], rationale: "new" })) => ({
     async complete(req: ModelRequest): Promise<ModelResult> {
       const body = req.step === "extract" ? { language: "en", candidates }
-        : { judgments: (JSON.parse(req.messages[0]!.content) as Array<{ temp_id: string; matches: Array<{ id: string }> }>).map(relation) };
+        : { judgments: (JSON.parse(messageText(req.messages[0]!.content)) as Array<{ temp_id: string; matches: Array<{ id: string }> }>).map(relation) };
       return { text: JSON.stringify(body), model: req.model, stopReason: "end_turn", costUsd: 0, retries: 0, latencyMs: 1, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } };
     } });
   const j2 = (model: J2Deps["model"]): J2Deps => ({ pool: pool!, model, now: () => RECEIVED,

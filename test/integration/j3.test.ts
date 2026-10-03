@@ -4,6 +4,7 @@
  * degraded paths, idempotent delivery). Model-quality evaluation of T11-T20 follows with the real API.
  */
 import { afterAll, describe, expect, it } from "vitest";
+import { messageText } from "../../src/llm/content.js";
 import { createPool } from "../../src/db/index.js";
 import { BudgetBlockedError, type ModelRequest, type ModelResult } from "../../src/llm/types.js";
 import { slotIdempotencyKey } from "../../src/jobs/dispatcher.js";
@@ -43,7 +44,7 @@ class ScriptedComposer {
   async complete(req: ModelRequest): Promise<ModelResult> {
     if (this.blocked) throw new BudgetBlockedError("hard model-spend ceiling reached", "ceiling");
     this.calls++;
-    const items = JSON.parse(req.messages[0]!.content) as Item[];
+    const items = JSON.parse(messageText(req.messages[0]!.content)) as Item[];
     return { text: JSON.stringify(this.compose(items, req.messages.length > 1 ? 2 : 1)), model: req.model, stopReason: "end_turn",
       costUsd: 0.01, retries: 0, latencyMs: 1, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } };
   }

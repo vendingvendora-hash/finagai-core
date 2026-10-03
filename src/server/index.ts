@@ -17,6 +17,7 @@ import { runReview } from "../pipelines/j3/review.js";
 import type { J3Deps } from "../pipelines/j3/review.js";
 import { createHandler } from "./app.js";
 import { createConciergeHandler } from "../concierge/routes.js";
+import { createControlHandler } from "../concierge/control-routes.js";
 import { GoogleClient } from "../google/client.js";
 import { createLogger } from "./log.js";
 
@@ -61,8 +62,9 @@ async function main() {
     timezone: cfg.FINAGAI_TIMEZONE, homeBase: "Hyattsville, Maryland (Washington DC area; DCA, IAD and BWI airports)", log,
     ...(cfg.GOOGLE_CLIENT_ID && cfg.GOOGLE_CLIENT_SECRET && cfg.GOOGLE_REFRESH_TOKEN
       ? { google: new GoogleClient({ clientId: cfg.GOOGLE_CLIENT_ID, clientSecret: cfg.GOOGLE_CLIENT_SECRET, refreshToken: cfg.GOOGLE_REFRESH_TOKEN }) } : {}) }, cfg.CONCIERGE_HELPER_TOKEN, log);
+  const control = createControlHandler({ pool, model, modelId: cfg.MODEL_J5_CONCIERGE, log }, cfg.CONCIERGE_HELPER_TOKEN, log);
   const server = http.createServer(createHandler(cfg, { version: VERSION, startedAt: new Date() }, log,
-    { keys: remoteKeys(cfg.OAUTH_JWKS_URL), mcp, approval, concierge,
+    { keys: remoteKeys(cfg.OAUTH_JWKS_URL), mcp, approval, concierge, control,
       onClientObserved: async (clientId) => {
         const seen = await pool.query(`SELECT 1 FROM event WHERE action = 'mcp_client_observed' AND after->>'client_id' = $1 LIMIT 1`, [clientId]);
         if (!seen.rowCount) await appendEvent(pool, { actor: "system", action: "mcp_client_observed", after: { client_id: clientId }, client: "claude_ai" });

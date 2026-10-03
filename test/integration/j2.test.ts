@@ -4,6 +4,7 @@
  * Model-quality evaluation of T01-T10 runs later with the real API (eval/cases, M4 evaluation).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { messageText } from "../../src/llm/content.js";
 import { createPool } from "../../src/db/index.js";
 import type { Candidate } from "../../src/guards/extraction.js";
 import { BudgetBlockedError, TransientModelError, type ModelRequest, type ModelResult } from "../../src/llm/types.js";
@@ -31,7 +32,7 @@ class ScriptedModel {
     if (this.gate) await this.gate;
     if (this.failNext > 0) { this.failNext--; throw new TransientModelError("overloaded", 529); }
     if (this.blockAt === req.step) throw new BudgetBlockedError("hard model-spend ceiling reached", "ceiling");
-    const body = req.step === "extract" ? this.extract : this.classify(JSON.parse(req.messages[0]!.content));
+    const body = req.step === "extract" ? this.extract : this.classify(JSON.parse(messageText(req.messages[0]!.content)));
     return { text: JSON.stringify(body), model: req.model, stopReason: "end_turn", costUsd: 0, retries: 0, latencyMs: 1,
       usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } };
   }
@@ -180,7 +181,7 @@ describe.skipIf(!url)("J2 baseline T01-T10 (scripted model, real database)", () 
     const model = new ScriptedModel(extraction(cand({ item_type: "task", fields: { title: "Renew the POS contract" },
       source_quote: "Renew the POS contract by Oct 9", date_expression: "by Oct 9", date_resolved: "2026-10-09T23:59:00-04:00" })));
     const spy: string[] = [];
-    const s = await capture({ complete: async (r: ModelRequest) => { spy.push(r.messages[0]!.content); return model.complete(r); } } as never, text);
+    const s = await capture({ complete: async (r: ModelRequest) => { spy.push(messageText(r.messages[0]!.content)); return model.complete(r); } } as never, text);
     const stored = (await pool!.query(`SELECT source_text, redactions FROM capture WHERE id = $1`, [s.captureId])).rows[0];
     for (const secret of ["Hunter2", "000123456789"]) {
       expect(stored.source_text).not.toContain(secret);

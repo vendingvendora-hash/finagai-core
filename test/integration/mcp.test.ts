@@ -3,6 +3,7 @@
  * Tokens are signed with locally generated keys (no WorkOS identifiers); the model is scripted.
  */
 import http from "node:http";
+import { messageText } from "../../src/llm/content.js";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT, type JWK } from "jose";
@@ -32,7 +33,7 @@ const env = {
 /** Scripted model: extracts one task whose quote is the whole input. */
 const model = {
   async complete(req: ModelRequest): Promise<ModelResult> {
-    const text = JSON.parse(req.messages[0]!.content).text as string;
+    const text = JSON.parse(messageText(req.messages[0]!.content)).text as string;
     const body = req.step === "extract"
       ? { language: "en", candidates: [{ temp_id: "c1", item_type: "task", fields: { title: text.slice(0, 80) }, source_quote: text,
           explicitly_stated: true, stated_by: "julian", epistemic_status: "user_provided", classification: "internal",
@@ -71,11 +72,11 @@ async function connect(bearer?: string) {
 const json = (r: { content: unknown }) => JSON.parse((r.content as Array<{ text: string }>)[0]!.text);
 
 describe.skipIf(!url)("MCP tool layer end to end", () => {
-  it("lists exactly the approved tools (16 here; the 2 J3 tools are added in production), and no write-capable extras", async () => {
+  it("lists exactly the approved tools (17 here; the 2 J3 tools are added in production), and no write-capable extras", async () => {
     const client = await connect(await token());
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
     expect(names).toEqual([
-      "capture", "get_approval_request", "get_charter", "get_item", "get_project", "get_state_overview", "list_open_conflicts",
+      "capture", "control_mac", "get_approval_request", "get_charter", "get_item", "get_project", "get_state_overview", "list_open_conflicts",
       "list_pending_proposals", "request_archival", "request_conflict_resolution", "request_proposal_decision",
       "request_seed_promotion", "search_state", "seed_add_source", "seed_answer", "seed_questions",
     ]);

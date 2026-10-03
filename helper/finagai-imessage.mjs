@@ -323,6 +323,74 @@ export async function sendIMessageFile(handle, path) {
   await run("/usr/bin/osascript", [...script.flatMap((l) => ["-e", l]), path, handle]);
 }
 
+// ------------------------------------------------------------------------------ Mac control (ADR-050)
+
+const SHOT = join(tmpdir(), "finagai-shot.png");
+
+/** Full-screen screenshot as base64 PNG (downscaled so uploads stay small). */
+async function screenshotB64() {
+  await run("/usr/sbin/screencapture", ["-x", "-t", "png", SHOT], { timeout: 15_000 });
+  // Downscale to 1600px wide via sips to keep tokens and upload size reasonable.
+  await run("/usr/bin/sips", ["-Z", "1600", SHOT], { timeout: 15_000 }).catch(() => {});
+  return readFileSync(SHOT).toString("base64");
+}
+
+const KEYCODE = { return: 36, enter: 36, tab: 48, esc: 53, escape: 53, space: 49, delete: 51, left: 123, right: 124, down: 125, up: 126 };
+
+/** Run one control action with AppleScript / CLIs. Returns a short result string. */
+export async function runControlStep(step) {
+  const p = step.params ?? {};
+  const osa = (lines, args = []) => run("/usr/bin/osascript", [...lines.flatMap((l) => ["-e", l]), ...args], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
+  const cursor = (x, y, click) => osa([`tell application "System Events" to ${click || "click"} at {${Math.round(x)}, ${Math.round(y)}}`]);
+  switch (step.kind) {
+    case "wait": await new Promise((r) => setTimeout(r, Math.min(30, Number(p.seconds) || 1) * 1000)); return "waited";
+    case "list_apps": return (await osa(['tell application "System Events" to get name of (every process whose background only is false)'])).stdout.trim();
+    case "list_files": return (await run("/bin/ls", ["-la", expandHome(String(p.dir || "~"))], { timeout: 10_000 }).catch((e) => ({ stdout: String(e.message) }))).stdout.slice(0, 2000);
+    case "read_file": { const f = expandHome(String(p.path || "")); if (!allowedLocal(f)) return "refused: path not allowed"; return readFileSync(f, "utf8").slice(0, 4000); }
+    case "read_text": return (await run("/usr/bin/osascript", ["-e", 'tell application "System Events" to get value of (first text area of front window of (first process whose frontmost is true))'], { timeout: 10_000 }).catch(() => ({ stdout: "" }))).stdout.slice(0, 4000) || "(no readable text)";
+    case "click": await cursor(p.x, p.y); return "clicked";
+    case "double_click": await cursor(p.x, p.y, "double click"); return "double-clicked";
+    case "right_click": await cursor(p.x, p.y, "right click"); return "right-clicked";
+    case "move": await osa([`tell application "System Events" to set the position of the mouse to {${Math.round(p.x)}, ${Math.round(p.y)}}`]).catch(() => {}); return "moved";
+    case "scroll": await osa([`tell application "System Events" to scroll {${Number(p.amount) || 3} * ${p.dir === "up" ? 1 : -1}}`]).catch(() => {}); return "scrolled";
+    case "type": await osa(["on run a", 'tell application "System Events" to keystroke (item 1 of a)', "end run"], [String(p.text ?? "")]); return "typed";
+    case "key": { const k = String(p.key || "").toLowerCase(); if (KEYCODE[k] == null) { await osa(["on run a", 'tell application "System Events" to keystroke (item 1 of a)', "end run"], [k]); return "key"; } await osa([`tell application "System Events" to key code ${KEYCODE[k]}`]); return "key"; }
+    case "hotkey": { const keys = (p.keys || []).map((k) => String(k).toLowerCase()); const mods = keys.filter((k) => ["cmd","command","option","alt","control","ctrl","shift"].includes(k)).map((k) => ({ cmd: "command down", command: "command down", option: "option down", alt: "option down", control: "control down", ctrl: "control down", shift: "shift down" }[k])); const main = keys.find((k) => !["cmd","command","option","alt","control","ctrl","shift"].includes(k)) || ""; await osa(["on run a", `tell application "System Events" to keystroke (item 1 of a) using {${mods.join(", ")}}`, "end run"], [main]); return "hotkey"; }
+    case "open_app": await run("/usr/bin/open", ["-a", String(p.name || "")], { timeout: 15_000 }); return `opened ${p.name}`;
+    case "open_url": if (!/^https?:\/\//.test(String(p.url || ""))) return "refused: bad url"; await run("/usr/bin/open", [String(p.url)], { timeout: 15_000 }); return "opened url";
+    case "open_path": { const f = expandHome(String(p.path || "")); if (!f.startsWith(homedir())) return "refused"; await run("/usr/bin/open", [f], { timeout: 15_000 }); return "opened"; }
+    case "move_file": { const a = expandHome(String(p.from || "")), b = expandHome(String(p.to || "")); if (!a.startsWith(homedir()) || !b.startsWith(homedir())) return "refused"; copyFileSync(a, b); rmSync(a); return "moved"; }
+    case "trash_file": { const f = expandHome(String(p.path || "")); if (!f.startsWith(homedir()) || EXCLUDED_PATH.some((r) => r.test(f))) return "refused"; await osa(["on run a", 'tell application "Finder" to delete (POSIX file (item 1 of a) as alias)', "end run"], [f]); return "trashed"; }
+    case "run": { const out = await run("/bin/zsh", ["-lc", String(p.cmd || "")], { timeout: 120_000, maxBuffer: 8 * 1024 * 1024 }).catch((e) => ({ stdout: "", stderr: String(e.message) })); return (out.stdout + (out.stderr ? `\n[stderr] ${out.stderr}` : "")).slice(0, 4000) || "(no output)"; }
+    default: return `unknown kind ${step.kind}`;
+  }
+}
+
+/** Drive one control task to a natural stopping point: runs reads and approved steps; stops to wait on approvals. */
+export async function driveControl(cfg, taskId) {
+  let lastResult;
+  for (let i = 0; i < 40; i++) {
+    const shot = await screenshotB64().catch(() => null);
+    const r = await core(cfg, "/control/next", { taskId, screenshot: shot, lastResult });
+    if (r.status === "done") { await sendIMessage(cfg.selfHandles[0], `✅ Finagai finished: ${r.message || "done"}`); return; }
+    if (r.status === "failed") { await sendIMessage(cfg.selfHandles[0], `⚠️ Finagai stopped: ${r.message || "couldn't continue"}`); return; }
+    if (r.status === "cancelled") return;
+    if (r.status === "ask") { await sendIMessage(cfg.selfHandles[0], `❓ Finagai needs you: ${r.message}\nReply in this thread, or “stop ${taskCodeCache[taskId] ?? ""}”.`); return; }
+    if (r.status === "await_approval") {
+      if (r.step) await sendIMessage(cfg.selfHandles[0], `🖐 Finagai wants to: ${r.step.summary}\nReply “ok ${r.step.code}” to allow, “no ${r.step.code}” to skip, “stop ${taskCodeCache[taskId] ?? ""}” to cancel.`);
+      else await sendIMessage(cfg.selfHandles[0], `🖐 Finagai paused: ${r.message || "needs your ok"}.`);
+      return; // resumes when Julian approves (handled in the message loop)
+    }
+    // run_read or run_approved: execute now, report, continue
+    const res = await runControlStep(r.step).catch((e) => `error: ${String(e?.message ?? e).slice(0, 200)}`);
+    await core(cfg, "/control/ran", { stepId: r.step.id, ok: !String(res).startsWith("error") && !String(res).startsWith("refused"), result: res });
+    lastResult = `${r.step.summary}: ${res}`;
+  }
+  await sendIMessage(cfg.selfHandles[0], "⏸ Finagai paused this task (long run). Reply to continue.");
+}
+
+const taskCodeCache = {};
+
 // ------------------------------------------------------------------------------ I/O
 
 function loadConfig() {
@@ -415,6 +483,10 @@ async function tick(cfg, state) {
   }
   state.lastRowId = Math.max(...rows.map((r) => Number(r.rowid)));
 
+  // J6: pick up any control tasks Julian started from a Claude chat, and drive them.
+  const pending = await core(cfg, "/control/pending", {}).catch(() => null);
+  for (const t of (pending?.tasks ?? [])) { taskCodeCache[t.id] = t.code; await driveControl(cfg, t.id).catch((e) => log("control drive failed", { error: String(e?.message ?? e).slice(0, 160) })); }
+
   if (contactMsgs.length) {
     const resp = await core(cfg, "/concierge/sync", { contacts: cfg.contacts, messages: contactMsgs, capabilities: ["files"] });
     const drafts = [...(resp.drafts ?? [])];
@@ -434,6 +506,20 @@ async function tick(cfg, state) {
     }
   }
   for (const text of commands) {
+    // Control commands first (ok/no/stop <code>): approve a Mac step or cancel a task.
+    const cr = await core(cfg, "/control/decision", { text }).catch(() => null);
+    if (cr && (cr.status === "approved" || cr.status === "rejected")) {
+      if (cr.status === "approved" && cr.stepId) {
+        const step = await core(cfg, "/control/step", { stepId: cr.stepId }).catch(() => null);
+        if (step && step.step) {
+          const res = await runControlStep(step.step).catch((e) => `error: ${String(e?.message ?? e).slice(0, 200)}`);
+          await core(cfg, "/control/ran", { stepId: cr.stepId, ok: !String(res).startsWith("error") && !String(res).startsWith("refused"), result: res });
+        }
+      }
+      if (cr.taskId) await driveControl(cfg, cr.taskId).catch((e) => log("control resume failed", { error: String(e?.message ?? e).slice(0, 160) }));
+      continue;
+    }
+    if (cr && cr.status === "cancelled") continue;
     const r = await core(cfg, "/concierge/decision", { text }).catch(() => null);  // 422 = ordinary note, not a command
     if (!r || r.status !== "send") continue;
     if (!allowed.has(normalizeHandle(r.handle))) { log("refused: handle not allow-listed", {}); await core(cfg, "/concierge/sent", { id: r.id, ok: false }); continue; }

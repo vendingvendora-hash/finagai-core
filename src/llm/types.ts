@@ -1,7 +1,11 @@
 import type { CallPurpose } from "../guards/budget.js";
 import type { TokenUsage } from "./pricing.js";
 
-export type Pipeline = "j2" | "j3" | "seed" | "eval_grader" | "j5";
+export type Pipeline = "j2" | "j3" | "seed" | "eval_grader" | "j5" | "j6";
+
+export type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; mediaType: "image/png" | "image/jpeg"; dataBase64: string };
 
 export interface ModelRequest {
   pipeline: Pipeline;
@@ -10,7 +14,8 @@ export interface ModelRequest {
   model: string;
   promptVersion: string;
   system: string;
-  messages: Array<{ role: "user" | "assistant"; content: string }>;
+  /** Content is text, or a mix of text and screenshots (J6 vision). */
+  messages: Array<{ role: "user" | "assistant"; content: string | ContentBlock[] }>;
   maxTokens: number;
   /** Anthropic's server-side web search (J5 only). Each search is billed per request plus result tokens. */
   webSearch?: { maxUses: number };

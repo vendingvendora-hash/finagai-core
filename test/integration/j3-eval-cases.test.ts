@@ -4,6 +4,7 @@
  * here, the case (fixture or assertion) is wrong, not the model. The real-model run uses run-j3.ts.
  */
 import { join } from "node:path";
+import { messageText } from "../../src/llm/content.js";
 import { describe, expect, it } from "vitest";
 import { createPool } from "../../src/db/index.js";
 import { runReview } from "../../src/pipelines/j3/review.js";
@@ -17,7 +18,7 @@ const appTemplate = process.env.INTEGRATION_APP_TEMPLATE;
 type Item = { id: string; section: string; must_mention: boolean; title: string; note: string | null };
 const faithful = {
   async complete(req: ModelRequest): Promise<ModelResult> {
-    const items = JSON.parse(req.messages[0]!.content) as Item[];
+    const items = JSON.parse(messageText(req.messages[0]!.content)) as Item[];
     const sections = new Map<string, object[]>();
     for (const i of items) {
       const l = sections.get(i.section) ?? [];

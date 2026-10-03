@@ -4,7 +4,7 @@
  */
 import type { Queryable } from "./pool.js";
 
-export type EventActor = "julian" | "j2" | "j3" | "seed" | "job" | "migration" | "system";
+export type EventActor = "julian" | "j2" | "j3" | "seed" | "job" | "migration" | "system" | "j6";
 
 export interface NewEvent {
   actor: EventActor;
