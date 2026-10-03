@@ -7,7 +7,7 @@
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import type http from "node:http";
-import { cancelTask, createTask, decideStep, getStep, parseControlCommand, planNext, recordRun, type ControlDeps } from "../pipelines/j6/control.js";
+import { cancelTask, createTask, decideStep, getStep, getTaskResult, parseControlCommand, planNext, recordRun, type ControlDeps } from "../pipelines/j6/control.js";
 
 const MAX_BODY = 12 * 1024 * 1024; // screenshots
 
@@ -77,6 +77,12 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         if (typeof body.stepId !== "string") return json(res, 422, { error: "stepId_required" });
         const step = await getStep(deps.pool, body.stepId);
         return json(res, 200, { step });
+      }
+      if (path === "/control/result-image") {
+        const code = Number(body.taskCode);
+        if (!Number.isInteger(code)) return json(res, 422, { error: "taskCode_required" });
+        const r = await getTaskResult(deps.pool, code);
+        return json(res, 200, { imageB64: r?.imageB64 ?? null });
       }
       if (path === "/control/ran") {
         if (typeof body.stepId !== "string") return json(res, 422, { error: "stepId_required" });

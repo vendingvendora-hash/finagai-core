@@ -392,17 +392,17 @@ export async function driveControl(cfg, taskId) {
     const per = await perception().catch(() => ({}));
     const r = await core(cfg, "/control/next", { taskId, screenshot: shot, lastResult, pageText: per.pageText, axTree: per.axTree });
     if (r.status === "done") {
-      if (r.requester) {
+      // Send the final artifact image to Julian's thread (and it is also returned to the chat via control_result).
+      const dir = join(OUT_ROOT, "done-" + Date.now()); mkdirSync(dir, { recursive: true });
+      let png = null;
+      const ir = await core(cfg, "/control/result-image", { taskCode: taskCodeCache[taskId] }).catch(() => null);
+      const b64 = (ir && ir.imageB64) || await screenshotB64().catch(() => null);
+      if (b64) { png = join(dir, "result.png"); writeFileSync(png, Buffer.from(b64, "base64")); }
+      await sendIMessage(cfg.selfHandles[0], `✅ Finagai finished${r.requester ? ` ${r.requester}'s task` : ""}: ${r.message || "done"}`);
+      if (png) await sendIMessageFile(cfg.selfHandles[0], png).catch(() => {});
+      if (r.requester && png) {
         const handle = (cfg.contacts.find((c) => c.label === r.requester) || {}).handle;
-        const shot = await screenshotB64().catch(() => null);
-        await sendIMessage(cfg.selfHandles[0], `✅ Finagai finished ${r.requester}'s task: ${r.message || "done"}\nReply here to send ${r.requester} an update, or ignore.`);
-        if (handle && shot) { // offer the final screenshot to Julian so he can forward it if useful
-          const dir = join(OUT_ROOT, "done-" + Date.now()); mkdirSync(dir, { recursive: true });
-          const png = join(dir, "result.png"); writeFileSync(png, Buffer.from(shot, "base64"));
-          await sendIMessageFile(cfg.selfHandles[0], png).catch(() => {});
-        }
-      } else {
-        await sendIMessage(cfg.selfHandles[0], `✅ Finagai finished: ${r.message || "done"}`);
+        if (handle) await sendIMessage(cfg.selfHandles[0], `Reply “send ${r.requester}” to forward this to ${r.requester}.`);
       }
       return;
     }

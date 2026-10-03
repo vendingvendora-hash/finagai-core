@@ -305,18 +305,19 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
   });
 
   server.registerTool("control_result", {
-    description: "Read the result of a Mac task started with control_mac. Returns its status and, when finished, the summary and the information Finagai gathered (so you can use it in the chat, e.g. build a chart). Omit task_code to read the most recent task.",
+    description: "Read the result of a Mac task started with control_mac. Returns its status and, when finished, the summary, the information Finagai gathered, AND the final screenshot/chart image so you can show it to Julian directly in the chat. Omit task_code to read the most recent task.",
     inputSchema: z.object({ task_code: z.number().int().positive().optional() }),
   }, async ({ task_code }) => {
     const r = task_code ? await getTaskResult(deps.pool, task_code) : await latestTask(deps.pool);
     if (!r) return ok("control_result", { found: false, note: "No such task." });
-    return ok("control_result", {
-      found: true, status: r.status, request: r.request,
-      done: r.status === "done", summary: r.summary, detail: r.detail,
-      note: r.status === "done" ? "Task finished; summary and detail hold what Finagai gathered."
-        : r.status === "waiting_approval" ? "Finagai is waiting for Julian to approve a step in his Messages thread."
-        : r.status === "active" ? "Still running; check again shortly." : `Task is ${r.status}.`,
-    });
+    const note = r.status === "done" ? "Task finished. Summary, detail, and (if present) the final image are included — show the image to Julian."
+      : r.status === "waiting_approval" ? "Finagai is waiting for Julian to approve a step in his Messages thread."
+      : r.status === "active" ? "Still running; check again shortly." : `Task is ${r.status}.`;
+    await audit("control_result", "ok");
+    const content: CallToolResult["content"] = [{ type: "text",
+      text: JSON.stringify({ found: true, status: r.status, request: r.request, done: r.status === "done", summary: r.summary, detail: r.detail, hasImage: Boolean(r.imageB64), note }) }];
+    if (r.imageB64) content.push({ type: "image", data: r.imageB64, mimeType: "image/png" });
+    return { content };
   });
 
   deps.extend?.(server, helpers);

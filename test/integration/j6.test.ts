@@ -6,7 +6,7 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { createPool } from "../../src/db/index.js";
 import type { ModelRequest, ModelResult } from "../../src/llm/types.js";
-import { cancelTask, createTask, decideStep, getStep, getTaskResult, latestTask, planNext, recordRun, type ControlDeps } from "../../src/pipelines/j6/control.js";
+import { cancelTask, createTask, decideStep, getStep, getTaskResult, latestTask, planNext, recordRun, setResultImage, type ControlDeps } from "../../src/pipelines/j6/control.js";
 
 const url = process.env.INTEGRATION_DATABASE_URL;
 const pool = url ? createPool(url) : undefined;
@@ -126,5 +126,17 @@ describe.skipIf(!pool)("J6 control lifecycle", () => {
     expect(r!.summary).toMatch(/72%/);
     expect(r!.detail).toMatch(/Q1 72%, Q2 75%, target 80%/);
     expect((await latestTask(pool!))!.code).toBe(task.code);
+  });
+
+  it("stores the final screenshot as the task image and returns it (ADR-058)", async () => {
+    const task = await createTask(pool!, "make a chart and screenshot it", "chat");
+    const d = deps(new Script([{ kind: "done", summary: "Chart made" }]));
+    const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCA— fake".slice(0, 20);
+    const c = await planNext(d, task.id, tinyPng);        // the screenshot on the done turn becomes the image
+    expect(c.status).toBe("done");
+    const r = await getTaskResult(pool!, task.code);
+    expect(r!.imageB64).toBe(tinyPng);
+    await setResultImage(pool!, task.id, "replacement");
+    expect((await getTaskResult(pool!, task.code))!.imageB64).toBe("replacement");
   });
 });

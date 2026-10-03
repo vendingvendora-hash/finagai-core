@@ -145,6 +145,7 @@ export interface NextResult {
  * or wait while a write step is queued for approval.
  */
 export async function planNext(deps: ControlDeps, taskId: string, screenshotB64: string | null, lastResult?: string, perception?: { pageText?: string; axTree?: string }): Promise<NextResult> {
+  // The latest screenshot doubles as the artifact image if the agent declares done this turn.
   const { pool } = deps;
   const task = (await pool.query<{ request: string; status: string; auto: boolean; requester: string | null }>(
     `SELECT request, status, true AS auto, requester FROM control_task WHERE id = $1`, [taskId])).rows[0];
@@ -186,8 +187,8 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
   if (step.done) {
     // Gather what the read steps found so the chat can read the answer (ADR-056).
     const detail = prior.filter((x) => x.result && x.result.trim()).map((x) => `- ${x.summary}: ${x.result!.slice(0, 1200)}`).join("\n").slice(0, 20000);
-    await pool.query(`UPDATE control_task SET status = 'done', result_summary = $2, result_detail = $3, updated_at = now() WHERE id = $1`,
-      [taskId, step.summary.slice(0, 1000), detail || null]);
+    await pool.query(`UPDATE control_task SET status = 'done', result_summary = $2, result_detail = $3, result_image_b64 = COALESCE($4, result_image_b64), updated_at = now() WHERE id = $1`,
+      [taskId, step.summary.slice(0, 1000), detail || null, screenshotB64 && screenshotB64.length < 8_000_000 ? screenshotB64 : null]);
     await appendEvent(pool, { actor: "j6", action: "control_task_done", entityType: "control_task", entityId: taskId, after: { summary: step.summary } });
     return task.requester ? { status: "done", message: step.summary, requester: task.requester } : { status: "done", message: step.summary };
   }
@@ -278,21 +279,26 @@ export async function getStep(pool: pg.Pool, stepId: string): Promise<{ id: stri
   return r.rows[0] ?? null;
 }
 
-export interface TaskResult { code: number; status: string; request: string; summary: string | null; detail: string | null; updatedAt: string }
+export interface TaskResult { code: number; status: string; request: string; summary: string | null; detail: string | null; imageB64: string | null; updatedAt: string }
 
 /** Read a task's current state and result, for the chat that started it (ADR-056). */
 export async function getTaskResult(pool: pg.Pool, code: number): Promise<TaskResult | null> {
-  const r = await pool.query<{ code: number; status: string; request: string; result_summary: string | null; result_detail: string | null; updated_at: Date }>(
-    `SELECT code, status, request, result_summary, result_detail, updated_at FROM control_task WHERE code = $1`, [code]);
+  const r = await pool.query<{ code: number; status: string; request: string; result_summary: string | null; result_detail: string | null; result_image_b64: string | null; updated_at: Date }>(
+    `SELECT code, status, request, result_summary, result_detail, result_image_b64, updated_at FROM control_task WHERE code = $1`, [code]);
   const t = r.rows[0];
   if (!t) return null;
-  return { code: Number(t.code), status: t.status, request: t.request, summary: t.result_summary, detail: t.result_detail, updatedAt: t.updated_at.toISOString() };
+  return { code: Number(t.code), status: t.status, request: t.request, summary: t.result_summary, detail: t.result_detail, imageB64: t.result_image_b64, updatedAt: t.updated_at.toISOString() };
 }
 
 /** The latest task, so the chat can check "the task I just started" without needing its code. */
 export async function latestTask(pool: pg.Pool): Promise<TaskResult | null> {
   const r = await pool.query<{ code: number }>(`SELECT code FROM control_task ORDER BY created_at DESC LIMIT 1`);
   return r.rows[0] ? getTaskResult(pool, Number(r.rows[0].code)) : null;
+}
+
+/** Save the final artifact image for a task (ADR-058), so the chat and iMessage can show it. */
+export async function setResultImage(pool: pg.Pool, taskId: string, imageB64: string): Promise<void> {
+  await pool.query(`UPDATE control_task SET result_image_b64 = $2, updated_at = now() WHERE id = $1`, [taskId, imageB64.slice(0, 8_000_000)]);
 }
 
 export async function recordRun(pool: pg.Pool, stepId: string, ok: boolean, result: string): Promise<void> {
