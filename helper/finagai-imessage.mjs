@@ -421,7 +421,7 @@ async function tick(cfg, state) {
     for (const fr of resp.fileRequests ?? []) {
       const files = await findEverything(fr.queries).catch(() => []);
       log("searched files", { contact: allowed.get(fr.handle), queries: fr.queries.length, files: files.length });
-      const r = await core(cfg, "/concierge/context", { handle: fr.handle, trigger: fr.trigger, files });
+      const r = await core(cfg, "/concierge/context", { handle: fr.handle, trigger: fr.trigger, files, queries: fr.queries });
       drafts.push(...(r.drafts ?? []));
     }
     for (const d of drafts) {

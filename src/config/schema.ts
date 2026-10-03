@@ -30,6 +30,10 @@ export const configSchema = z.object({
   MODEL_J5_CONCIERGE: z.string().default("claude-sonnet-5-5"),
   /** Shared secret of the Mac iMessage helper; J5 endpoints are disabled while unset. */
   CONCIERGE_HELPER_TOKEN: z.string().min(32).optional(),
+  /** Read-only Google access for J5 (ADR-049); all three or none. */
+  GOOGLE_CLIENT_ID: z.string().min(10).optional(),
+  GOOGLE_CLIENT_SECRET: z.string().min(10).optional(),
+  GOOGLE_REFRESH_TOKEN: z.string().min(10).optional(),
   /** Searches allowed per concierge draft. */
   CONCIERGE_MAX_SEARCHES: z.coerce.number().int().min(0).max(5).default(3),
   /** ADR-025 (clarified): normal Lean pilot budget. */
@@ -77,6 +81,8 @@ export const SECRET_KEYS = [
   "SESSION_SECRET",
   "RESEND_API_KEY",
   "CONCIERGE_HELPER_TOKEN",
+  "GOOGLE_CLIENT_SECRET",
+  "GOOGLE_REFRESH_TOKEN",
 ] as const satisfies readonly (keyof Config)[];
 
 /** Keys that must hold real values (no angle-bracket placeholders) in production. */

@@ -64,7 +64,8 @@ export function createConciergeHandler(deps: J5Deps, token: string | undefined, 
       if (path === "/concierge/context") {
         if (typeof body.handle !== "string" || typeof body.trigger !== "string") return json(res, 422, { error: "handle_and_trigger_required" });
         const files = Array.isArray(body.files) ? (body.files as FileExcerpt[]).slice(0, 12) : [];
-        const d = await draftForThread(deps, body.handle, files, body.trigger).catch((err) => {
+        const queries = Array.isArray(body.queries) ? (body.queries as unknown[]).filter((q): q is string => typeof q === "string").slice(0, 3) : [];
+        const d = await draftForThread(deps, body.handle, files, body.trigger, queries).catch((err) => {
           log("concierge draft failed", { error: err instanceof Error ? err.message.slice(0, 120) : "error" });
           return null;
         });

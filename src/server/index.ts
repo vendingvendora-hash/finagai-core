@@ -17,6 +17,7 @@ import { runReview } from "../pipelines/j3/review.js";
 import type { J3Deps } from "../pipelines/j3/review.js";
 import { createHandler } from "./app.js";
 import { createConciergeHandler } from "../concierge/routes.js";
+import { GoogleClient } from "../google/client.js";
 import { createLogger } from "./log.js";
 
 const VERSION = process.env.RENDER_GIT_COMMIT?.slice(0, 12) ?? "dev";
@@ -57,7 +58,9 @@ async function main() {
     onExecuted: async (action) => { if (action === "promote_seed_batch") await runReview(j3, { kind: "baseline" }); },
   });
   const concierge = createConciergeHandler({ pool, model, modelId: cfg.MODEL_J5_CONCIERGE, maxSearches: cfg.CONCIERGE_MAX_SEARCHES,
-    timezone: cfg.FINAGAI_TIMEZONE, homeBase: "Hyattsville, Maryland (Washington DC area; DCA, IAD and BWI airports)", log }, cfg.CONCIERGE_HELPER_TOKEN, log);
+    timezone: cfg.FINAGAI_TIMEZONE, homeBase: "Hyattsville, Maryland (Washington DC area; DCA, IAD and BWI airports)", log,
+    ...(cfg.GOOGLE_CLIENT_ID && cfg.GOOGLE_CLIENT_SECRET && cfg.GOOGLE_REFRESH_TOKEN
+      ? { google: new GoogleClient({ clientId: cfg.GOOGLE_CLIENT_ID, clientSecret: cfg.GOOGLE_CLIENT_SECRET, refreshToken: cfg.GOOGLE_REFRESH_TOKEN }) } : {}) }, cfg.CONCIERGE_HELPER_TOKEN, log);
   const server = http.createServer(createHandler(cfg, { version: VERSION, startedAt: new Date() }, log,
     { keys: remoteKeys(cfg.OAUTH_JWKS_URL), mcp, approval, concierge,
       onClientObserved: async (clientId) => {
