@@ -24,9 +24,9 @@ export const configSchema = z.object({
     /** J5 ticket concierge (ADR-044). */
     MODEL_J5_CONCIERGE: z.string().default("claude-sonnet-5-5"),
     /** J6 Mac-control planner: the hard reasoning runs on the strongest model (ADR-055). */
-    MODEL_J6_PLANNER: z.string().default("claude-opus-5-5"),
+    MODEL_J6_PLANNER: z.string().default("claude-sonnet-5-5"),
     /** Extended-thinking token budget for the J6 planner; 0 disables. */
-    J6_THINKING_TOKENS: z.coerce.number().int().min(0).max(8000).default(2000),
+    J6_THINKING_TOKENS: z.coerce.number().int().min(0).max(8000).default(0),
     /** Shared secret of the Mac iMessage helper; J5 endpoints are disabled while unset. */
     CONCIERGE_HELPER_TOKEN: z.string().min(32).optional(),
     /** Read-only Google access for J5 (ADR-049); all three or none. */

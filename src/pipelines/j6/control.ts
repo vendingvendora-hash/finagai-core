@@ -170,17 +170,29 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
     text: `Task from Julian: ${task.request}\n\nSteps so far:\n${history || "(none yet)"}${lastResult ? `\n\nResult of the last step:\n${lastResult.slice(0, 2000)}` : ""}${percept ? `\n\n${percept}` : ""}\n\nHere is the current screen. Reflect, plan, then give the single next action.` }];
   if (screenshotB64) content.push({ type: "image", mediaType: "image/png", dataBase64: screenshotB64 });
 
+  const basePlan = {
+    pipeline: "j6" as const, step: "plan", purpose: "concierge" as const, promptVersion: J6_PROMPT_VERSION,
+    system: systemPrompt(now.toTimeString().slice(9), today, task.request), messages: [{ role: "user" as const, content }], maxTokens: 1200,
+  };
   let step: Step | null;
   try {
-    const r = await deps.model.complete({
-      pipeline: "j6", step: "plan", purpose: "concierge", model: deps.plannerModel ?? deps.modelId, promptVersion: J6_PROMPT_VERSION,
-      system: systemPrompt(now.toTimeString().slice(9), today, task.request), messages: [{ role: "user", content }], maxTokens: 1200,
-      ...(deps.thinkingTokens && deps.thinkingTokens > 0 ? { thinkingTokens: deps.thinkingTokens } : {}),
-    });
+    let r;
+    try {
+      r = await deps.model.complete({ ...basePlan, model: deps.plannerModel ?? deps.modelId,
+        ...(deps.thinkingTokens && deps.thinkingTokens > 0 ? { thinkingTokens: deps.thinkingTokens } : {}) });
+    } catch (err1) {
+      if (err1 instanceof BudgetBlockedError) throw err1;
+      // The planner model or extended-thinking params may be rejected by the API — fall back to the
+      // plain runtime model with no thinking, so a task is never dead-ended by a bad planner config.
+      deps.log?.("planner call failed; falling back to runtime model", { error: String((err1 as Error)?.message ?? err1).slice(0, 160) });
+      r = await deps.model.complete({ ...basePlan, model: deps.modelId });
+    }
     step = parseStep(r.text);
   } catch (err) {
     if (err instanceof BudgetBlockedError) { await setTaskStatus(pool, taskId, "paused"); return { status: "failed", message: "budget reached" }; }
-    throw err;
+    deps.log?.("planner failed", { error: String((err as Error)?.message ?? err).slice(0, 160) });
+    await setTaskStatus(pool, taskId, "failed");
+    return { status: "failed", message: "couldn't plan the next step" };
   }
   if (!step) { await setTaskStatus(pool, taskId, "failed"); return { status: "failed", message: "could not plan the next step" }; }
 
