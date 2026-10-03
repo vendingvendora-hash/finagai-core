@@ -722,7 +722,34 @@ async function tick(cfg, state) {
     }
     if (cr && cr.status === "cancelled") continue;
     const r = await core(cfg, "/concierge/decision", { text }).catch(() => null);  // 422 = ordinary note, not a command
-    if (!r || r.status !== "send") continue;
+    if (!r || r.status !== "send") {
+      // Natural-language request from Julian's own thread (not a command, not a contact draft).
+      // Route it so the self thread is never a dead end.
+      const nreq = text.trim();
+      if (nreq.length >= 3 && !/^(ok|no|stop|edit)\b/i.test(nreq)) {
+        const chartLike = /\b(chart|trend|graph|plot|gr[aá]fico|visuali[sz]e|analy[sz]e)\b/i.test(nreq) && /\b(excel|xlsx|workbook|spreadsheet|hoja|sheet|\.xls)\b/i.test(nreq);
+        if (chartLike) {
+          // Resolve the filename from the text, else from the frontmost window (the open spreadsheet).
+          let filename = (nreq.match(/([A-Za-z0-9 _.\-()]+\.(?:xlsx|xlsm|xls))/i) || nreq.match(/\b(Altarum[A-Za-z0-9_\-]*)/i) || [])[1] || "";
+          if (!filename) { const fm = await getFrontmost(run).catch(() => ({ ok:false })); if (fm.ok && fm.window) filename = String(fm.window).replace(/\s+—.*$/, "").trim(); }
+          if (filename) {
+            await sendIMessage(cfg.selfHandles[0], `On it — charting “${filename}”.`);
+            const t = await core(cfg, "/control/start", { request: `mac_chart:${filename}` }).catch(() => null);
+            // runMacChart is driven by the pending-task pickup next tick; nothing else to do here.
+            if (!t) await sendIMessage(cfg.selfHandles[0], "Couldn't start that just now — try again in a moment.");
+          } else {
+            await sendIMessage(cfg.selfHandles[0], "Which spreadsheet? Tell me the file name, or open it so it's the front window.");
+          }
+          continue;
+        }
+        // Any other natural request → open a general Mac task (J6) and acknowledge.
+        await sendIMessage(cfg.selfHandles[0], "On it.");
+        const t = await core(cfg, "/control/start", { request: nreq }).catch(() => null);
+        if (!t) await sendIMessage(cfg.selfHandles[0], "Couldn't start that just now — try again in a moment.");
+        continue;
+      }
+      continue;
+    }
     if (!allowed.has(normalizeHandle(r.handle))) { log("refused: handle not allow-listed", {}); await core(cfg, "/concierge/sent", { id: r.id, ok: false }); continue; }
     try {
       await sendIMessage(r.handle, r.body);
