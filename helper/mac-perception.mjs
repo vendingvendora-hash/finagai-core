@@ -22,19 +22,11 @@ async function osaJS(run, js, args = [], opts = {}) {
 /** Frontmost application name + its focused window title. */
 export async function getFrontmost(run) {
   try {
-    const out = await osa(run, [
-      'tell application "System Events"',
-      '  set p to first process whose frontmost is true',
-      '  set app to name of p',
-      '  set win to ""',
-      '  try',
-      '    set win to name of front window of p',
-      '  end try',
-      'end tell',
-      'return app & "\\t" & win',
-    ]);
-    const [app, win] = out.split("\t");
-    return { ok: true, app: app || null, window: win || null };
+    // Single-line JXA: reliable, no multi -e scoping issues, no reserved-word clashes.
+    const js = `(function(){var se=Application("System Events");var p=se.applicationProcesses.whose({frontmost:true})()[0];if(!p)return "";var appName=p.name();var winName="";try{winName=p.windows()[0].name();}catch(e){}return appName+"\t"+winName;})()`;
+    const out = await osaJS(run, js);
+    const [appName, win] = out.split("\t");
+    return { ok: true, app: appName || null, window: win || null };
   } catch (e) { return { ok: false, error: String(e?.message ?? e).slice(0, 160) }; }
 }
 

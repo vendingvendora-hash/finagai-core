@@ -16,7 +16,7 @@ const fakeRun = (map: Array<[string, string]>): Run => async (cmd, args) => {
 
 describe("Mac perception substrate (ADR-062)", () => {
   it("getFrontmost parses app + window", async () => {
-    const r = await getFrontmost(fakeRun([["frontmost is true", "Numbers\tAltarum_Pricing_Case_Template"]]));
+    const r = await getFrontmost(fakeRun([["frontmost:true", "Numbers\tAltarum_Pricing_Case_Template"]]));
     expect(r.ok).toBe(true); expect(r.app).toBe("Numbers"); expect(r.window).toContain("Altarum");
   });
   it("listWindows parses structured JSON", async () => {
