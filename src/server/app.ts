@@ -192,7 +192,7 @@ export function createHandler(cfg: Config, info: AppInfo, log: LogFn, deps: AppD
       return;
     }
 
-    if ((path.startsWith("/control/") || path.startsWith("/mac/")) && deps.control) {
+    if ((path.startsWith("/control/") || path.startsWith("/mac/") || path.startsWith("/artifact/") || path.startsWith("/interaction/")) && deps.control) {
       void deps.control(req, res, path);
       return;
     }
