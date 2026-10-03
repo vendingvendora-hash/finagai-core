@@ -1,17 +1,5 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "outDir": "dist",
-    "rootDir": ".",
-    "declaration": false,
-    "sourceMap": true
-  },
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": { "outDir": "dist", "rootDir": ".", "noEmit": true, "allowJs": true, "checkJs": false },
   "include": ["src/**/*.ts", "test/**/*.ts", "eval/**/*.ts"]
 }

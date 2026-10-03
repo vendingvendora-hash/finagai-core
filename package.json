@@ -8,8 +8,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run test/unit",
     "verify:migrations": "bash scripts/verify-migrations.sh",
     "migrate": "bash scripts/migrate.sh",

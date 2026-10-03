@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { parseCommand, parseVerdict, systemPrompt, transcript, validHandle } from "../../src/pipelines/j5/concierge.js";
 import { helperAuthorized } from "../../src/concierge/routes.js";
 import { worstCaseCostUsd, PER_CALL_MAX_USD } from "../../src/llm/estimate.js";
-// @ts-expect-error plain ESM helper without type declarations
 import { normalizeHandle, messageText, draftNotice, appleDateToIso, DRAFT_PREFIX } from "../../helper/finagai-imessage.mjs";
 
 describe("J5 commands from Julian's own thread", () => {
@@ -97,7 +96,6 @@ describe("Mac helper pure functions", () => {
 });
 
 import { filesBlock, parsePlan, plannerPrompt } from "../../src/pipelines/j5/concierge.js";
-// @ts-expect-error plain ESM helper without type declarations
 import { scrubLocal, passage, EXCLUDED_PATH } from "../../helper/finagai-imessage.mjs";
 
 describe("J5 local files (ADR-046)", () => {
@@ -137,7 +135,6 @@ describe("J5 local files (ADR-046)", () => {
   });
 });
 
-// @ts-expect-error plain ESM helper without type declarations
 import { cleanTerm } from "../../helper/finagai-imessage.mjs";
 
 describe("J5 other personal sources (ADR-047)", () => {
@@ -157,7 +154,6 @@ describe("J5 other personal sources (ADR-047)", () => {
 });
 
 import { validAttachments } from "../../src/pipelines/j5/concierge.js";
-// @ts-expect-error plain ESM helper without type declarations
 import { chartSvg } from "../../helper/finagai-imessage.mjs";
 
 describe("J5 attachments (ADR-048)", () => {

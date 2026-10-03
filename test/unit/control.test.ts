@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ALWAYS_CONFIRM, classifyRisk, needsApproval, parseControlCommand, parseStep, type Step } from "../../src/pipelines/j6/control.js";
 import { helperAuthorized } from "../../src/concierge/control-routes.js";
-// @ts-expect-error untyped helper
 import { runControlStep } from "../../helper/finagai-imessage.mjs";
 
 const step = (over: Partial<Step>): Step => ({ kind: "click", params: {}, risk: "write", summary: "do a thing", ...over });
