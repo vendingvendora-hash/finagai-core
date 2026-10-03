@@ -9,6 +9,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type http from "node:http";
 import { cancelTask, createTask, decideStep, getStep, getTaskResult, parseControlCommand, planNext, recordRun, setResultImage, type ControlDeps } from "../pipelines/j6/control.js";
 import { analyzeWorkbookToChart, rankCandidates, type Candidate } from "../mac/operator.js";
+import { registerArtifact, resolveRecentArtifact, markArtifactSent, claimInbound, finishInbound } from "./interaction.js";
 
 const MAX_BODY = 24 * 1024 * 1024; // screenshots + perception
 
@@ -97,6 +98,34 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         log("mac chart", { ok: result.ok, stages: result.stages.map((st) => `${st.stage}:${st.ok ? "ok" : "fail"}`).join(",") });
         return json(res, 200, { ok: result.ok, message: result.message, svgB64: result.svg ? Buffer.from(result.svg, "utf8").toString("base64") : null,
           chosen: result.chosen ? { name: result.chosen.name } : null, pick: result.pick ?? null, stages: result.stages });
+      }
+      if (path === "/interaction/claim") {
+        if (typeof body.guid !== "string") return json(res, 422, { error: "guid_required" });
+        const r = await claimInbound(deps.pool, body.guid, typeof body.handle === "string" ? body.handle : null);
+        return json(res, 200, r);
+      }
+      if (path === "/interaction/finish") {
+        if (typeof body.guid === "string") await finishInbound(deps.pool, body.guid, body.ok !== false, typeof body.result === "string" ? body.result : undefined);
+        return json(res, 200, { ok: true });
+      }
+      if (path === "/artifact/register") {
+        if (typeof body.storageRef !== "string" || typeof body.kind !== "string") return json(res, 422, { error: "kind_and_storageRef_required" });
+        const str = (v: unknown) => typeof v === "string" ? v : undefined;
+        const a = await registerArtifact(deps.pool, { kind: body.kind, storageRef: body.storageRef,
+          mime: str(body.mime), summary: str(body.summary), origin: str(body.origin), conversation: str(body.conversation),
+          taskCode: typeof body.taskCode === "number" ? body.taskCode : undefined });
+        return json(res, 200, { artifact: a });
+      }
+      if (path === "/artifact/recent") {
+        const opts: { conversation?: string; kind?: string } = {};
+        if (typeof body.conversation === "string") opts.conversation = body.conversation;
+        if (typeof body.kind === "string") opts.kind = body.kind;
+        const a = await resolveRecentArtifact(deps.pool, opts);
+        return json(res, 200, { artifact: a });
+      }
+      if (path === "/artifact/sent") {
+        if (typeof body.id === "string") await markArtifactSent(deps.pool, body.id);
+        return json(res, 200, { ok: true });
       }
       if (path === "/mac/chart-done") {
         if (typeof body.taskId === "string" && typeof body.imageB64 === "string") {

@@ -587,7 +587,7 @@ async function tick(cfg, state) {
     const h = normalizeHandle(r.chat);
     const text = messageText(r.text, r.ab);
     if (!text) continue;
-    if (self.has(h)) { if (!text.startsWith(DRAFT_PREFIX)) commands.push(text); continue; }
+    if (self.has(h)) { if (!text.startsWith(DRAFT_PREFIX)) commands.push({ text, guid: r.guid }); continue; }
     if (allowed.has(h)) contactMsgs.push(toMsg(r, false));
   }
   state.lastRowId = Math.max(Number(state.lastRowId), ...rows.map((r) => Number(r.rowid)));
