@@ -244,7 +244,7 @@ export function buildMcpServer(deps) {
         }),
     }, async (a) => ok("seed_answer", await answer(deps.j2, a.batch_id, a.answers)));
     server.registerTool("control_mac", {
-        description: "Start a task that operates Julian's Mac for him (J6): open apps, click, type, run commands, use his logged-in sessions. Finagai works step by step and asks Julian to approve anything that changes or sends something. Use when Julian asks you to DO something on his computer, not just look it up.",
+        description: "Operate Julian's Mac step by step (J6): open apps, click, type, run commands, use logged-in sessions, for general desktop actions. IMPORTANT: do NOT use this to chart/plot/visualize data from a named local spreadsheet or Excel file — use make_mac_chart for that; it is deterministic, finds and reads the file, and returns the chart image directly.",
         inputSchema: z.object({ request: z.string().min(1).max(4000) }),
     }, async ({ request }) => {
         const t = await deps.pool.query(`INSERT INTO control_task (request, origin) VALUES ($1, 'chat') RETURNING id, code`, [request.slice(0, 4000)]);
