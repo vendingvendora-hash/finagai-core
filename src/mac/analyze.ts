@@ -47,6 +47,7 @@ export function detectSeries(sheets: Sheet[]): SeriesPick | null {
     for (const vc of numericCols) {
       if (vc === labelCol) continue;
       if (vc === dateNamedCol) continue;
+      if (!header[vc] || String(header[vc]).trim() === "") continue;   // skip unnamed columns (blank title bug)
       const pairs: Array<{ label: string; value: number }> = [];
       dataRows.forEach((r, i) => {
         const v = r[vc];
@@ -59,17 +60,27 @@ export function detectSeries(sheets: Sheet[]): SeriesPick | null {
         pairs.push({ label, value: v });
       });
       if (pairs.length < 2) continue;
-      const hdr = header[vc] || `Column ${vc + 1}`;
-      const lblHdr = labelCol >= 0 ? (header[labelCol] || "Row") : "Row";
-      const timeLike = labelCol >= 0 && (labelIsDateSerial || looksDateHeader(lblHdr) || pairs.every((p) => /^\d{4}-\d\d-\d\d$|\bQ[1-4]\b|\b(19|20)\d\d\b|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec/i.test(p.label)));
-      // score: prefer measure-named numeric cols, time-like x, more points
-      const score = (looksMeasureHeader(hdr) ? 3 : 0) + (timeLike ? 3 : 0) + Math.min(pairs.length, 12) / 4;
+      const hdr = header[vc]!.trim();
+      const haveRealLabels = labelCol >= 0 && String(header[labelCol] ?? "").trim() !== "" && pairs.some((p) => !/^#\d+$/.test(p.label));
+      const lblHdr = haveRealLabels ? header[labelCol]!.trim() : "Row";
+      const timeLike = haveRealLabels && (labelIsDateSerial || looksDateHeader(lblHdr) || pairs.every((p) => /^\d{4}-\d\d-\d\d$|\bQ[1-4]\b|\b(19|20)\d\d\b|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec/i.test(p.label)));
+      // Demote columns that are effectively a row index (1,2,3…) or constant — they're not interesting.
+      const vals = pairs.map((p) => p.value);
+      const distinct = new Set(vals).size;
+      const looksSequential = vals.every((v, i) => i === 0 || v === vals[i - 1]! + 1);
+      let score = 0;
+      if (looksMeasureHeader(hdr)) score += 4;      // a named measure (price/cost/revenue/…) is best
+      if (haveRealLabels) score += 3;               // a genuine category/date axis, not #row
+      if (timeLike) score += 2;
+      score += Math.min(pairs.length, 12) / 6;
+      if (distinct <= 2) score -= 3;                // near-constant
+      if (looksSequential) score -= 4;              // it's just an index column
       if (score > bestScore) {
         bestScore = score;
         best = { sheet: sheet.name, labelColumn: lblHdr, valueColumn: hdr,
-          labels: pairs.map((p) => p.label), values: pairs.map((p) => p.value),
+          labels: pairs.map((p) => p.label), values: vals,
           isTimeLike: timeLike,
-          reason: `Chose "${hdr}" over ${lblHdr} on sheet "${sheet.name}" (${pairs.length} points${timeLike ? ", time-ordered" : ""}).` };
+          reason: `Charted "${hdr}"${haveRealLabels ? ` by ${lblHdr}` : ""} on sheet "${sheet.name}" (${pairs.length} points${timeLike ? ", time-ordered" : ""}).` };
       }
     }
   }

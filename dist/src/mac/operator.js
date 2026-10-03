@@ -57,7 +57,11 @@ export function analyzeWorkbookToChart(chosen, bytes, requestTitle) {
     if (!add("detect_series", !!pick && pick.values.length >= 2, pick ? pick.reason : "no numeric series with >=2 points"))
         return { ok: false, stages, chosen, message: "No numeric data suitable for a chart was found. The workbook may have no measurable columns." };
     // CHART (data-driven; trendline when time-like, bar otherwise)
-    const title = `${requestTitle} — ${pick.valueColumn} by ${pick.labelColumn}`;
+    const fileTitle = chosen.name.replace(/\.(xlsx|xlsm|xls)$/i, "");
+    const measure = (pick.valueColumn && pick.valueColumn.trim()) ? pick.valueColumn.trim() : "values";
+    const byPart = (pick.labelColumn && pick.labelColumn !== "Row") ? ` by ${pick.labelColumn}` : "";
+    const title = `${fileTitle}: ${measure}${byPart}`;
+    void requestTitle;
     const svg = seriesToSvg(pick, title);
     if (!add("chart", svg.includes("<svg") && svg.length > 500, `svg ${svg.length} bytes, ${pick.isTimeLike ? "line+trendline" : "bar"}`))
         return { ok: false, stages, chosen, message: "Chart generation failed." };
@@ -65,7 +69,7 @@ export function analyzeWorkbookToChart(chosen, bytes, requestTitle) {
         ok: true, stages, chosen,
         pick: { sheet: pick.sheet, labelColumn: pick.labelColumn, valueColumn: pick.valueColumn, isTimeLike: pick.isTimeLike, reason: pick.reason, points: pick.values.length },
         svg, title,
-        message: `Built a ${pick.isTimeLike ? "trend" : "bar"} chart of "${pick.valueColumn}" from ${chosen.name}. ${pick.reason}`,
+        message: `Built a ${pick.isTimeLike ? "trend" : "bar"} chart of ${measure} from ${chosen.name}. ${pick.reason}`,
     };
 }
 //# sourceMappingURL=operator.js.map

@@ -13,7 +13,8 @@ export function seriesToSvg(pick: SeriesPick, title: string): string {
   const pw = W - L - R, ph = H - T - B;
   const x = (i: number) => L + (n === 1 ? pw / 2 : (i * pw) / (n - 1));
   const y = (v: number) => T + ph - ((v - min) / ((max - min) || 1)) * ph;
-  const titleEl = `<text x="${W / 2}" y="50" font-size="30" font-family="Helvetica" text-anchor="middle" font-weight="bold">${esc(title)}</text>`;
+  const titleSize = title.length > 46 ? 20 : title.length > 34 ? 24 : 30;   // auto-shrink long titles
+  const titleEl = `<text x="${W / 2}" y="50" font-size="${titleSize}" font-family="Helvetica" text-anchor="middle" font-weight="bold">${esc(title)}</text>`;
   const grid = Array.from({ length: 5 }, (_, i) => { const v = min + ((max - min) * i) / 4; const yy = y(v);
     return `<line x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}" stroke="#e5e7eb"/><text x="${L - 12}" y="${yy + 5}" font-size="18" text-anchor="end" font-family="Helvetica">${Number(v.toFixed(2)).toLocaleString("en-US")}</text>`; }).join("");
   const everyX = Math.ceil(n / 12);

@@ -6,7 +6,8 @@ export function seriesToSvg(pick, title) {
     const pw = W - L - R, ph = H - T - B;
     const x = (i) => L + (n === 1 ? pw / 2 : (i * pw) / (n - 1));
     const y = (v) => T + ph - ((v - min) / ((max - min) || 1)) * ph;
-    const titleEl = `<text x="${W / 2}" y="50" font-size="30" font-family="Helvetica" text-anchor="middle" font-weight="bold">${esc(title)}</text>`;
+    const titleSize = title.length > 46 ? 20 : title.length > 34 ? 24 : 30; // auto-shrink long titles
+    const titleEl = `<text x="${W / 2}" y="50" font-size="${titleSize}" font-family="Helvetica" text-anchor="middle" font-weight="bold">${esc(title)}</text>`;
     const grid = Array.from({ length: 5 }, (_, i) => {
         const v = min + ((max - min) * i) / 4;
         const yy = y(v);
