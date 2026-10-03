@@ -15,8 +15,8 @@ import { appendEvent, withTransaction } from "../../db/index.js";
 import type { MeteredModelClient } from "../../llm/metered.js";
 import { BudgetBlockedError, type ContentBlock } from "../../llm/types.js";
 
-export const J6_PROMPT_VERSION = "j6-control-v1";
-export const MAX_STEPS_PER_TASK = 60;
+export const J6_PROMPT_VERSION = "j6-control-v2";
+export const MAX_STEPS_PER_TASK = 80;
 
 /** Actions that only observe. Everything else is a WRITE and needs Julian's approval. */
 export const READ_KINDS = new Set(["screenshot", "read_text", "list_apps", "list_files", "read_file", "wait", "done", "ask"]);
@@ -72,6 +72,8 @@ Each turn, look at the latest screenshot and output the single next action as JS
 Action kinds:
 - Observe (risk "read"): screenshot; read_text {}; list_apps {}; list_files {"dir":"~/..."}; read_file {"path":"~/..."}; wait {"seconds":N}; ask {"question":"..."} when you genuinely need Julian to decide; done {} when the task is finished.
 - Act (risk "write"): click {"x":N,"y":N}; double_click; right_click; move {"x","y"}; drag {"from":[x,y],"to":[x,y]}; scroll {"x","y","amount":N,"dir":"up|down"}; type {"text":"..."}; key {"key":"return|tab|esc|..."}; hotkey {"keys":["cmd","c"]}; open_app {"name":"Safari"}; open_url {"url":"https://..."}; open_path {"path":"~/..."}; run {"cmd":"..."} (a shell command); move_file {"from","to"}; trash_file {"path"}.
+
+How to find things (important): do exactly what Julian would do. If something lives in Google Drive, Gmail, or any website — including files that are only on the web, or anything behind a login — OPEN THE BROWSER (open_url to drive.google.com, mail.google.com, or the site), navigate, use the on-page search, open the item, and read it from the screen or screenshot it. Julian is already signed in to his accounts in his browser, so you can reach whatever he can reach. Don't give up saying a file isn't on the Mac: look for it the way he would, in the browser.
 
 Rules:
 - Coordinates are in the screenshot's own pixels; take a fresh screenshot after anything that changes the screen.
