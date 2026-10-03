@@ -726,23 +726,33 @@ async function tick(cfg, state) {
       // Natural-language request from Julian's own thread (not a command, not a contact draft).
       // Route it so the self thread is never a dead end.
       const nreq = text.trim();
-      if (nreq.length >= 3 && !/^(ok|no|stop|edit)\b/i.test(nreq)) {
-        const chartLike = /\b(chart|trend|graph|plot|gr[aá]fico|visuali[sz]e|analy[sz]e)\b/i.test(nreq) && /\b(excel|xlsx|workbook|spreadsheet|hoja|sheet|\.xls)\b/i.test(nreq);
-        if (chartLike) {
-          // Resolve the filename from the text, else from the frontmost window (the open spreadsheet).
-          let filename = (nreq.match(/([A-Za-z0-9 _.\-()]+\.(?:xlsx|xlsm|xls))/i) || nreq.match(/\b(Altarum[A-Za-z0-9_\-]*)/i) || [])[1] || "";
-          if (!filename) { const fm = await getFrontmost(run).catch(() => ({ ok:false })); if (fm.ok && fm.window) filename = String(fm.window).replace(/\s+—.*$/, "").trim(); }
+      if (nreq.length >= 2 && !/^(ok|no|stop|edit)\b/i.test(nreq)) {
+        const chartWord = /\b(chart|trend|graph|plot|gr[aá]fico|visuali[sz]e|analy[sz]e)\b/i.test(nreq);
+        const sheetWord = /\b(excel|xlsx|workbook|spreadsheet|hoja|sheet|\.xls)\b/i.test(nreq);
+        // Resolve a filename from: an explicit .xls name, a quoted name, an "analysis/case/report"-style
+        // title (no extension), or the frontmost window. Accept names WITHOUT an extension.
+        const pickName = (txt) => {
+          const m = txt.match(/([A-Za-z0-9 _.\-()]+\.(?:xlsx|xlsm|xls))/i)   // explicit extension
+                || txt.match(/[“"']([^”"']{2,80})[”"']/)                        // quoted title
+                || txt.match(/\b([A-Z][A-Za-z0-9]*(?:\s+[A-Za-z0-9()]+){1,6})\b/); // Title Case phrase
+          return m ? m[1].trim() : "";
+        };
+        // Is this a reply to our own "Which spreadsheet?" prompt? Then treat the whole text as the name.
+        const answeringWhich = wasRecentlySent("Which spreadsheet? Tell me the file name, or open it so it's the front window.");
+        if (chartWord || answeringWhich) {
+          let filename = pickName(nreq);
+          if (!filename && (chartWord && sheetWord)) { const fm = await getFrontmost(run).catch(() => ({ ok:false })); if (fm.ok && fm.window) filename = String(fm.window).replace(/\s+—.*$/, "").trim(); }
+          if (!filename && answeringWhich) filename = nreq;   // the reply IS the name
           if (filename) {
             await sendIMessage(cfg.selfHandles[0], `On it — charting “${filename}”.`);
             const t = await core(cfg, "/control/start", { request: `mac_chart:${filename}` }).catch(() => null);
-            // runMacChart is driven by the pending-task pickup next tick; nothing else to do here.
             if (!t) await sendIMessage(cfg.selfHandles[0], "Couldn't start that just now — try again in a moment.");
           } else {
             await sendIMessage(cfg.selfHandles[0], "Which spreadsheet? Tell me the file name, or open it so it's the front window.");
           }
           continue;
         }
-        // Any other natural request → open a general Mac task (J6) and acknowledge.
+        // Non-chart natural request → general Mac task (J6).
         await sendIMessage(cfg.selfHandles[0], "On it.");
         const t = await core(cfg, "/control/start", { request: nreq }).catch(() => null);
         if (!t) await sendIMessage(cfg.selfHandles[0], "Couldn't start that just now — try again in a moment.");
