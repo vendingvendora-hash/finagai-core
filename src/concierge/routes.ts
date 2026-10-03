@@ -11,6 +11,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type http from "node:http";
 import { decide, draftForThread, ingest, markSent, parseCommand, processThread, type FileExcerpt, type FileRequest, type J5Deps, type NewDraft, type SyncContact, type SyncMessage } from "../pipelines/j5/concierge.js";
+import { createTask } from "../pipelines/j6/control.js";
 
 const MAX_BODY = 512_000;
 const MAX_MESSAGES = 500;
@@ -49,17 +50,23 @@ export function createConciergeHandler(deps: J5Deps, token: string | undefined, 
         const messages = Array.isArray(body.messages) ? (body.messages as SyncMessage[]).slice(0, MAX_MESSAGES) : [];
         const touched = await ingest(deps.pool, contacts, messages);
         const filesEnabled = body.capabilities !== undefined && Array.isArray(body.capabilities) && body.capabilities.includes("files");
+        const controlEnabled = Array.isArray(body.capabilities) && body.capabilities.includes("control");
         const drafts: NewDraft[] = [];
         const fileRequests: FileRequest[] = [];
+        const controlTasks: Array<{ taskId: string; taskCode: number; label: string; request: string }> = [];
         for (const handle of touched) {
-          const r = await processThread({ ...deps, filesEnabled }, handle).catch((err) => {
+          const r = await processThread({ ...deps, filesEnabled, controlEnabled }, handle).catch((err) => {
             log("concierge draft failed", { error: err instanceof Error ? err.message.slice(0, 120) : "error" });
-            return {} as { draft?: NewDraft; fileRequest?: FileRequest };
+            return {} as Awaited<ReturnType<typeof processThread>>;
           });
           if (r.draft) drafts.push(r.draft);
           if (r.fileRequest) fileRequests.push(r.fileRequest);
+          if (r.controlRequest) {
+            const t = await createTask(deps.pool, `(${r.controlRequest.label} asked) ${r.controlRequest.request}`, "contact", r.controlRequest.label);
+            controlTasks.push({ taskId: t.id, taskCode: t.code, label: r.controlRequest.label, request: r.controlRequest.request });
+          }
         }
-        return json(res, 200, { drafts, fileRequests });
+        return json(res, 200, { drafts, fileRequests, controlTasks });
       }
       if (path === "/concierge/context") {
         if (typeof body.handle !== "string" || typeof body.trigger !== "string") return json(res, 422, { error: "handle_and_trigger_required" });

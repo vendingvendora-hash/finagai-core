@@ -93,4 +93,17 @@ describe.skipIf(!pool)("J6 control lifecycle", () => {
   it("J6 model calls are accepted by the metering ledger", async () => {
     await pool!.query(`INSERT INTO llm_call (pipeline, step, model, prompt_version, purpose, status) VALUES ('j6','plan','claude-sonnet-5-5','j6-control-v1','concierge','budget_blocked')`);
   });
+
+  it("a contact can request a task; it records the requester and still needs Julian's approval (ADR-051)", async () => {
+    const task = await createTask(pool!, "(Santiago asked) make a chart of our October spending", "contact", "Santiago");
+    const row = (await pool!.query(`SELECT origin, requester FROM control_task WHERE id = $1`, [task.id])).rows[0];
+    expect(row.origin).toBe("contact");
+    expect(row.requester).toBe("Santiago");
+    const r = await planNext(deps(new Script([{ kind: "open_app", params: { name: "Numbers" }, risk: "write", summary: "Open Numbers" }])), task.id, "shot");
+    expect(r.status).toBe("await_approval");         // a contact's request never auto-runs a write step
+    const dec = await decideStep(pool!, r.step!.code, true);
+    expect(dec.status).toBe("approved");
+    const ev = (await pool!.query(`SELECT actor FROM event WHERE action = 'control_step_approved' ORDER BY id DESC LIMIT 1`)).rows[0];
+    expect(ev.actor).toBe("julian");                 // approval is Julian's, never the contact's
+  });
 });

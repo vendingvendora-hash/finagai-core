@@ -372,7 +372,21 @@ export async function driveControl(cfg, taskId) {
   for (let i = 0; i < 40; i++) {
     const shot = await screenshotB64().catch(() => null);
     const r = await core(cfg, "/control/next", { taskId, screenshot: shot, lastResult });
-    if (r.status === "done") { await sendIMessage(cfg.selfHandles[0], `✅ Finagai finished: ${r.message || "done"}`); return; }
+    if (r.status === "done") {
+      if (r.requester) {
+        const handle = (cfg.contacts.find((c) => c.label === r.requester) || {}).handle;
+        const shot = await screenshotB64().catch(() => null);
+        await sendIMessage(cfg.selfHandles[0], `✅ Finagai finished ${r.requester}'s task: ${r.message || "done"}\nReply here to send ${r.requester} an update, or ignore.`);
+        if (handle && shot) { // offer the final screenshot to Julian so he can forward it if useful
+          const dir = join(OUT_ROOT, "done-" + Date.now()); mkdirSync(dir, { recursive: true });
+          const png = join(dir, "result.png"); writeFileSync(png, Buffer.from(shot, "base64"));
+          await sendIMessageFile(cfg.selfHandles[0], png).catch(() => {});
+        }
+      } else {
+        await sendIMessage(cfg.selfHandles[0], `✅ Finagai finished: ${r.message || "done"}`);
+      }
+      return;
+    }
     if (r.status === "failed") { await sendIMessage(cfg.selfHandles[0], `⚠️ Finagai stopped: ${r.message || "couldn't continue"}`); return; }
     if (r.status === "cancelled") return;
     if (r.status === "ask") { await sendIMessage(cfg.selfHandles[0], `❓ Finagai needs you: ${r.message}\nReply in this thread, or “stop ${taskCodeCache[taskId] ?? ""}”.`); return; }
@@ -488,13 +502,18 @@ async function tick(cfg, state) {
   for (const t of (pending?.tasks ?? [])) { taskCodeCache[t.id] = t.code; await driveControl(cfg, t.id).catch((e) => log("control drive failed", { error: String(e?.message ?? e).slice(0, 160) })); }
 
   if (contactMsgs.length) {
-    const resp = await core(cfg, "/concierge/sync", { contacts: cfg.contacts, messages: contactMsgs, capabilities: ["files"] });
+    const resp = await core(cfg, "/concierge/sync", { contacts: cfg.contacts, messages: contactMsgs, capabilities: ["files", "control"] });
     const drafts = [...(resp.drafts ?? [])];
     for (const fr of resp.fileRequests ?? []) {
       const files = await findEverything(fr.queries).catch(() => []);
       log("searched files", { contact: allowed.get(fr.handle), queries: fr.queries.length, files: files.length });
       const r = await core(cfg, "/concierge/context", { handle: fr.handle, trigger: fr.trigger, files, queries: fr.queries });
       drafts.push(...(r.drafts ?? []));
+    }
+    for (const t of resp.controlTasks ?? []) {
+      taskCodeCache[t.taskId] = t.taskCode;
+      await sendIMessage(cfg.selfHandles[0], `🖥️ ${t.label} asked Finagai to do something on your Mac:\n“${t.request}”\nFinagai will start; it will ask you to approve each step that changes anything. “stop ${t.taskCode}” to cancel.`);
+      await driveControl(cfg, t.taskId).catch((e) => log("contact control drive failed", { error: String(e?.message ?? e).slice(0, 160) }));
     }
     for (const d of drafts) {
       const files = d.attachments?.length ? await buildAttachments(d.id, d.attachments) : [];

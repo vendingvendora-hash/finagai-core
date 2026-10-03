@@ -103,13 +103,15 @@ export function parseStep(text: string): Step | null {
 
 export interface TaskView { id: string; code: number; status: string }
 
-export async function createTask(pool: pg.Pool, request: string, origin: "chat" | "imessage"): Promise<TaskView> {
+export async function createTask(pool: pg.Pool, request: string, origin: "chat" | "imessage" | "contact", requester?: string): Promise<TaskView> {
   return withTransaction(pool, async (tx) => {
     const r = await tx.query<{ id: string; code: string }>(
-      `INSERT INTO control_task (request, origin) VALUES ($1, $2) RETURNING id, code`, [request.slice(0, 4000), origin]);
+      `INSERT INTO control_task (request, origin, requester) VALUES ($1, $2, $3) RETURNING id, code`,
+      [request.slice(0, 4000), origin, requester ?? null]);
     const row = r.rows[0]!;
-    await appendEvent(tx, { actor: "julian", action: "control_task_created", entityType: "control_task", entityId: row.id,
-      after: { code: Number(row.code), request: request.slice(0, 200) }, client: origin });
+    // The requester (a contact) can ASK; the task is still Julian's and only he approves steps.
+    await appendEvent(tx, { actor: requester ? "j6" : "julian", action: "control_task_created", entityType: "control_task", entityId: row.id,
+      after: { code: Number(row.code), request: request.slice(0, 200), requester: requester ?? null }, client: origin });
     return { id: row.id, code: Number(row.code), status: "active" };
   });
 }
@@ -118,6 +120,8 @@ export interface NextResult {
   status: "run_read" | "await_approval" | "run_approved" | "ask" | "done" | "failed" | "cancelled";
   step?: { id: string; code: number; kind: string; params: Record<string, unknown>; summary: string };
   message?: string;
+  /** When a contact requested the task, their label, so the helper can offer to reply to them. */
+  requester?: string;
 }
 
 /**
@@ -127,8 +131,8 @@ export interface NextResult {
  */
 export async function planNext(deps: ControlDeps, taskId: string, screenshotB64: string | null, lastResult?: string): Promise<NextResult> {
   const { pool } = deps;
-  const task = (await pool.query<{ request: string; status: string; auto: boolean }>(
-    `SELECT request, status, false AS auto FROM control_task WHERE id = $1`, [taskId])).rows[0];
+  const task = (await pool.query<{ request: string; status: string; auto: boolean; requester: string | null }>(
+    `SELECT request, status, false AS auto, requester FROM control_task WHERE id = $1`, [taskId])).rows[0];
   if (!task) return { status: "failed", message: "unknown task" };
   if (task.status === "cancelled") return { status: "cancelled" };
 
@@ -162,7 +166,7 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
   if (step.done) {
     await setTaskStatus(pool, taskId, "done");
     await appendEvent(pool, { actor: "j6", action: "control_task_done", entityType: "control_task", entityId: taskId, after: { summary: step.summary } });
-    return { status: "done", message: step.summary };
+    return task.requester ? { status: "done", message: step.summary, requester: task.requester } : { status: "done", message: step.summary };
   }
   if (step.kind === "ask") { await setTaskStatus(pool, taskId, "waiting_approval"); return { status: "ask", message: step.question ?? step.summary }; }
 

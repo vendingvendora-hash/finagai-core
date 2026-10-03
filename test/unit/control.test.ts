@@ -75,3 +75,13 @@ describe("J6 executor guards (no Mac here; just the refusals)", () => {
     expect(await runControlStep({ kind: "open_url", params: { url: "file:///etc/passwd" } })).toMatch(/refused/);
   });
 });
+
+import { parsePlan } from "../../src/pipelines/j5/concierge.js";
+
+describe("J6 contact bridge (ADR-051)", () => {
+  it("triage flags a do-on-Mac request separately from a plain question", () => {
+    expect(parsePlan('{"relevant":true,"file_queries":[],"do_on_mac":true}')).toMatchObject({ doOnMac: true });
+    expect(parsePlan('{"relevant":true,"file_queries":["flight"],"do_on_mac":false}')).toMatchObject({ doOnMac: false });
+    expect(parsePlan('{"relevant":true,"file_queries":[]}')).toMatchObject({ doOnMac: false }); // absent = false
+  });
+});

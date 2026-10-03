@@ -101,9 +101,9 @@ import { scrubLocal, passage, EXCLUDED_PATH } from "../../helper/finagai-imessag
 describe("J5 local files (ADR-046)", () => {
   it("parses the triage plan and caps queries", () => {
     expect(parsePlan('{"relevant": true, "file_queries": ["flight confirmation", "Bogota itinerary", "x"]}'))
-      .toEqual({ relevant: true, queries: ["flight confirmation", "Bogota itinerary"] });
+      .toEqual({ relevant: true, queries: ["flight confirmation", "Bogota itinerary"], doOnMac: false });
     expect(parsePlan('{"relevant": true, "file_queries": ["q1 a", "q2 b", "q3 c", "q4 d"]}')!.queries).toHaveLength(3);
-    expect(parsePlan('{"relevant": false, "file_queries": []}')).toEqual({ relevant: false, queries: [] });
+    expect(parsePlan('{"relevant": false, "file_queries": []}')).toEqual({ relevant: false, queries: [], doOnMac: false });
     expect(parsePlan("nope")).toBeNull();
   });
   it("the triage prompt treats the thread as data", () => {
