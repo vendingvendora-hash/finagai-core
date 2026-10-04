@@ -1,6 +1,7 @@
 import { getRuntime, macOnline, deriveLifecycle, macStatus } from "../mac/runtime.js";
 import { openInteraction, linkTask, undelivered, markDelivered } from "../concierge/interactions.js";
 import { getContext, resolveFromMac } from "../mac/context.js";
+import { route } from "../mac/router.js";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/server";
 import { appendEvent } from "../db/index.js";
@@ -280,8 +281,9 @@ export function buildMcpServer(deps) {
         const t = await deps.pool.query(`INSERT INTO control_task (request, origin) VALUES ($1, 'chat') RETURNING id, code`, [request.slice(0, 4000)]);
         const row = t.rows[0];
         await linkTask(deps.pool, ix.interaction.id, row.id);
+        const routePlan = route(request, (await getRuntime(deps.pool))?.capabilities);
         await appendEvent(deps.pool, { actor: "julian", action: "control_task_created", entityType: "control_task", entityId: row.id,
-            after: { code: Number(row.code), request: request.slice(0, 200) }, client: deps.client });
+            after: { code: Number(row.code), request: request.slice(0, 200), route: routePlan.primary }, client: deps.client });
         return ok("control_mac", { taskCode: Number(row.code),
             note: "Task queued. Finagai's Mac helper will carry it out and message Julian to approve any step that changes something." });
     });

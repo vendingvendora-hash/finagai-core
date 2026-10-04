@@ -1,14 +1,16 @@
+import { routeHint } from "../../mac/router.js";
 import { appendEvent, withTransaction } from "../../db/index.js";
 import { BudgetBlockedError } from "../../llm/types.js";
 import { skillsFor } from "./skills.js";
 export const J6_PROMPT_VERSION = "j6-control-v3";
 export const MAX_STEPS_PER_TASK = 80;
 /** Actions that only observe. Everything else is a WRITE and needs Julian's approval. */
-export const READ_KINDS = new Set(["screenshot", "read_text", "list_apps", "list_files", "read_file", "wait", "done", "ask"]);
+export const READ_KINDS = new Set(["screenshot", "read_text", "list_apps", "list_files", "read_file", "wait", "done", "ask", "observe"]);
 /** Actions the helper knows how to run. */
 export const KNOWN_KINDS = new Set([...READ_KINDS,
     "click", "double_click", "right_click", "move", "drag", "scroll", "type", "key", "hotkey",
-    "open_app", "open_url", "open_path", "run", "move_file", "trash_file"]);
+    "open_app", "open_url", "open_path", "run", "move_file", "trash_file",
+    "activate_app", "menu_item", "ax_click", "ax_set_value"]); // WO4 accessibility-first (verified) actions
 /** Irreversible or high-blast-radius actions ALWAYS need an explicit per-step ok, even in auto mode. */
 export const ALWAYS_CONFIRM = new Set(["run", "trash_file", "move_file"]);
 const IRREVERSIBLE_HINT = /\b(send|enviar|mandar|pay|pagar|transfer|transferir|delete|borrar|eliminar|remove|post|publish|publicar|submit|enviar formulario|confirm purchase|place order|buy|comprar|wire|reply all)\b/i;
@@ -43,6 +45,7 @@ Output ONLY this JSON object:
 
 Action kinds:
 - Observe (risk "read"): screenshot; read_text {}; list_apps {}; list_files {"dir":"~/..."}; read_file {"path":"~/..."}; wait {"seconds":N}; ask {"question":"..."} ONLY as a last resort; done {} when finished.
+- CONTROL HIERARCHY (WO4) — prefer, in order: activate_app {"name"} · menu_item {"app","path":["File","New"]} · ax_click {"app","title","role?"} (click a control by its accessibility title; roles AXButton/AXCheckBox/AXMenuButton/AXRadioButton) · ax_set_value {"app","title?","role?","value"} (text fields, read back) · observe {} (cheap UI-state read) — and only when no control has a usable title, fall back to click {"x","y"}. Every AX action returns "verified:" / "unverified:" / "error:" with the before→after app/window/focus delta: treat "unverified" as NOT done — observe or screenshot and check the expected outcome before continuing.
 - Act (risk "write"): click {"x":N,"y":N}; double_click; right_click; move {"x","y"}; drag {"from":[x,y],"to":[x,y]}; scroll {"x","y","amount":N,"dir":"up|down"}; type {"text":"..."}; key {"key":"return|tab|esc|..."}; hotkey {"keys":["cmd","c"]}; open_app {"name":"Safari"}; open_url {"url":"https://..."}; open_path {"path":"~/..."}; run {"cmd":"..."}; move_file {"from","to"}; trash_file {"path"}.
 
 Operating principles:
@@ -117,7 +120,17 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
     const ctxLine = ctx && (ctx.app || ctx.window || ctx.url)
         ? `Current Mac context — frontmost app: ${ctx.app ?? "?"}${ctx.window ? `; active window: “${ctx.window}”` : ""}${ctx.url ? `; browser URL: ${ctx.url}` : ""}. Use this to resolve "this"/"the open document"/"the spreadsheet I have open" when Julian is vague.`
         : "";
+    // WO4/WO8: state the preferred execution path from the health matrix so the planner never starts from a click.
+    let routeLine = "";
+    try {
+        const rt = await deps.pool.query(`SELECT (SELECT capabilities FROM mac_runtime WHERE id = 'primary') AS capabilities, request FROM control_task WHERE id = $1`, [taskId]);
+        const row = rt.rows[0];
+        if (row)
+            routeLine = routeHint(row.request, row.capabilities);
+    }
+    catch { /* routing is advisory */ }
     const percept = [
+        routeLine,
         ctxLine,
         perception?.pageText ? `Visible page text (truncated):\n${perception.pageText.slice(0, 4000)}` : "",
         perception?.axTree ? `Accessibility tree / clickable elements (truncated):\n${perception.axTree.slice(0, 4000)}` : "",

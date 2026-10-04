@@ -13,6 +13,7 @@ mkdir -p "$DIR"
 cp "$(dirname "$0")/finagai-imessage.mjs" "$DIR/finagai-imessage.mjs"
 cp "$(dirname "$0")/mac-perception.mjs" "$DIR/mac-perception.mjs"   # required module; missing it crashed the helper
 cp "$(dirname "$0")/finagai-doctor.mjs" "$DIR/finagai-doctor.mjs"   # finagai mac doctor (real probes)
+cp "$(dirname "$0")/mac-actions.mjs" "$DIR/mac-actions.mjs"         # WO4 accessibility-first actions
 
 echo
 echo "=== Finagai iMessage helper setup ==="

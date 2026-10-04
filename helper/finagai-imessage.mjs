@@ -17,9 +17,10 @@ import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { promisify } from "node:util";
 import { macDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTree, captureScreen, getSelectedFiles } from "./mac-perception.mjs";
+import { activateApp, axClick, axSetValue, menuItem, observe as observeUi } from "./mac-actions.mjs";
 
 const run = promisify(execFile);
-const HELPER_VERSION = "runtime-5";
+const HELPER_VERSION = "runtime-6";
 const WORKER_ID = "mac-helper-" + process.pid;
 const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null, reconnects: 0, coreDown: false };
 /** Real capability probe (mac doctor), cached; refreshed every 10 minutes so the matrix stays truthful. */
@@ -61,6 +62,13 @@ async function gatherContext(fm) {
   ctx.browser = tab.ok && tab.url ? { app: tab.app || "browser", url: tab.url, title: tab.title || "" } : null;
   return ctx;
 }
+/** Render an observe->act->verify outcome for the planner: honest about whether anything changed. */
+function verdict(r) {
+  const tag = r.ok ? (r.verified ? "verified" : "unverified") : "error";
+  const delta = r.before && r.after ? ` [${r.before.app}/${r.before.window} -> ${r.after.app}/${r.after.window}; focus ${r.after.focusedRole || "?"}${r.after.focusedTitle ? " " + JSON.stringify(r.after.focusedTitle) : ""}]` : "";
+  return `${tag}: ${r.result}${delta}`;
+}
+
 async function heartbeat(cfg) {
   const caps = await capabilityMatrix();
   const fm = await getFrontmost(run).catch(() => ({ ok: false }));
@@ -534,6 +542,8 @@ const KEYCODE = { return: 36, enter: 36, tab: 48, esc: 53, escape: 53, space: 49
 export async function runControlStep(step) {
   const p = step.params ?? {};
   const osa = (lines, args = []) => run("/usr/bin/osascript", [...lines.flatMap((l) => ["-e", l]), ...args], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
+  // Text-returning variant for mac-actions.mjs (observe/ax_* parse stdout).
+  const osaText = (lines, args = [], opts = {}) => run("/usr/bin/osascript", [...lines.flatMap((l) => ["-e", l]), ...args], { timeout: opts.timeout ?? 30_000, maxBuffer: 8 * 1024 * 1024 }).then((r) => r.stdout.trim());
   const cursor = (x, y, click) => osa([`tell application "System Events" to ${click || "click"} at {${Math.round(x)}, ${Math.round(y)}}`]);
   switch (step.kind) {
     case "wait": await new Promise((r) => setTimeout(r, Math.min(30, Number(p.seconds) || 1) * 1000)); return "waited";
@@ -550,6 +560,12 @@ export async function runControlStep(step) {
     case "key": { const k = String(p.key || "").toLowerCase(); if (KEYCODE[k] == null) { await osa(["on run a", 'tell application "System Events" to keystroke (item 1 of a)', "end run"], [k]); return "key"; } await osa([`tell application "System Events" to key code ${KEYCODE[k]}`]); return "key"; }
     case "hotkey": { const keys = (p.keys || []).map((k) => String(k).toLowerCase()); const mods = keys.filter((k) => ["cmd","command","option","alt","control","ctrl","shift"].includes(k)).map((k) => ({ cmd: "command down", command: "command down", option: "option down", alt: "option down", control: "control down", ctrl: "control down", shift: "shift down" }[k])); const main = keys.find((k) => !["cmd","command","option","alt","control","ctrl","shift"].includes(k)) || ""; await osa(["on run a", `tell application "System Events" to keystroke (item 1 of a) using {${mods.join(", ")}}`, "end run"], [main]); return "hotkey"; }
     case "open_app": await run("/usr/bin/open", ["-a", String(p.name || "")], { timeout: 15_000 }); return `opened ${p.name}`;
+    // WO4: Accessibility-first actions with observe -> act -> verify. The JSON result lets the planner see what changed.
+    case "activate_app": { const r = await activateApp(osaText, String(p.name || "")); return verdict(r); }
+    case "menu_item": { const r = await menuItem(osaText, String(p.app || ""), Array.isArray(p.path) ? p.path.map(String) : []); return verdict(r); }
+    case "ax_click": { const r = await axClick(osaText, String(p.app || ""), { title: p.title == null ? undefined : String(p.title), role: p.role == null ? undefined : String(p.role) }); return verdict(r); }
+    case "ax_set_value": { const r = await axSetValue(osaText, String(p.app || ""), { title: p.title == null ? undefined : String(p.title), role: p.role == null ? undefined : String(p.role), value: String(p.value ?? "") }); return verdict(r); }
+    case "observe": { const o = await observeUi(osaText); return `observed: ${JSON.stringify(o)}`; }
     case "open_url": { if (!/^https?:\/\//.test(String(p.url || ""))) return "refused: bad url"; await run("/usr/bin/open", ["-a", "Google Chrome", String(p.url)], { timeout: 15_000 }).catch(() => run("/usr/bin/open", [String(p.url)], { timeout: 15_000 })); await new Promise((r) => setTimeout(r, 2500)); return "opened url in Chrome"; }
     case "open_path": { const f = expandHome(String(p.path || "")); if (!f.startsWith(homedir())) return "refused"; await run("/usr/bin/open", [f], { timeout: 15_000 }); return "opened"; }
     case "move_file": { const a = expandHome(String(p.from || "")), b = expandHome(String(p.to || "")); if (!a.startsWith(homedir()) || !b.startsWith(homedir())) return "refused"; copyFileSync(a, b); rmSync(a); return "moved"; }
