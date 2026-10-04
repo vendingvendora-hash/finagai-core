@@ -21,7 +21,7 @@ import { macDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTr
 const run = promisify(execFile);
 const HELPER_VERSION = "runtime-1";
 const WORKER_ID = "mac-helper-" + process.pid;
-const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null };
+const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null, reconnects: 0, coreDown: false };
 /** Real capability probe (mac doctor), cached; refreshed every 10 minutes so the matrix stays truthful. */
 async function capabilityMatrix() {
   if (Date.now() - RUNTIME.capsAt < 600_000 && Object.keys(RUNTIME.caps).length) return RUNTIME.caps;
@@ -47,9 +47,15 @@ async function capabilityMatrix() {
 async function heartbeat(cfg) {
   const caps = await capabilityMatrix();
   const fm = await getFrontmost(run).catch(() => ({ ok: false }));
-  await core(cfg, "/mac/heartbeat", { version: HELPER_VERSION, capabilities: caps,
-    frontmostApp: fm.ok ? fm.app : null, frontmostWindow: fm.ok ? fm.window : null,
-    currentTaskId: RUNTIME.currentTaskId, startedAt: RUNTIME.startedAt }).catch((e) => log("heartbeat failed", { error: String(e?.message ?? e).slice(0, 120) }));
+  try {
+    await core(cfg, "/mac/heartbeat", { version: HELPER_VERSION, capabilities: caps,
+      frontmostApp: fm.ok ? fm.app : null, frontmostWindow: fm.ok ? fm.window : null,
+      currentTaskId: RUNTIME.currentTaskId, startedAt: RUNTIME.startedAt, reconnects: RUNTIME.reconnects });
+    if (RUNTIME.coreDown) { RUNTIME.coreDown = false; RUNTIME.reconnects += 1; log("reconnected to Core", { reconnects: RUNTIME.reconnects }); }
+  } catch (e) {
+    if (!RUNTIME.coreDown) log("Core unreachable (will keep retrying every tick)", { error: String(e?.message ?? e).slice(0, 120) });
+    RUNTIME.coreDown = true;                                    // B/C: network or Core restart — next tick reconnects
+  }
 }
 async function claim(cfg, taskId) {
   const r = await core(cfg, "/control/claim", { taskId, workerId: WORKER_ID }).catch(() => null);
@@ -312,7 +318,7 @@ export async function runMacChart(cfg, requested, taskId, onProgress = async () 
   if (!png || !existsSync(png) || statSync(png).size < 1000) return { ok: false, message: "Chart rasterization produced an empty image." };
   // Return the PNG to the chat (store on the task) and to iMessage.
   const pngB64 = readFileSync(png).toString("base64");
-  await core(cfg, "/mac/chart-done", { taskId, imageB64: pngB64, summary: resp.message });
+  await core(cfg, "/mac/chart-done", { taskId, workerId: WORKER_ID, imageB64: pngB64, summary: resp.message });
   await core(cfg, "/artifact/register", { kind: "chart", mime: "image/png", storageRef: png, summary: resp.message, conversation: "self" }).catch(() => {});
   await sendIMessage(cfg.selfHandles[0], `📈 ${resp.message}`);
   await sendIMessageFile(cfg.selfHandles[0], png).catch(() => {});
@@ -496,7 +502,7 @@ export async function driveControl(cfg, taskId, onProgress = async () => {}) {
     let r;
     try {
       await onProgress("planning next step");
-      r = await core(cfg, "/control/next", { taskId, screenshot: shot, lastResult, pageText: per.pageText, axTree: per.axTree, context: per.context });
+      r = await core(cfg, "/control/next", { taskId, workerId: WORKER_ID, screenshot: shot, lastResult, pageText: per.pageText, axTree: per.axTree, context: per.context });
     } catch (e) {
       failures++;
       log("control next failed", { attempt: failures, error: String(e?.message ?? e).slice(0, 120) });
@@ -666,14 +672,16 @@ async function tick(cfg, state) {
     if (!(await claim(cfg, t.id))) { log("task already claimed elsewhere", { code: t.code }); continue; }
     RUNTIME.currentTaskId = t.id;
     try {
-      if (typeof t.request === "string" && t.request.startsWith("mac_chart:")) {
+      if (typeof t.request === "string" && t.request.startsWith("mac_ping")) {
+        await core(cfg, "/mac/chart-done", { taskId: t.id, workerId: WORKER_ID, done: true, summary: `pong from ${HELPER_VERSION} at ${new Date().toISOString()}` });
+      } else if (typeof t.request === "string" && t.request.startsWith("mac_chart:")) {
         const spec = t.request.slice("mac_chart:".length);
         const [filename] = spec.split("::");
         await progress(cfg, t.id, "searching Mac for workbook");
         const r = await runMacChart(cfg, filename, t.id, (note) => progress(cfg, t.id, note));
         if (r && r.ok === false) {
           // Terminal failure with a concrete reason — never leave the task 'active'.
-          await core(cfg, "/mac/chart-done", { taskId: t.id, failed: true, summary: r.message }).catch(() => {});
+          await core(cfg, "/mac/chart-done", { taskId: t.id, workerId: WORKER_ID, failed: true, summary: r.message }).catch(() => {});
           await sendIMessage(cfg.selfHandles[0], `⚠️ ${r.message}`);
         }
       } else {
@@ -682,7 +690,7 @@ async function tick(cfg, state) {
       }
     } catch (e) {
       log("task failed", { code: t.code, error: String(e?.message ?? e).slice(0, 160) });
-      await core(cfg, "/mac/chart-done", { taskId: t.id, failed: true, summary: `Mac worker error: ${String(e?.message ?? e).slice(0, 140)}` }).catch(() => {});
+      await core(cfg, "/mac/chart-done", { taskId: t.id, workerId: WORKER_ID, failed: true, summary: `Mac worker error: ${String(e?.message ?? e).slice(0, 140)}` }).catch(() => {});
     } finally { RUNTIME.currentTaskId = null; }
   }
 

@@ -47,4 +47,28 @@ describe.skipIf(!pool)("Mac runtime (ADR-066)", () => {
     await pool!.query(`UPDATE control_task SET lease_until = now() - interval '1 second' WHERE id = $1`, [id]);
     expect(await claimTask(pool!, id, "w2")).toBe(true);           // reclaim after expiry (stalled recovery)
   });
+
+  it("G: a stale worker cannot complete a task that another worker reclaimed", async () => {
+    const { workerMayComplete } = await import("../../src/mac/runtime.js");
+    const t = await pool!.query<{ id: string }>(`INSERT INTO control_task (request, origin) VALUES ('mac_ping', 'chat') RETURNING id`);
+    const id = t.rows[0]!.id;
+    expect(await claimTask(pool!, id, "w1")).toBe(true);
+    await pool!.query(`UPDATE control_task SET lease_until = now() - interval '1 second' WHERE id = $1`, [id]);   // w1 died
+    expect(await claimTask(pool!, id, "w2")).toBe(true);                                                             // reclaimed
+    expect(await workerMayComplete(pool!, id, "w1")).toBe(false);     // stale worker refused
+    expect(await workerMayComplete(pool!, id, "w2")).toBe(true);      // live holder allowed
+    expect(await workerMayComplete(pool!, id, null)).toBe(false);     // anonymous caller refused on a claimed task
+  });
+  it("health counters: restart_count increments when startedAt changes; reconnects are recorded; last success stamped", async () => {
+    const { recordSuccess } = await import("../../src/mac/runtime.js");
+    await recordHeartbeat(pool!, { startedAt: "2026-10-04T00:00:00.000Z", reconnects: 0 });
+    const before = (await getRuntime(pool!))!.restartCount;
+    await recordHeartbeat(pool!, { startedAt: "2026-10-04T01:00:00.000Z", reconnects: 3 });   // daemon restarted + 3 reconnects
+    const rt = (await getRuntime(pool!))!;
+    expect(rt.restartCount).toBe(before + 1);
+    expect(rt.reconnectCount).toBeGreaterThanOrEqual(3);
+    const t = await pool!.query<{ id: string }>(`INSERT INTO control_task (request, origin) VALUES ('mac_ping', 'chat') RETURNING id`);
+    await recordSuccess(pool!, t.rows[0]!.id);
+    expect((await getRuntime(pool!))!.lastSuccessAt).not.toBeNull();
+  });
 });

@@ -26,3 +26,15 @@ process is running*, so it polled a row, not a worker, and eventually told Julia
 ## Honest limits
 Heartbeat makes the Mac's state *known*; it does not make a powered-off/asleep Mac reachable. Visual-fallback
 control (mouse/keyboard on unknown apps) is the next build on this substrate.
+
+## ADR-066.1 (WO1 completion)
+- **G enforced:** `/mac/chart-done` and `/control/next` refuse a caller that is not the live lease holder (409
+  `not_lease_holder`). A worker that died and was reclaimed cannot overwrite the new worker's result.
+- **Health counters** (migration 0019): `restart_count` (startedAt changed), `reconnect_count` (helper counts
+  Core-unreachable → reachable transitions), `last_success_at/code`.
+- **`mac_ping`** trivial round-trip task type; `/control/result` by code.
+- **`finagai-doctor.mjs`**: real probes — plist, launchd PID, helper/perception files, Core /health, bearer auth,
+  heartbeat freshness as Core sees it, counters, every mac-perception capability, keyboard/mouse via System
+  Events, and a live round-trip task. `--probe-restart` SIGKILLs the daemon and verifies a new PID (test A);
+  `--soak N` runs N sequential round-trips (test H). B/C (network/Core restart) are covered structurally: the
+  helper has no persistent socket — every tick retries and counts the reconnect.

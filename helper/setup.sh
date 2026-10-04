@@ -12,6 +12,7 @@ NODE_REAL="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$N
 mkdir -p "$DIR"
 cp "$(dirname "$0")/finagai-imessage.mjs" "$DIR/finagai-imessage.mjs"
 cp "$(dirname "$0")/mac-perception.mjs" "$DIR/mac-perception.mjs"   # required module; missing it crashed the helper
+cp "$(dirname "$0")/finagai-doctor.mjs" "$DIR/finagai-doctor.mjs"   # finagai mac doctor (real probes)
 
 echo
 echo "=== Finagai iMessage helper setup ==="

@@ -6,7 +6,7 @@ import { describe, it, expect } from "vitest";
 import { deriveLifecycle, macOnline, MAC_HEARTBEAT_FRESH_MS, TASK_PROGRESS_FRESH_MS, type MacRuntime } from "../../src/mac/runtime.js";
 
 const rt = (ageMs: number): MacRuntime => ({ id: "primary", lastHeartbeatAt: new Date(Date.now() - ageMs), helperVersion: "runtime-1",
-  capabilities: {}, frontmostApp: null, frontmostWindow: null, currentTaskId: null, startedAt: null });
+  capabilities: {}, frontmostApp: null, frontmostWindow: null, currentTaskId: null, startedAt: null, reconnectCount: 0, restartCount: 0, lastSuccessAt: null, lastSuccessCode: null });
 
 describe("Mac runtime lifecycle (ADR-066)", () => {
   it("unclaimed task + NO Mac heartbeat => waiting_for_mac (the tasks 33/34 failure, now named truthfully)", () => {

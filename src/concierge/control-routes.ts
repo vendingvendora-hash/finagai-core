@@ -10,7 +10,7 @@ import type http from "node:http";
 import { cancelTask, createTask, decideStep, getStep, getTaskResult, parseControlCommand, planNext, recordRun, setResultImage, type ControlDeps } from "../pipelines/j6/control.js";
 import { analyzeWorkbookToChart, rankCandidates, type Candidate } from "../mac/operator.js";
 import { registerArtifact, resolveRecentArtifact, markArtifactSent, claimInbound, finishInbound } from "./interaction.js";
-import { recordHeartbeat, claimTask, taskProgress, macStatus } from "../mac/runtime.js";
+import { recordHeartbeat, claimTask, taskProgress, macStatus, workerMayComplete, recordSuccess } from "../mac/runtime.js";
 
 const MAX_BODY = 24 * 1024 * 1024; // screenshots + perception
 
@@ -60,6 +60,8 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         return json(res, 200, { tasks: r.rows });
       }
       if (path === "/control/next") {
+        if (typeof body.taskId === "string" && !(await workerMayComplete(deps.pool, body.taskId, typeof body.workerId === "string" ? body.workerId : null)))
+          return json(res, 409, { error: "not_lease_holder" });
         const taskId = await taskIdFrom(body);
         if (!taskId) return json(res, 404, { error: "task_not_found" });
         const shot = typeof body.screenshot === "string" ? body.screenshot : null;
@@ -120,6 +122,7 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
       // ---- Mac runtime (ADR-066): heartbeat, claim/lease/progress, status ----
       if (path === "/mac/heartbeat") {
         await recordHeartbeat(deps.pool, {
+          reconnects: typeof body.reconnects === "number" ? body.reconnects : undefined,
           helperVersion: typeof body.version === "string" ? body.version : undefined,
           capabilities: body.capabilities && typeof body.capabilities === "object" ? body.capabilities as Record<string, unknown> : undefined,
           frontmostApp: typeof body.frontmostApp === "string" ? body.frontmostApp : null,
@@ -138,6 +141,14 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         if (typeof body.taskId !== "string") return json(res, 400, { error: "taskId required" });
         await taskProgress(deps.pool, body.taskId, typeof body.note === "string" ? body.note : undefined);
         return json(res, 200, { ok: true });
+      }
+      if (path === "/control/result") {
+        // Read a task's result by code (used by the doctor's round-trip probe and soak test).
+        const code = Number(body.taskCode);
+        if (!Number.isFinite(code)) return json(res, 400, { error: "taskCode required" });
+        const r = await getTaskResult(deps.pool, code);
+        if (!r) return json(res, 404, { error: "no such task" });
+        return json(res, 200, { status: r.status, summary: r.summary, hasImage: Boolean(r.imageB64) });
       }
       if (path === "/mac/status") {
         return json(res, 200, await macStatus(deps.pool));
@@ -163,6 +174,16 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         return json(res, 200, { ok: true });
       }
       if (path === "/mac/chart-done") {
+        // WO1-G: a stale worker (lease reclaimed by another) cannot complete or fail the task.
+        if (typeof body.taskId === "string" && !(await workerMayComplete(deps.pool, body.taskId, typeof body.workerId === "string" ? body.workerId : null)))
+          return json(res, 409, { error: "not_lease_holder" });
+        if (typeof body.taskId === "string" && body.done === true && typeof body.imageB64 !== "string") {
+          // Non-image completion (e.g. mac_ping round-trip).
+          await deps.pool.query(`UPDATE control_task SET status = 'done', result_summary = $2, updated_at = now() WHERE id = $1 AND status = 'active'`,
+            [body.taskId, String(body.summary ?? "done").slice(0, 1000)]);
+          await recordSuccess(deps.pool, body.taskId);
+          return json(res, 200, { ok: true });
+        }
         if (typeof body.taskId === "string" && body.failed === true) {
           // Terminal failure with a concrete reason (ADR-066): a task must never remain 'active' after the
           // worker has given up on it.
@@ -173,6 +194,7 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         if (typeof body.taskId === "string" && typeof body.imageB64 === "string") {
           await setResultImage(deps.pool, body.taskId, body.imageB64);
           await deps.pool.query(`UPDATE control_task SET status = 'done', result_summary = $2, updated_at = now() WHERE id = $1`, [body.taskId, String(body.summary ?? "chart ready").slice(0, 1000)]);
+          await recordSuccess(deps.pool, body.taskId);
         }
         return json(res, 200, { ok: true });
       }
