@@ -335,9 +335,11 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
       row = t.rows[0]!;
       await appendEvent(deps.pool, { actor: "julian", action: "control_task_created", entityType: "control_task", entityId: row.id, after: { code: Number(row.code), kind: "mac_chart", filename } });
     }
-    // Own the request this turn: wait up to ~4 min for find->parse->verify->chart. A cold/asleep Mac or
-    // Spotlight indexing can exceed the old 90s; abandoning there was the silent-abandonment bug.
-    const deadline = Date.now() + 240_000;
+    // Own the request this turn, but return within the MCP transport timeout (~60s) — holding the call
+    // open for minutes made the connector report "server isn't responding". We wait a transport-safe 45s
+    // here; if it's not done, we return stillRunning and the model keeps ownership by calling
+    // control_result again in the SAME turn (each such poll is fast). No long-held connection, no abandon.
+    const deadline = Date.now() + 45_000;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 2500));
       const q = await deps.pool.query<{ status: string; result_summary: string | null; result_image_b64: string | null }>(
@@ -353,14 +355,23 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     // Still running after the wait: the interaction is NOT abandoned. Tell the model to immediately call
     // control_result for this same taskCode again (same turn) — never ask Julian to say "check again".
     return ok("make_mac_chart", { taskCode: Number(row.code), status: "active", stillRunning: true,
-      action: "call control_result with this taskCode again now; keep owning it until done or failed; do NOT ask Julian to check again" });
+      action: "call control_result with this taskCode again now; keep owning it until done or failed; do NOT ask Julian to check again",
+      note: "If the task outlasts this turn, Finagai still delivers the finished chart to Julian's Messages automatically — tell him it's building and will arrive in Messages shortly; do not ask him to check again." });
   });
 
   server.registerTool("control_result", {
     description: "Read the result of a Mac task started with control_mac. Returns its status and, when finished, the summary, the information Finagai gathered, AND the final screenshot/chart image so you can show it to Julian directly in the chat. Omit task_code to read the most recent task.",
     inputSchema: z.object({ task_code: z.number().int().positive().optional() }),
   }, async ({ task_code }) => {
-    const r = task_code ? await getTaskResult(deps.pool, task_code) : await latestTask(deps.pool);
+    // Brief transport-safe wait so a same-turn re-poll advances the task instead of returning instantly.
+    let r = task_code ? await getTaskResult(deps.pool, task_code) : await latestTask(deps.pool);
+    if (r && r.status === "active") {
+      const until = Date.now() + 40_000;
+      while (Date.now() < until && r && r.status === "active") {
+        await new Promise((res) => setTimeout(res, 2500));
+        r = task_code ? await getTaskResult(deps.pool, task_code) : await latestTask(deps.pool);
+      }
+    }
     if (!r) return ok("control_result", { found: false, note: "No such task." });
     const note = r.status === "done" ? "Task finished. Summary, detail, and (if present) the final image are included — show the image to Julian."
       : r.status === "waiting_approval" ? "Finagai is waiting for Julian to approve a step in his Messages thread."
