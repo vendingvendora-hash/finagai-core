@@ -11,6 +11,7 @@ NODE_REAL="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$N
 
 mkdir -p "$DIR"
 cp "$(dirname "$0")/finagai-imessage.mjs" "$DIR/finagai-imessage.mjs"
+cp "$(dirname "$0")/mac-perception.mjs" "$DIR/mac-perception.mjs"   # required module; missing it crashed the helper
 
 echo
 echo "=== Finagai iMessage helper setup ==="
@@ -47,6 +48,7 @@ cat > "$PLIST" <<PLISTXML
   <key>ProgramArguments</key><array><string>$NODE_REAL</string><string>$DIR/finagai-imessage.mjs</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
   <key>StandardOutPath</key><string>$DIR/imessage-helper.log</string>
   <key>StandardErrorPath</key><string>$DIR/imessage-helper.log</string>
 </dict></plist>

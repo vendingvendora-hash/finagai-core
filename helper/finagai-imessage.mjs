@@ -19,7 +19,43 @@ import { promisify } from "node:util";
 import { macDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTree, captureScreen } from "./mac-perception.mjs";
 
 const run = promisify(execFile);
-const HELPER_VERSION = "selfthread-dedup-1";
+const HELPER_VERSION = "runtime-1";
+const WORKER_ID = "mac-helper-" + process.pid;
+const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null };
+/** Real capability probe (mac doctor), cached; refreshed every 10 minutes so the matrix stays truthful. */
+async function capabilityMatrix() {
+  if (Date.now() - RUNTIME.capsAt < 600_000 && Object.keys(RUNTIME.caps).length) return RUNTIME.caps;
+  try {
+    const tmp = join(OUT_ROOT, "hb-" + Date.now() + ".png"); mkdirSync(OUT_ROOT, { recursive: true });
+    const doc = await macDoctor(run, tmp);
+    const m = {};
+    for (const c of doc.checks) {
+      const n = c.name.toLowerCase();
+      if (n.includes("screen")) m.screen = c.ok;
+      else if (n.includes("accessibility tree")) m.accessibilityTree = c.ok;
+      else if (n.includes("accessibility")) m.accessibility = c.ok;
+      else if (n.includes("active window")) m.activeWindow = c.ok;
+      else if (n.includes("filesystem") || n.includes("spotlight")) m.files = c.ok;
+      else if (n.includes("browser")) m.browser = c.ok;
+      else if (n.includes("clipboard")) m.clipboard = c.ok;
+    }
+    RUNTIME.caps = m; RUNTIME.capsAt = Date.now();
+  } catch (e) { log("capability probe failed", { error: String(e?.message ?? e).slice(0, 120) }); }
+  return RUNTIME.caps;
+}
+/** Heartbeat to Core: liveness + capability matrix + current context + current task. Every tick. */
+async function heartbeat(cfg) {
+  const caps = await capabilityMatrix();
+  const fm = await getFrontmost(run).catch(() => ({ ok: false }));
+  await core(cfg, "/mac/heartbeat", { version: HELPER_VERSION, capabilities: caps,
+    frontmostApp: fm.ok ? fm.app : null, frontmostWindow: fm.ok ? fm.window : null,
+    currentTaskId: RUNTIME.currentTaskId, startedAt: RUNTIME.startedAt }).catch((e) => log("heartbeat failed", { error: String(e?.message ?? e).slice(0, 120) }));
+}
+async function claim(cfg, taskId) {
+  const r = await core(cfg, "/control/claim", { taskId, workerId: WORKER_ID }).catch(() => null);
+  return !!(r && r.claimed);
+}
+async function progress(cfg, taskId, note) { await core(cfg, "/control/progress", { taskId, note }).catch(() => {}); }
 const sentTextLog = [];
 const normText = (t) => String(t || "").replace(/\s+/g, " ").trim().toLowerCase();
 function rememberSent(t) { const n = normText(t); if (!n) return; sentTextLog.push(n); if (sentTextLog.length > 200) sentTextLog.splice(0, sentTextLog.length - 200); }
@@ -256,16 +292,19 @@ export async function mac_find_workbooks(requested) {
 }
 
 /** Full M01: find -> send bytes to Core (parse/analyze/chart) -> rasterize SVG to PNG -> verify. */
-export async function runMacChart(cfg, requested, taskId) {
+export async function runMacChart(cfg, requested, taskId, onProgress = async () => {}) {
   const cands = await mac_find_workbooks(requested);
   if (!cands.length) return { ok: false, message: `I searched your Mac (Spotlight) and couldn't find a spreadsheet matching "${requested}".` };
+  await onProgress(`found ${cands.length} candidate file(s); reading`);
   // Core ranks + reads the chosen file's bytes we send, and returns the chart SVG + verification trace.
   const top = cands.sort((a, b) => b.mtimeMs - a.mtimeMs);
   // Let Core pick the best candidate by name; send the small set of candidates with bytes of the top few.
   const withBytes = [];
   for (const c of top.slice(0, 5)) { try { withBytes.push({ ...c, b64: readFileSync(c.path).toString("base64") }); } catch { /* skip */ } }
+  await onProgress("analyzing workbook and building chart");
   const resp = await core(cfg, "/mac/chart", { requested, candidates: withBytes });
   if (!resp || !resp.ok || !resp.svgB64) return { ok: false, message: resp?.message || "Could not build the chart." };
+  await onProgress("rendering chart image");
   // Rasterize the SVG to PNG on the Mac (Quick Look), verify non-empty.
   const dir = join(OUT_ROOT, "m01-" + Date.now()); mkdirSync(dir, { recursive: true });
   const svgPath = join(dir, "chart.svg"); writeFileSync(svgPath, Buffer.from(resp.svgB64, "base64"));
@@ -448,7 +487,7 @@ export async function runControlStep(step) {
 }
 
 /** Drive one control task to a natural stopping point: runs reads and approved steps; stops to wait on approvals. */
-export async function driveControl(cfg, taskId) {
+export async function driveControl(cfg, taskId, onProgress = async () => {}) {
   let lastResult;
   let failures = 0;
   for (let i = 0; i < 40; i++) {
@@ -456,6 +495,7 @@ export async function driveControl(cfg, taskId) {
     const per = await perception().catch(() => ({}));
     let r;
     try {
+      await onProgress("planning next step");
       r = await core(cfg, "/control/next", { taskId, screenshot: shot, lastResult, pageText: per.pageText, axTree: per.axTree, context: per.context });
     } catch (e) {
       failures++;
@@ -562,6 +602,7 @@ async function tick(cfg, state) {
     const [{ max }] = await sql(`SELECT max(ROWID) AS max FROM message`);
     state.lastRowId = Number(max ?? 0);                      // never process old messages as new requests
   }
+  await heartbeat(cfg);
   // Style history for contacts not yet backfilled (once per contact).
   for (const c of cfg.contacts.filter((x) => !state.backfilled.includes(x.handle))) {
     const rows = (await sql(`${BASE} ORDER BY m.ROWID DESC LIMIT 2000`)).filter((r) => normalizeHandle(r.chat) === c.handle).slice(0, HISTORY);
@@ -622,13 +663,27 @@ async function tick(cfg, state) {
   const pending = await core(cfg, "/control/pending", {}).catch(() => null);
   for (const t of (pending?.tasks ?? [])) {
     taskCodeCache[t.id] = t.code;
-    if (typeof t.request === "string" && t.request.startsWith("mac_chart:")) {
-      const spec = t.request.slice("mac_chart:".length);
-      const [filename] = spec.split("::");
-      await runMacChart(cfg, filename, t.id).catch((e) => log("mac chart failed", { error: String(e?.message ?? e).slice(0, 160) }));
-    } else {
-      await driveControl(cfg, t.id).catch((e) => log("control drive failed", { error: String(e?.message ?? e).slice(0, 160) }));
-    }
+    if (!(await claim(cfg, t.id))) { log("task already claimed elsewhere", { code: t.code }); continue; }
+    RUNTIME.currentTaskId = t.id;
+    try {
+      if (typeof t.request === "string" && t.request.startsWith("mac_chart:")) {
+        const spec = t.request.slice("mac_chart:".length);
+        const [filename] = spec.split("::");
+        await progress(cfg, t.id, "searching Mac for workbook");
+        const r = await runMacChart(cfg, filename, t.id, (note) => progress(cfg, t.id, note));
+        if (r && r.ok === false) {
+          // Terminal failure with a concrete reason — never leave the task 'active'.
+          await core(cfg, "/mac/chart-done", { taskId: t.id, failed: true, summary: r.message }).catch(() => {});
+          await sendIMessage(cfg.selfHandles[0], `⚠️ ${r.message}`);
+        }
+      } else {
+        await progress(cfg, t.id, "planning first step");
+        await driveControl(cfg, t.id, (note) => progress(cfg, t.id, note));
+      }
+    } catch (e) {
+      log("task failed", { code: t.code, error: String(e?.message ?? e).slice(0, 160) });
+      await core(cfg, "/mac/chart-done", { taskId: t.id, failed: true, summary: `Mac worker error: ${String(e?.message ?? e).slice(0, 140)}` }).catch(() => {});
+    } finally { RUNTIME.currentTaskId = null; }
   }
 
   if (contactMsgs.length) {

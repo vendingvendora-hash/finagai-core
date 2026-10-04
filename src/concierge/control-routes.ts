@@ -10,6 +10,7 @@ import type http from "node:http";
 import { cancelTask, createTask, decideStep, getStep, getTaskResult, parseControlCommand, planNext, recordRun, setResultImage, type ControlDeps } from "../pipelines/j6/control.js";
 import { analyzeWorkbookToChart, rankCandidates, type Candidate } from "../mac/operator.js";
 import { registerArtifact, resolveRecentArtifact, markArtifactSent, claimInbound, finishInbound } from "./interaction.js";
+import { recordHeartbeat, claimTask, taskProgress, macStatus } from "../mac/runtime.js";
 
 const MAX_BODY = 24 * 1024 * 1024; // screenshots + perception
 
@@ -116,6 +117,32 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         if (typeof body.guid === "string") await finishInbound(deps.pool, body.guid, body.ok !== false, typeof body.result === "string" ? body.result : undefined);
         return json(res, 200, { ok: true });
       }
+      // ---- Mac runtime (ADR-066): heartbeat, claim/lease/progress, status ----
+      if (path === "/mac/heartbeat") {
+        await recordHeartbeat(deps.pool, {
+          helperVersion: typeof body.version === "string" ? body.version : undefined,
+          capabilities: body.capabilities && typeof body.capabilities === "object" ? body.capabilities as Record<string, unknown> : undefined,
+          frontmostApp: typeof body.frontmostApp === "string" ? body.frontmostApp : null,
+          frontmostWindow: typeof body.frontmostWindow === "string" ? body.frontmostWindow : null,
+          currentTaskId: typeof body.currentTaskId === "string" ? body.currentTaskId : null,
+          startedAt: typeof body.startedAt === "string" ? body.startedAt : null,
+        });
+        return json(res, 200, { ok: true });
+      }
+      if (path === "/control/claim") {
+        if (typeof body.taskId !== "string") return json(res, 400, { error: "taskId required" });
+        const ok = await claimTask(deps.pool, body.taskId, typeof body.workerId === "string" ? body.workerId : "mac-helper");
+        return json(res, 200, { claimed: ok });
+      }
+      if (path === "/control/progress") {
+        if (typeof body.taskId !== "string") return json(res, 400, { error: "taskId required" });
+        await taskProgress(deps.pool, body.taskId, typeof body.note === "string" ? body.note : undefined);
+        return json(res, 200, { ok: true });
+      }
+      if (path === "/mac/status") {
+        return json(res, 200, await macStatus(deps.pool));
+      }
+
       if (path === "/artifact/register") {
         if (typeof body.storageRef !== "string" || typeof body.kind !== "string") return json(res, 422, { error: "kind_and_storageRef_required" });
         const str = (v: unknown) => typeof v === "string" ? v : undefined;
@@ -136,6 +163,13 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         return json(res, 200, { ok: true });
       }
       if (path === "/mac/chart-done") {
+        if (typeof body.taskId === "string" && body.failed === true) {
+          // Terminal failure with a concrete reason (ADR-066): a task must never remain 'active' after the
+          // worker has given up on it.
+          await deps.pool.query(`UPDATE control_task SET status = 'failed', result_summary = $2, updated_at = now() WHERE id = $1 AND status = 'active'`,
+            [body.taskId, String(body.summary ?? "failed on the Mac").slice(0, 1000)]);
+          return json(res, 200, { ok: true, failed: true });
+        }
         if (typeof body.taskId === "string" && typeof body.imageB64 === "string") {
           await setResultImage(deps.pool, body.taskId, body.imageB64);
           await deps.pool.query(`UPDATE control_task SET status = 'done', result_summary = $2, updated_at = now() WHERE id = $1`, [body.taskId, String(body.summary ?? "chart ready").slice(0, 1000)]);

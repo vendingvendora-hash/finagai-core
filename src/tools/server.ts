@@ -6,6 +6,7 @@
  * classification lowering, sending messages, raw SQL, configuration, secrets, web access.
  */
 import type pg from "pg";
+import { getRuntime, macOnline, deriveLifecycle, macStatus } from "../mac/runtime.js";
 import { z } from "zod";
 import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import { appendEvent } from "../db/index.js";
@@ -295,6 +296,15 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     description: "Operate Julian's Mac step by step (J6): open apps, click, type, run commands, use logged-in sessions, for general desktop actions. IMPORTANT: do NOT use this to chart/plot/visualize data from a named local spreadsheet or Excel file — use make_mac_chart for that; it is deterministic, finds and reads the file, and returns the chart image directly.",
     inputSchema: z.object({ request: z.string().min(1).max(4000) }),
   }, async ({ request }) => {
+    // HEALTH GATE (ADR-066): don't queue a Mac task for a Mac that isn't connected.
+    const rt0 = await getRuntime(deps.pool);
+    if (!macOnline(rt0)) {
+      await audit("control_mac", "mac_offline");
+      return ok("control_mac", { macOffline: true, lifecycle: "waiting_for_mac",
+        lastHeartbeatSecondsAgo: rt0 ? Math.round((Date.now() - rt0.lastHeartbeatAt.getTime()) / 1000) : null,
+        tellJulian: "Finagai's Mac runtime isn't connected right now. On the Mac run `launchctl kickstart -k gui/$(id -u)/com.finagai.imessage` and I'll pick this up immediately.",
+        doNot: "Do not create a task, do not poll, do not ask Julian to upload anything." });
+    }
     const t = await deps.pool.query<{ id: string; code: string }>(
       `INSERT INTO control_task (request, origin) VALUES ($1, 'chat') RETURNING id, code`, [request.slice(0, 4000)]);
     const row = t.rows[0]!;
@@ -309,6 +319,15 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     inputSchema: z.object({ filename: z.string().min(1).max(200), title: z.string().max(200).optional() }),
   }, async ({ filename, title }) => {
     const request = `mac_chart:${filename}${title ? `::${title}` : ""}`;
+    // HEALTH GATE (ADR-066): never queue work for a Mac that isn't connected. Fail fast with the truth.
+    const rt0 = await getRuntime(deps.pool);
+    if (!macOnline(rt0)) {
+      await audit("make_mac_chart", "mac_offline");
+      return ok("make_mac_chart", { macOffline: true, lifecycle: "waiting_for_mac",
+        lastHeartbeatSecondsAgo: rt0 ? Math.round((Date.now() - rt0.lastHeartbeatAt.getTime()) / 1000) : null,
+        tellJulian: "Finagai's Mac runtime isn't connected right now, so I can't reach the file. This is the one thing to check: on the Mac run `launchctl kickstart -k gui/$(id -u)/com.finagai.imessage`. I'll do the chart the moment it reconnects.",
+        doNot: "Do not create a task, do not poll, do not ask Julian to upload the file." });
+    }
     // INTERACTION COORDINATOR (ADR-065): one logical interaction per chart request.
     // Reuse an equivalent recent task so an impatient "retry" never spawns a duplicate (#9 vs #32).
     const existing = await deps.pool.query<{ id: string; code: string; status: string }>(
@@ -354,9 +373,20 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     }
     // Still running after the wait: the interaction is NOT abandoned. Tell the model to immediately call
     // control_result for this same taskCode again (same turn) — never ask Julian to say "check again".
-    return ok("make_mac_chart", { taskCode: Number(row.code), status: "active", stillRunning: true,
+    const rtEnd = await getRuntime(deps.pool);
+    const qEnd = await deps.pool.query<{ status: string; claimed_at: Date | null; last_progress_at: Date | null }>(`SELECT status, claimed_at, last_progress_at FROM control_task WHERE id = $1`, [row.id]);
+    const lc = qEnd.rows[0] ? deriveLifecycle(qEnd.rows[0], rtEnd) : { lifecycle: "queued", evidence: "" };
+    return ok("make_mac_chart", { taskCode: Number(row.code), ...lc, stillRunning: true,
       action: "call control_result with this taskCode again now; keep owning it until done or failed; do NOT ask Julian to check again",
       note: "If the task outlasts this turn, Finagai still delivers the finished chart to Julian's Messages automatically — tell him it's building and will arrive in Messages shortly; do not ask him to check again." });
+  });
+
+  server.registerTool("mac_status", {
+    description: "The truthful status of Finagai's Mac runtime: connected?, last heartbeat, capability matrix (screen capture, accessibility, filesystem, browser, clipboard, active window), current app/window, and the current task's real lifecycle (queued/waiting_for_mac/executing/stalled). Use when a Mac task isn't progressing or Julian asks whether Finagai can see/use his Mac. Real probes, no guesses.",
+    inputSchema: z.object({}),
+  }, async () => {
+    await audit("mac_status", "ok");
+    return ok("mac_status", await macStatus(deps.pool));
   });
 
   server.registerTool("control_result", {
@@ -373,12 +403,29 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
       }
     }
     if (!r) return ok("control_result", { found: false, note: "No such task." });
+    // Truthful lifecycle (ADR-066): derive from worker heartbeat + claim + progress, never a bare row status.
+    const rtNow = await getRuntime(deps.pool);
+    const lcRow = await deps.pool.query<{ status: string; claimed_at: Date | null; last_progress_at: Date | null; progress_note: string | null }>(
+      `SELECT status, claimed_at, last_progress_at, progress_note FROM control_task WHERE code = $1`, [task_code ?? null]).catch(() => ({ rows: [] as never[] }));
+    const lc = lcRow.rows[0] ? deriveLifecycle(lcRow.rows[0], rtNow) : null;
+    if (lc && lc.lifecycle === "waiting_for_mac") {
+      await audit("control_result", "mac_offline");
+      return ok("control_result", { found: true, status: r.status, lifecycle: "waiting_for_mac", evidence: lc.evidence, done: false,
+        tellJulian: "Finagai's Mac runtime isn't connected, so this task can't run yet. On the Mac: `launchctl kickstart -k gui/$(id -u)/com.finagai.imessage`. It will resume automatically.",
+        doNot: "Do not keep polling. Do not ask Julian to upload the file." });
+    }
+    if (lc && lc.lifecycle === "stalled") {
+      await audit("control_result", "stalled");
+      return ok("control_result", { found: true, status: r.status, lifecycle: "stalled", evidence: lc.evidence, done: false,
+        tellJulian: "The Mac worker stopped mid-task (no progress). Finagai will reclaim it; if it doesn't resume within a minute, restart the runtime: `launchctl kickstart -k gui/$(id -u)/com.finagai.imessage`." });
+    }
     const note = r.status === "done" ? "Task finished. Summary, detail, and (if present) the final image are included — show the image to Julian."
       : r.status === "waiting_approval" ? "Finagai is waiting for Julian to approve a step in his Messages thread."
       : r.status === "active" ? "Still running — call control_result with this task_code again now (same turn). Keep owning it until it is done or failed; never tell Julian to check again." : `Task is ${r.status}.`;
     await audit("control_result", "ok");
     const content: CallToolResult["content"] = [{ type: "text",
-      text: JSON.stringify({ found: true, status: r.status, request: r.request, done: r.status === "done", summary: r.summary, detail: r.detail, hasImage: Boolean(r.imageB64), note }) }];
+      text: JSON.stringify({ found: true, status: r.status, lifecycle: lc?.lifecycle ?? r.status, evidence: lc?.evidence ?? null, progress: lcRow.rows[0]?.progress_note ?? null,
+        request: r.request, done: r.status === "done", summary: r.summary, detail: r.detail, hasImage: Boolean(r.imageB64), note }) }];
     if (r.imageB64) content.push({ type: "image", data: r.imageB64, mimeType: "image/png" });
     return { content };
   });
