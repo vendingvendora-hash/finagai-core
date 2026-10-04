@@ -255,14 +255,38 @@ export function buildMcpServer(deps) {
             note: "Task queued. Finagai's Mac helper will carry it out and message Julian to approve any step that changes something." });
     });
     server.registerTool("make_mac_chart", {
-        description: "Find a spreadsheet on Julian's Mac by (approximate) name, read it, detect the best trend, generate a real chart, and return the chart image. Use when Julian asks to chart/visualize data from a named local Excel/workbook. After calling this, read the result with control_result to show the image.",
+        description: "Find a spreadsheet on Julian's Mac by (approximate) name, read it, detect the best meaningful series, generate a verified chart, and return the chart image. Use when Julian asks to chart/visualize data from a named local Excel/workbook. It owns the request: it reuses an in-flight or recent task instead of creating duplicates, and waits for completion. If it returns stillRunning:true, immediately call control_result with the returned taskCode again in the SAME turn and keep doing so until the task is done or failed — never ask Julian to say 'check again'.",
         inputSchema: z.object({ filename: z.string().min(1).max(200), title: z.string().max(200).optional() }),
     }, async ({ filename, title }) => {
-        const t = await deps.pool.query(`INSERT INTO control_task (request, origin) VALUES ($1, 'chat') RETURNING id, code`, [`mac_chart:${filename}${title ? `::${title}` : ""}`]);
-        const row = t.rows[0];
-        await appendEvent(deps.pool, { actor: "julian", action: "control_task_created", entityType: "control_task", entityId: row.id, after: { code: Number(row.code), kind: "mac_chart", filename } });
-        // Same-turn: wait for the Mac helper to find->parse->chart->return (bounded). Then hand back the image.
-        const deadline = Date.now() + 90_000;
+        const request = `mac_chart:${filename}${title ? `::${title}` : ""}`;
+        // INTERACTION COORDINATOR (ADR-065): one logical interaction per chart request.
+        // Reuse an equivalent recent task so an impatient "retry" never spawns a duplicate (#9 vs #32).
+        const existing = await deps.pool.query(`SELECT id, code, status FROM control_task
+         WHERE request = $1 AND origin = 'chat' AND created_at > now() - interval '30 minutes'
+           AND status IN ('done','active','waiting_approval')
+         ORDER BY created_at DESC LIMIT 1`, [request]);
+        let row;
+        const prior = existing.rows[0];
+        if (prior && prior.status === "done") {
+            const q = await deps.pool.query(`SELECT status, result_summary, result_image_b64 FROM control_task WHERE id = $1`, [prior.id]);
+            const t0 = q.rows[0];
+            await audit("make_mac_chart", "ok");
+            const content = [{ type: "text", text: JSON.stringify({ taskCode: Number(prior.code), status: t0.status, summary: t0.result_summary, hasImage: Boolean(t0.result_image_b64), reused: true }) }];
+            if (t0.result_image_b64)
+                content.push({ type: "image", data: t0.result_image_b64, mimeType: "image/png" });
+            return { content };
+        }
+        if (prior && (prior.status === "active" || prior.status === "waiting_approval")) {
+            row = { id: prior.id, code: prior.code }; // attach to the in-flight interaction, don't duplicate
+        }
+        else {
+            const t = await deps.pool.query(`INSERT INTO control_task (request, origin) VALUES ($1, 'chat') RETURNING id, code`, [request]);
+            row = t.rows[0];
+            await appendEvent(deps.pool, { actor: "julian", action: "control_task_created", entityType: "control_task", entityId: row.id, after: { code: Number(row.code), kind: "mac_chart", filename } });
+        }
+        // Own the request this turn: wait up to ~4 min for find->parse->verify->chart. A cold/asleep Mac or
+        // Spotlight indexing can exceed the old 90s; abandoning there was the silent-abandonment bug.
+        const deadline = Date.now() + 240_000;
         while (Date.now() < deadline) {
             await new Promise((r) => setTimeout(r, 2500));
             const q = await deps.pool.query(`SELECT status, result_summary, result_image_b64 FROM control_task WHERE id = $1`, [row.id]);
@@ -275,7 +299,10 @@ export function buildMcpServer(deps) {
                 return { content };
             }
         }
-        return ok("make_mac_chart", { taskCode: Number(row.code), note: "Started; the Mac helper is still working. Read control_result with this taskCode in a moment to show the image." });
+        // Still running after the wait: the interaction is NOT abandoned. Tell the model to immediately call
+        // control_result for this same taskCode again (same turn) — never ask Julian to say "check again".
+        return ok("make_mac_chart", { taskCode: Number(row.code), status: "active", stillRunning: true,
+            action: "call control_result with this taskCode again now; keep owning it until done or failed; do NOT ask Julian to check again" });
     });
     server.registerTool("control_result", {
         description: "Read the result of a Mac task started with control_mac. Returns its status and, when finished, the summary, the information Finagai gathered, AND the final screenshot/chart image so you can show it to Julian directly in the chat. Omit task_code to read the most recent task.",
@@ -286,7 +313,7 @@ export function buildMcpServer(deps) {
             return ok("control_result", { found: false, note: "No such task." });
         const note = r.status === "done" ? "Task finished. Summary, detail, and (if present) the final image are included — show the image to Julian."
             : r.status === "waiting_approval" ? "Finagai is waiting for Julian to approve a step in his Messages thread."
-                : r.status === "active" ? "Still running; check again shortly." : `Task is ${r.status}.`;
+                : r.status === "active" ? "Still running — call control_result with this task_code again now (same turn). Keep owning it until it is done or failed; never tell Julian to check again." : `Task is ${r.status}.`;
         await audit("control_result", "ok");
         const content = [{ type: "text",
                 text: JSON.stringify({ found: true, status: r.status, request: r.request, done: r.status === "done", summary: r.summary, detail: r.detail, hasImage: Boolean(r.imageB64), note }) }];

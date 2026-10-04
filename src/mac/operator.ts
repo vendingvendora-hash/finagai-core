@@ -62,6 +62,26 @@ export function analyzeWorkbookToChart(chosen: Candidate, bytes: Buffer, request
   if (!add("detect_series", !!pick && pick.values.length >= 2, pick ? pick.reason : "no numeric series with >=2 points"))
     return { ok: false, stages, chosen, message: "No numeric data suitable for a chart was found. The workbook may have no measurable columns." };
 
+  // VERIFY (ADR-065): tool completion is not task completion. Reject a degenerate series —
+  // a near-constant column, a pure row-index sequence, or one that is mostly blank/zero —
+  // so an index column like "Column 1" (1,2,3,4…) is never surfaced as a successful chart.
+  const vals = pick!.values;
+  const distinct = new Set(vals).size;
+  const zeroish = vals.filter((v) => v === 0).length / vals.length;
+  // Row-index detection, robust to trailing blank/zero template rows: look at the non-zero values and
+  // see if they're (near) consecutive integers 1,2,3,... — that's an index column, not a measure.
+  const nz = vals.filter((v) => v !== 0);
+  const allInts = nz.length >= 3 && nz.every((v) => Number.isInteger(v));
+  const consecutive = allInts && nz.every((v, i) => i === 0 || v === nz[i - 1]! + 1);
+  const startsLow = nz.length > 0 && nz[0]! <= 2;
+  const indexLike = consecutive && startsLow;
+  const degenerate = distinct <= 1 || indexLike || zeroish > 0.4;
+  if (!add("verify", !degenerate, degenerate
+      ? `rejected "${pick!.valueColumn}": ${indexLike ? "looks like a row index (1,2,3…)" : distinct <= 1 ? "near-constant" : "mostly blank/zero"}`
+      : `"${pick!.valueColumn}" has ${distinct} distinct values over ${vals.length} points`))
+    return { ok: false, stages, chosen,
+      message: `The clearest numeric column ("${pick!.valueColumn}") looks like a row index or blank template rows, not a real measure. Tell me which column to plot (e.g. a rate, hours, or cost field) and I'll chart that.` };
+
   // CHART (data-driven; trendline when time-like, bar otherwise)
   const fileTitle = chosen.name.replace(/\.(xlsx|xlsm|xls)$/i, "");
   const measure = (pick!.valueColumn && pick!.valueColumn.trim()) ? pick!.valueColumn.trim() : "values";

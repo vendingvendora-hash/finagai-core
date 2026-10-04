@@ -40,7 +40,7 @@ describe.skipIf(!haveFixtures)("M01_real_mac_excel_to_chart", () => {
     const r = run("Altarum_Pricing_Case_Template");
     expect(r.ok).toBe(true);
     // verification trace present and all green
-    expect(r.stages.map((s) => s.stage)).toEqual(["search", "parse", "detect_series", "chart"]);
+    expect(r.stages.map((s) => s.stage)).toEqual(["search", "parse", "detect_series", "verify", "chart"]);
     expect(r.stages.every((s) => s.ok)).toBe(true);
     // used REAL values: Unit Price series, time-ordered, 12 points
     expect(r.pick!.valueColumn).toMatch(/price/i);
