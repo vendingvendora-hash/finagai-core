@@ -97,18 +97,22 @@ export function detectSeries(sheets: Sheet[]): SeriesPick | null {
  * failure so "no numeric data" is never a dead end — the model (or Julian) can see sheets, headers, how many
  * numeric values each column had, and why candidate columns were rejected.
  */
-export function describeWorkbook(sheets: Sheet[]): { sheets: Array<{ name: string; rows: number; headers: string[]; numericColumns: Array<{ header: string; count: number; distinct: number }>; emptyFormulaCells: number }> } {
-  const out = [] as Array<{ name: string; rows: number; headers: string[]; numericColumns: Array<{ header: string; count: number; distinct: number }>; emptyFormulaCells: number }>;
+export function describeWorkbook(sheets: Sheet[]): { sheets: Array<{ name: string; rows: number; headers: string[]; numericColumns: Array<{ header: string; count: number; distinct: number }>; emptyFormulaCells: number; headerRow: number; preview: string[] }> } {
+  const out = [] as Array<{ name: string; rows: number; headers: string[]; numericColumns: Array<{ header: string; count: number; distinct: number }>; emptyFormulaCells: number; headerRow: number; preview: string[] }>;
   for (const sh of sheets) {
-    const header = (sh.rows[0] ?? []).map((c) => (c == null ? "" : String(c)));
-    const body = sh.rows.slice(1);
+    const hdrIdx = Math.max(0, locateHeaderRow(sh.rows));
+    const header = (sh.rows[hdrIdx] ?? []).map((c) => (c == null ? "" : String(c)));
+    const body = sh.rows.slice(hdrIdx + 1);
     const width = Math.max(header.length, ...body.map((r) => r.length), 0);
     const numericColumns: Array<{ header: string; count: number; distinct: number }> = [];
     for (let c = 0; c < width; c++) {
       const vals = body.map((r) => r[c]).filter((v): v is number => typeof v === "number" && Number.isFinite(v));
       if (vals.length >= 2) numericColumns.push({ header: (header[c] ?? "").trim() || `(col ${c + 1}, no header)`, count: vals.length, distinct: new Set(vals).size });
     }
-    out.push({ name: sh.name, rows: body.length, headers: header.filter(Boolean).slice(0, 20), numericColumns, emptyFormulaCells: 0 });
+    // Layout preview: the first 4 non-empty rows' text cells, so a wrong header choice is visible in the evidence.
+    const preview = sh.rows.filter((r) => r.some((c) => c != null && String(c).trim() !== "")).slice(0, 4)
+      .map((r) => r.map((c) => (typeof c === "string" ? c.trim().slice(0, 18) : typeof c === "number" ? "#" : "")).filter(Boolean).join(" | "));
+    out.push({ name: sh.name, rows: body.length, headers: header.filter(Boolean).slice(0, 20), numericColumns, emptyFormulaCells: 0, headerRow: hdrIdx + 1, preview });
   }
   return { sheets: out };
 }

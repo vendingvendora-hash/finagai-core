@@ -63,7 +63,7 @@ export function analyzeWorkbookToChart(chosen: Candidate, bytes: Buffer, request
   if (!add("detect_series", !!pick && pick.values.length >= 2, pick ? pick.reason : "no numeric series with >=2 points")) {
     // WO9: a failure must carry evidence. Say exactly what was seen so the next step is informed, not a guess.
     const inspection = describeWorkbook(sheets);
-    const seen = inspection.sheets.map((sh) => `${sh.name}: ${sh.rows} rows; headers [${sh.headers.join(", ")}]; numeric columns ${sh.numericColumns.map((c) => `${c.header}(${c.count} values, ${c.distinct} distinct)`).join(", ") || "none"}`).join(" | ");
+    const seen = inspection.sheets.map((sh) => `${sh.name}: header row ${sh.headerRow}, ${sh.rows} rows; layout: ${sh.preview.join(" // ")}; headers [${sh.headers.join(", ")}]; numeric columns ${sh.numericColumns.map((c) => `${c.header}(${c.count} values, ${c.distinct} distinct)`).join(", ") || "none"}`).join(" | ");
     return { ok: false, stages, chosen, inspection,
       message: `No chartable series found in ${chosen.name}. What I saw — ${seen}. If one of these is the column you want, say "chart <column> from ${chosen.name.replace(/\.(xlsx|xlsm|xls)$/i, "")}".` };
   }
