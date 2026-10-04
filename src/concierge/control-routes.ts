@@ -11,6 +11,7 @@ import { cancelTask, createTask, decideStep, getStep, getTaskResult, parseContro
 import { analyzeWorkbookToChart, rankCandidates, type Candidate } from "../mac/operator.js";
 import { registerArtifact, resolveRecentArtifact, markArtifactSent, claimInbound, finishInbound } from "./interaction.js";
 import { recordHeartbeat, claimTask, taskProgress, macStatus, workerMayComplete, recordSuccess } from "../mac/runtime.js";
+import { completeForTask, setState as setInteractionState } from "./interactions.js";
 
 const MAX_BODY = 24 * 1024 * 1024; // screenshots + perception
 
@@ -140,6 +141,8 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
       if (path === "/control/progress") {
         if (typeof body.taskId !== "string") return json(res, 400, { error: "taskId required" });
         await taskProgress(deps.pool, body.taskId, typeof body.note === "string" ? body.note : undefined);
+        const ixq = await deps.pool.query<{ interaction_id: string | null }>(`SELECT interaction_id FROM control_task WHERE id = $1`, [body.taskId]);
+        if (ixq.rows[0]?.interaction_id) await setInteractionState(deps.pool, ixq.rows[0].interaction_id, "executing", typeof body.note === "string" ? body.note : undefined).catch(() => {});
         return json(res, 200, { ok: true });
       }
       if (path === "/control/result") {
@@ -182,6 +185,7 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
           await deps.pool.query(`UPDATE control_task SET status = 'done', result_summary = $2, updated_at = now() WHERE id = $1 AND status = 'active'`,
             [body.taskId, String(body.summary ?? "done").slice(0, 1000)]);
           await recordSuccess(deps.pool, body.taskId);
+          await completeForTask(deps.pool, body.taskId, { ok: true, summary: String(body.summary ?? "done") }).catch(() => {});
           return json(res, 200, { ok: true });
         }
         if (typeof body.taskId === "string" && body.failed === true) {
@@ -189,12 +193,14 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
           // worker has given up on it.
           await deps.pool.query(`UPDATE control_task SET status = 'failed', result_summary = $2, updated_at = now() WHERE id = $1 AND status = 'active'`,
             [body.taskId, String(body.summary ?? "failed on the Mac").slice(0, 1000)]);
+          await completeForTask(deps.pool, body.taskId, { ok: false, summary: String(body.summary ?? "failed on the Mac") }).catch(() => {});
           return json(res, 200, { ok: true, failed: true });
         }
         if (typeof body.taskId === "string" && typeof body.imageB64 === "string") {
           await setResultImage(deps.pool, body.taskId, body.imageB64);
           await deps.pool.query(`UPDATE control_task SET status = 'done', result_summary = $2, updated_at = now() WHERE id = $1`, [body.taskId, String(body.summary ?? "chart ready").slice(0, 1000)]);
           await recordSuccess(deps.pool, body.taskId);
+          await completeForTask(deps.pool, body.taskId, { ok: true, summary: String(body.summary ?? "chart ready"), imageB64: body.imageB64 }).catch(() => {});
         }
         return json(res, 200, { ok: true });
       }

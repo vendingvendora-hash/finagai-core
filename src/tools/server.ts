@@ -7,6 +7,7 @@
  */
 import type pg from "pg";
 import { getRuntime, macOnline, deriveLifecycle, macStatus } from "../mac/runtime.js";
+import { openInteraction, linkTask, undelivered, markDelivered } from "../concierge/interactions.js";
 import { z } from "zod";
 import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import { appendEvent } from "../db/index.js";
@@ -70,7 +71,18 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
   const helpers: ToolHelpers = {
     ok: async (tool, data) => {
       await audit(tool, "ok");
-      const filtered = filterDeep(JSON.parse(JSON.stringify(data)));
+      let payload: unknown = data;
+      // WO2 async return: on ANY tool call, surface finished work whose result never reached the chat, so
+      // Julian is never the polling mechanism. Marked delivered once surfaced.
+      if (tool !== "pending_results") {
+        const due = await undelivered(deps.pool, "chat").catch(() => []);
+        if (due.length) {
+          payload = { ...(data as object), finishedWhileYouWereAway: due.map((i) => ({ interactionId: i.id, state: i.state, result: i.resultSummary, hasImage: !!i.resultImageB64 })),
+            instruction: "Before answering the current request, tell Julian these earlier requests finished and show their results (call pending_results to get any image)." };
+          await markDelivered(deps.pool, due.filter((i) => !i.resultImageB64).map((i) => i.id)).catch(() => {});
+        }
+      }
+      const filtered = filterDeep(JSON.parse(JSON.stringify(payload)));
       let text = JSON.stringify(filtered);
       if (Buffer.byteLength(text) > 48_000 && Array.isArray(filtered)) {
         const capped = capResponse(filtered);
@@ -305,9 +317,17 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
         tellJulian: "Finagai's Mac runtime isn't connected right now. On the Mac run `launchctl kickstart -k gui/$(id -u)/com.finagai.imessage` and I'll pick this up immediately.",
         doNot: "Do not create a task, do not poll, do not ask Julian to upload anything." });
     }
+    const ix = await openInteraction(deps.pool, { conversation: "chat", message: request });
+    if (ix.reused && ix.interaction.taskIds.length) {
+      // Equivalent request already owned: continue it instead of creating a duplicate task.
+      const existing = await deps.pool.query<{ code: string; status: string }>(`SELECT code, status FROM control_task WHERE id = $1`, [ix.interaction.taskIds[ix.interaction.taskIds.length - 1]]);
+      if (existing.rows[0] && existing.rows[0].status === "active")
+        return ok("control_mac", { taskCode: Number(existing.rows[0].code), interactionId: ix.interaction.id, reused: true, note: "This request is already in progress; continuing it (no duplicate task)." });
+    }
     const t = await deps.pool.query<{ id: string; code: string }>(
       `INSERT INTO control_task (request, origin) VALUES ($1, 'chat') RETURNING id, code`, [request.slice(0, 4000)]);
     const row = t.rows[0]!;
+    await linkTask(deps.pool, ix.interaction.id, row.id);
     await appendEvent(deps.pool, { actor: "julian", action: "control_task_created", entityType: "control_task", entityId: row.id,
       after: { code: Number(row.code), request: request.slice(0, 200) }, client: deps.client });
     return ok("control_mac", { taskCode: Number(row.code),
@@ -319,6 +339,8 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     inputSchema: z.object({ filename: z.string().min(1).max(200), title: z.string().max(200).optional() }),
   }, async ({ filename, title }) => {
     const request = `mac_chart:${filename}${title ? `::${title}` : ""}`;
+    // WO2: one durable interaction per logical request (reused on follow-ups, never duplicated).
+    const ix = await openInteraction(deps.pool, { conversation: "chat", message: request, key: request });
     // HEALTH GATE (ADR-066): never queue work for a Mac that isn't connected. Fail fast with the truth.
     const rt0 = await getRuntime(deps.pool);
     if (!macOnline(rt0)) {
@@ -354,6 +376,7 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
       row = t.rows[0]!;
       await appendEvent(deps.pool, { actor: "julian", action: "control_task_created", entityType: "control_task", entityId: row.id, after: { code: Number(row.code), kind: "mac_chart", filename } });
     }
+    await linkTask(deps.pool, ix.interaction.id, row.id);
     // Own the request this turn, but return within the MCP transport timeout (~60s) — holding the call
     // open for minutes made the connector report "server isn't responding". We wait a transport-safe 45s
     // here; if it's not done, we return stillRunning and the model keeps ownership by calling
@@ -366,7 +389,8 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
       const t0 = q.rows[0];
       if (t0 && (t0.status === "done" || t0.status === "failed")) {
         await audit("make_mac_chart", "ok");
-        const content: CallToolResult["content"] = [{ type: "text", text: JSON.stringify({ taskCode: Number(row.code), status: t0.status, summary: t0.result_summary, hasImage: Boolean(t0.result_image_b64) }) }];
+        await markDelivered(deps.pool, [ix.interaction.id]).catch(() => {});   // result reached the chat now
+        const content: CallToolResult["content"] = [{ type: "text", text: JSON.stringify({ taskCode: Number(row.code), interactionId: ix.interaction.id, status: t0.status, summary: t0.result_summary, hasImage: Boolean(t0.result_image_b64) }) }];
         if (t0.result_image_b64) content.push({ type: "image", data: t0.result_image_b64, mimeType: "image/png" });
         return { content };
       }
@@ -379,6 +403,19 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     return ok("make_mac_chart", { taskCode: Number(row.code), ...lc, stillRunning: true,
       action: "call control_result with this taskCode again now; keep owning it until done or failed; do NOT ask Julian to check again",
       note: "If the task outlasts this turn, Finagai still delivers the finished chart to Julian's Messages automatically — tell him it's building and will arrive in Messages shortly; do not ask him to check again." });
+  });
+
+  server.registerTool("pending_results", {
+    description: "Results of earlier Finagai requests that finished after their chat turn ended (charts, Mac task results). Returns each with its image and marks them delivered. Call when a tool response mentions finishedWhileYouWereAway, or when Julian asks what finished.",
+    inputSchema: z.object({}),
+  }, async () => {
+    const due = await undelivered(deps.pool, "chat", 5);
+    await audit("pending_results", "ok");
+    const content: CallToolResult["content"] = [{ type: "text", text: JSON.stringify({ count: due.length,
+      results: due.map((i) => ({ interactionId: i.id, state: i.state, result: i.resultSummary, requested: i.requestKey, hasImage: !!i.resultImageB64 })) }) }];
+    for (const i of due) if (i.resultImageB64) content.push({ type: "image", data: i.resultImageB64, mimeType: "image/png" });
+    await markDelivered(deps.pool, due.map((i) => i.id));
+    return { content };
   });
 
   server.registerTool("mac_status", {

@@ -72,14 +72,14 @@ async function connect(bearer?: string) {
 const json = (r: { content: unknown }) => JSON.parse((r.content as Array<{ text: string }>)[0]!.text);
 
 describe.skipIf(!url)("MCP tool layer end to end", () => {
-  it("lists exactly the approved tools (19 here; the 2 J3 tools are added in production), and no write-capable extras", async () => {
+  it("lists exactly the approved tools (21 here; the 2 J3 tools are added in production), and no write-capable extras", async () => {
     const client = await connect(await token());
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "capture", "control_mac", "control_result", "get_approval_request", "get_charter", "get_item", "get_project", "get_state_overview", "list_open_conflicts",
-      "list_pending_proposals", "make_mac_chart", "request_archival", "request_conflict_resolution", "request_proposal_decision",
+      "list_pending_proposals", "mac_status", "make_mac_chart", "pending_results", "request_archival", "request_conflict_resolution", "request_proposal_decision",
       "request_seed_promotion", "search_state", "seed_add_source", "seed_answer", "seed_questions",
-    ]);
+    ]);   // mac_status + pending_results (WO1/WO2) are read-only: health matrix and already-finished results
     for (const forbidden of ["delete", "approve", "resolve_conflict", "decide_proposal", "send_email", "sql"]) {
       expect(names.some((n) => n.includes(forbidden) && !n.startsWith("request_") && n !== "list_open_conflicts")).toBe(false);
     }

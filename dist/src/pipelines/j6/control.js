@@ -163,6 +163,8 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
     if (step.done) {
         // Gather what the read steps found so the chat can read the answer (ADR-056).
         const detail = prior.filter((x) => x.result && x.result.trim()).map((x) => `- ${x.summary}: ${x.result.slice(0, 1200)}`).join("\n").slice(0, 20000);
+        const { completeForTask } = await import("../../concierge/interactions.js");
+        await completeForTask(pool, taskId, { ok: true, summary: step.summary, imageB64: screenshotB64 && screenshotB64.length < 8_000_000 ? screenshotB64 : null }).catch(() => { });
         await pool.query(`UPDATE control_task SET status = 'done', result_summary = $2, result_detail = $3, result_image_b64 = COALESCE($4, result_image_b64), updated_at = now() WHERE id = $1`, [taskId, step.summary.slice(0, 1000), detail || null, screenshotB64 && screenshotB64.length < 8_000_000 ? screenshotB64 : null]);
         await appendEvent(pool, { actor: "j6", action: "control_task_done", entityType: "control_task", entityId: taskId, after: { summary: step.summary } });
         return task.requester ? { status: "done", message: step.summary, requester: task.requester } : { status: "done", message: step.summary };
