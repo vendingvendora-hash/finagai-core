@@ -19,7 +19,7 @@ import { promisify } from "node:util";
 import { macDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTree, captureScreen, getSelectedFiles } from "./mac-perception.mjs";
 
 const run = promisify(execFile);
-const HELPER_VERSION = "runtime-2";
+const HELPER_VERSION = "runtime-3";
 const WORKER_ID = "mac-helper-" + process.pid;
 const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null, reconnects: 0, coreDown: false };
 /** Real capability probe (mac doctor), cached; refreshed every 10 minutes so the matrix stays truthful. */
@@ -619,6 +619,45 @@ export async function sendIMessage(handle, text) {
 const toMsg = (r, history) => ({ guid: r.guid, handle: normalizeHandle(r.chat), fromMe: r.fromMe === 1,
   text: messageText(r.text, r.ab), sentAt: appleDateToIso(r.date), ...(history ? { history: true } : {}) });
 
+/** Task pickup (WO1). Runs EVERY tick, regardless of iMessage traffic — previously it only ran when a
+ * new iMessage arrived (tick returned early on quiet ticks), so Core-created tasks starved. */
+async function pickupTasks(cfg) {
+// J6: pick up any control tasks Julian started from a Claude chat, and drive them.
+const pending = await core(cfg, "/control/pending", {}).catch(() => null);
+// Cheap deterministic work first (ping, chart); at most ONE open-ended J6 drive per tick so a long
+// task never starves the round-trip/heartbeat path.
+const tasks = (pending?.tasks ?? []).slice().sort((a, b) => rank(a.request) - rank(b.request));
+let drives = 0;
+for (const t of tasks) {
+  if (rank(t.request) === 2 && drives++ >= 1) break;
+  taskCodeCache[t.id] = t.code;
+  if (!(await claim(cfg, t.id))) { log("task already claimed elsewhere", { code: t.code }); continue; }
+  RUNTIME.currentTaskId = t.id;
+  try {
+    if (typeof t.request === "string" && t.request.startsWith("mac_ping")) {
+      await core(cfg, "/mac/chart-done", { taskId: t.id, workerId: WORKER_ID, done: true, summary: `pong from ${HELPER_VERSION} at ${new Date().toISOString()}` });
+    } else if (typeof t.request === "string" && t.request.startsWith("mac_chart:")) {
+      const spec = t.request.slice("mac_chart:".length);
+      const [filename] = spec.split("::");
+      await progress(cfg, t.id, "searching Mac for workbook");
+      const r = await runMacChart(cfg, filename, t.id, (note) => progress(cfg, t.id, note));
+      if (r && r.ok === false) {
+        // Terminal failure with a concrete reason — never leave the task 'active'.
+        await core(cfg, "/mac/chart-done", { taskId: t.id, workerId: WORKER_ID, failed: true, summary: r.message }).catch(() => {});
+        await sendIMessage(cfg.selfHandles[0], `⚠️ ${r.message}`);
+      }
+    } else {
+      await progress(cfg, t.id, "planning first step");
+      await driveControl(cfg, t.id, (note) => progress(cfg, t.id, note));
+    }
+  } catch (e) {
+    log("task failed", { code: t.code, error: String(e?.message ?? e).slice(0, 160) });
+    await core(cfg, "/mac/chart-done", { taskId: t.id, workerId: WORKER_ID, failed: true, summary: `Mac worker error: ${String(e?.message ?? e).slice(0, 140)}` }).catch(() => {});
+  } finally { RUNTIME.currentTaskId = null; }
+}
+
+}
+
 async function tick(cfg, state) {
   const allowed = new Map(cfg.contacts.map((c) => [c.handle, c.label]));
   const self = new Set(cfg.selfHandles);
@@ -628,6 +667,7 @@ async function tick(cfg, state) {
     state.lastRowId = Number(max ?? 0);                      // never process old messages as new requests
   }
   await heartbeat(cfg);
+  await pickupTasks(cfg).catch((e) => log("task pickup failed", { error: String(e?.message ?? e).slice(0, 160) }));
   // Style history for contacts not yet backfilled (once per contact).
   for (const c of cfg.contacts.filter((x) => !state.backfilled.includes(x.handle))) {
     const rows = (await sql(`${BASE} ORDER BY m.ROWID DESC LIMIT 2000`)).filter((r) => normalizeHandle(r.chat) === c.handle).slice(0, HISTORY);
@@ -683,40 +723,6 @@ async function tick(cfg, state) {
   // Remember recently processed guids (bounded) so the time-window query doesn't re-handle them.
   state.seenGuids = [...(state.seenGuids ?? []), ...rows.map((r) => r.guid)].slice(-400);
   saveState(state);
-
-  // J6: pick up any control tasks Julian started from a Claude chat, and drive them.
-  const pending = await core(cfg, "/control/pending", {}).catch(() => null);
-  // Cheap deterministic work first (ping, chart); at most ONE open-ended J6 drive per tick so a long
-  // task never starves the round-trip/heartbeat path.
-  const tasks = (pending?.tasks ?? []).slice().sort((a, b) => rank(a.request) - rank(b.request));
-  let drives = 0;
-  for (const t of tasks) {
-    if (rank(t.request) === 2 && drives++ >= 1) break;
-    taskCodeCache[t.id] = t.code;
-    if (!(await claim(cfg, t.id))) { log("task already claimed elsewhere", { code: t.code }); continue; }
-    RUNTIME.currentTaskId = t.id;
-    try {
-      if (typeof t.request === "string" && t.request.startsWith("mac_ping")) {
-        await core(cfg, "/mac/chart-done", { taskId: t.id, workerId: WORKER_ID, done: true, summary: `pong from ${HELPER_VERSION} at ${new Date().toISOString()}` });
-      } else if (typeof t.request === "string" && t.request.startsWith("mac_chart:")) {
-        const spec = t.request.slice("mac_chart:".length);
-        const [filename] = spec.split("::");
-        await progress(cfg, t.id, "searching Mac for workbook");
-        const r = await runMacChart(cfg, filename, t.id, (note) => progress(cfg, t.id, note));
-        if (r && r.ok === false) {
-          // Terminal failure with a concrete reason — never leave the task 'active'.
-          await core(cfg, "/mac/chart-done", { taskId: t.id, workerId: WORKER_ID, failed: true, summary: r.message }).catch(() => {});
-          await sendIMessage(cfg.selfHandles[0], `⚠️ ${r.message}`);
-        }
-      } else {
-        await progress(cfg, t.id, "planning first step");
-        await driveControl(cfg, t.id, (note) => progress(cfg, t.id, note));
-      }
-    } catch (e) {
-      log("task failed", { code: t.code, error: String(e?.message ?? e).slice(0, 160) });
-      await core(cfg, "/mac/chart-done", { taskId: t.id, workerId: WORKER_ID, failed: true, summary: `Mac worker error: ${String(e?.message ?? e).slice(0, 140)}` }).catch(() => {});
-    } finally { RUNTIME.currentTaskId = null; }
-  }
 
   if (contactMsgs.length) {
     const resp = await core(cfg, "/concierge/sync", { contacts: cfg.contacts, messages: contactMsgs, capabilities: ["files", "control"] });

@@ -38,3 +38,11 @@ control (mouse/keyboard on unknown apps) is the next build on this substrate.
   Events, and a live round-trip task. `--probe-restart` SIGKILLs the daemon and verifies a new PID (test A);
   `--soak N` runs N sequential round-trips (test H). B/C (network/Core restart) are covered structurally: the
   helper has no persistent socket — every tick retries and counts the reconnect.
+
+## ADR-066.3 — the actual reason the Mac never claimed tasks
+Real-Mac doctor runs 36/37/38 timed out even with the queue fix. Render's request log showed heartbeats
+every 15s and **zero** `/control/pending` calls: the helper's `tick` returned early whenever no new iMessage
+had arrived, and task pickup lived after that return. The "Mac runtime" was an iMessage-triggered worker;
+Core-created tasks were only claimed when Julian happened to text. `pickupTasks` now runs on every tick,
+right after the heartbeat, before any early return. Regression `helper-pickup.test.ts` fails on the old
+helper (4/4) and passes on the new one (4/4).
