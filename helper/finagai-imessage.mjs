@@ -19,7 +19,7 @@ import { promisify } from "node:util";
 import { macDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTree, captureScreen, getSelectedFiles } from "./mac-perception.mjs";
 
 const run = promisify(execFile);
-const HELPER_VERSION = "runtime-3";
+const HELPER_VERSION = "runtime-4";
 const WORKER_ID = "mac-helper-" + process.pid;
 const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null, reconnects: 0, coreDown: false };
 /** Real capability probe (mac doctor), cached; refreshed every 10 minutes so the matrix stays truthful. */
@@ -333,8 +333,19 @@ export async function runMacChart(cfg, requested, taskId, onProgress = async () 
   // Rasterize the SVG to PNG on the Mac (Quick Look), verify non-empty.
   const dir = join(OUT_ROOT, "m01-" + Date.now()); mkdirSync(dir, { recursive: true });
   const svgPath = join(dir, "chart.svg"); writeFileSync(svgPath, Buffer.from(resp.svgB64, "base64"));
-  let png = await quickLookPng(svgPath, dir).catch(() => null);
+  // Deterministic rasterizer first (AppKit NSImage -> bitmap at the SVG's exact size, 2x for crispness);
+  // Quick Look only as a fallback — it is a thumbnailer and squared/cropped a 1200x700 chart (task #72).
+  const svgText = Buffer.from(resp.svgB64, "base64").toString("utf8");
+  const svgW = Number(svgText.match(/<svg[^>]*\swidth="(\d+)"/)?.[1] ?? 0), svgH = Number(svgText.match(/<svg[^>]*\sheight="(\d+)"/)?.[1] ?? 0);
+  let png = await svgToPng(svgPath, join(dir, "chart.png"), svgW, svgH).catch(() => null);
+  if (!png) png = await quickLookPng(svgPath, dir).catch(() => null);
   if (!png || !existsSync(png) || statSync(png).size < 1000) return { ok: false, message: "Chart rasterization produced an empty image." };
+  // WO9 VERIFY: the artifact must not be materially cropped — its aspect must match the SVG's.
+  const dims = await pngDims(png).catch(() => null);
+  if (svgW && svgH && dims && Math.abs(dims.w / dims.h - svgW / svgH) > 0.05) {
+    log("chart rasterization cropped", { expected: `${svgW}x${svgH}`, got: `${dims.w}x${dims.h}` });
+    return { ok: false, message: `Chart image was cropped by the renderer (expected ${svgW}x${svgH} aspect, got ${dims.w}x${dims.h}); not delivering a cropped artifact.` };
+  }
   // Return the PNG to the chat (store on the task) and to iMessage.
   const pngB64 = readFileSync(png).toString("base64");
   await core(cfg, "/mac/chart-done", { taskId, workerId: WORKER_ID, imageB64: pngB64, summary: resp.message });
@@ -390,6 +401,27 @@ export function chartSvg(spec) {
 
 const expandHome = (p) => p.replace(/^~(?=\/)/, homedir());
 const allowedLocal = (p) => p.startsWith(homedir() + "/") && !EXCLUDED_PATH.some((r) => r.test(p)) && existsSync(p) && statSync(p).isFile() && statSync(p).size <= MAX_ATTACHMENT_BYTES;
+
+/** Exact-size SVG rasterization via AppKit (CoreSVG). Returns the PNG path or null. */
+async function svgToPng(src, out, w, h) {
+  if (!w || !h) return null;
+  const js = `ObjC.import('AppKit');
+function run(a){var img=$.NSImage.alloc.initWithContentsOfFile(a[0]);if(!img||img.isNil())return 'noimg';
+var W=parseInt(a[2],10)*2,H=parseInt(a[3],10)*2;
+var rep=$.NSBitmapImageRep.alloc.initWithBitmapDataPlanesPixelsWideHighBitsPerSampleSamplesPerPixelHasAlphaIsPlanarColorSpaceNameBytesPerRowBitsPerPixel(null,W,H,8,4,true,false,$.NSCalibratedRGBColorSpace,0,0);
+$.NSGraphicsContext.saveGraphicsState;var ctx=$.NSGraphicsContext.graphicsContextWithBitmapImageRep(rep);$.NSGraphicsContext.setCurrentContext(ctx);
+$.NSColor.whiteColor.setFill;$.NSRectFill($.NSMakeRect(0,0,W,H));
+img.drawInRectFromRectOperationFraction($.NSMakeRect(0,0,W,H),$.NSZeroRect,2,1.0);
+$.NSGraphicsContext.restoreGraphicsState;
+var data=rep.representationUsingTypeProperties(4,$());data.writeToFileAtomically(a[1],true);return 'ok'}`;
+  const r = await run("/usr/bin/osascript", ["-l", "JavaScript", "-e", js, src, out, String(w), String(h)], { timeout: 30_000 });
+  return r.stdout.trim() === "ok" && existsSync(out) && statSync(out).size > 1000 ? out : null;
+}
+async function pngDims(p) {
+  const { stdout } = await run("/usr/bin/sips", ["-g", "pixelWidth", "-g", "pixelHeight", p], { timeout: 10_000 });
+  const w = Number(stdout.match(/pixelWidth:\s*(\d+)/)?.[1]), h = Number(stdout.match(/pixelHeight:\s*(\d+)/)?.[1]);
+  return Number.isFinite(w) && Number.isFinite(h) ? { w, h } : null;
+}
 
 async function quickLookPng(src, outDir) {
   await run("/usr/bin/qlmanage", ["-t", "-s", "1600", "-o", outDir, src], { timeout: 30_000 });

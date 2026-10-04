@@ -33,3 +33,14 @@ describe("financial-model layout (Altarum)", () => {
     expect(locateHeaderRow([["Inputs & Assumptions"], [], ["Item", "Value"], ["Rate", 12]])).toBe(2);
   });
 });
+
+describe("chart title never overflows the canvas (task #72 showed a clipped title)", () => {
+  it("long titles get a font size whose estimated width fits inside 1200px", async () => {
+    const { seriesToSvg } = await import("../../src/mac/chart.js");
+    const title = "Altarum_Pricing_Case_Template: Actual cost by Month # (Burn & EAC)";
+    const svg = seriesToSvg({ sheet: "Burn & EAC", labelColumn: "Month #", valueColumn: "Actual cost", labels: ["1","2","3"], values: [1,2,3], isTimeLike: true, reason: "" } as never, title);
+    const size = Number(svg.match(/font-size="(\d+)"/)?.[1]);
+    expect(size).toBeGreaterThanOrEqual(16);
+    expect(title.length * 0.56 * size).toBeLessThanOrEqual(1200 - 80);
+  });
+});
