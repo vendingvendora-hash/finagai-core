@@ -99,4 +99,23 @@ export async function macStatus(pool) {
             "The Finagai Mac runtime is not connected. On the Mac: `launchctl kickstart -k gui/$(id -u)/com.finagai.imessage` then `tail -5 ~/.finagai/imessage-helper.log` — it should log 'helper started' and heartbeats.",
     };
 }
+/**
+ * WO1 stale-task sweep. Run on every heartbeat (cheap) and on demand. Terminalizes:
+ *  - ABANDONED: active, never claimed, older than 30 min (no worker ever picked it up) -> failed
+ *  - STALLED:   claimed, lease expired AND no progress for 10 min -> failed (reclaim window has passed)
+ * Each gets a concrete reason so WO2 surfaces it as a failed interaction instead of leaving a zombie that
+ * starves the queue (this is exactly how tasks #9/#32/#33/#34 blocked task #36).
+ */
+export async function sweepStaleTasks(pool) {
+    const a = await pool.query(`UPDATE control_task SET status = 'failed', updated_at = now(),
+       result_summary = 'Abandoned: no Mac worker claimed this task within 30 minutes (runtime was offline or the task was superseded). Ask again and it will run now.'
+     WHERE status = 'active' AND claimed_at IS NULL AND created_at < now() - interval '30 minutes' RETURNING id`);
+    const b = await pool.query(`UPDATE control_task SET status = 'failed', updated_at = now(),
+       result_summary = 'Stalled: the Mac worker stopped reporting progress and the lease was not reclaimed within 10 minutes.'
+     WHERE status = 'active' AND claimed_at IS NOT NULL AND lease_until < now() AND last_progress_at < now() - interval '10 minutes' RETURNING id`);
+    const { completeForTask } = await import("../concierge/interactions.js");
+    for (const r of [...a.rows, ...b.rows])
+        await completeForTask(pool, r.id, { ok: false, summary: "task did not complete on the Mac" }).catch(() => { });
+    return { abandoned: a.rowCount ?? 0, stalled: b.rowCount ?? 0 };
+}
 //# sourceMappingURL=runtime.js.map

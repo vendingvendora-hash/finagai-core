@@ -19,7 +19,7 @@ import { promisify } from "node:util";
 import { macDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTree, captureScreen, getSelectedFiles } from "./mac-perception.mjs";
 
 const run = promisify(execFile);
-const HELPER_VERSION = "runtime-1";
+const HELPER_VERSION = "runtime-2";
 const WORKER_ID = "mac-helper-" + process.pid;
 const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null, reconnects: 0, coreDown: false };
 /** Real capability probe (mac doctor), cached; refreshed every 10 minutes so the matrix stays truthful. */
@@ -75,6 +75,7 @@ async function heartbeat(cfg) {
     RUNTIME.coreDown = true;                                    // B/C: network or Core restart — next tick reconnects
   }
 }
+const rank = (req) => (String(req || "").startsWith("mac_ping") ? 0 : String(req || "").startsWith("mac_chart:") ? 1 : 2);
 async function claim(cfg, taskId) {
   const r = await core(cfg, "/control/claim", { taskId, workerId: WORKER_ID }).catch(() => null);
   return !!(r && r.claimed);
@@ -685,7 +686,12 @@ async function tick(cfg, state) {
 
   // J6: pick up any control tasks Julian started from a Claude chat, and drive them.
   const pending = await core(cfg, "/control/pending", {}).catch(() => null);
-  for (const t of (pending?.tasks ?? [])) {
+  // Cheap deterministic work first (ping, chart); at most ONE open-ended J6 drive per tick so a long
+  // task never starves the round-trip/heartbeat path.
+  const tasks = (pending?.tasks ?? []).slice().sort((a, b) => rank(a.request) - rank(b.request));
+  let drives = 0;
+  for (const t of tasks) {
+    if (rank(t.request) === 2 && drives++ >= 1) break;
     taskCodeCache[t.id] = t.code;
     if (!(await claim(cfg, t.id))) { log("task already claimed elsewhere", { code: t.code }); continue; }
     RUNTIME.currentTaskId = t.id;

@@ -10,7 +10,7 @@ import type http from "node:http";
 import { cancelTask, createTask, decideStep, getStep, getTaskResult, parseControlCommand, planNext, recordRun, setResultImage, type ControlDeps } from "../pipelines/j6/control.js";
 import { analyzeWorkbookToChart, rankCandidates, type Candidate } from "../mac/operator.js";
 import { registerArtifact, resolveRecentArtifact, markArtifactSent, claimInbound, finishInbound } from "./interaction.js";
-import { recordHeartbeat, claimTask, taskProgress, macStatus, workerMayComplete, recordSuccess } from "../mac/runtime.js";
+import { recordHeartbeat, claimTask, taskProgress, macStatus, workerMayComplete, recordSuccess, sweepStaleTasks } from "../mac/runtime.js";
 import { completeForTask, setState as setInteractionState } from "./interactions.js";
 import { saveContext } from "../mac/context.js";
 
@@ -56,9 +56,13 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         return json(res, 200, { taskId: t.id, taskCode: t.code });
       }
       if (path === "/control/pending") {
+        // Starvation-proof order (WO1): unclaimed before claimed-by-others, cheap deterministic tasks
+        // (mac_ping, mac_chart) before open-ended J6 drives, newest first. A fresh ping is never stuck
+        // behind an old J6 task.
         const r = await deps.pool.query(`SELECT id, code, request FROM control_task WHERE status = 'active'
+          AND (claimed_at IS NULL OR lease_until < now())
           AND NOT EXISTS (SELECT 1 FROM control_step s WHERE s.task_id = control_task.id AND s.status IN ('proposed','running'))
-          ORDER BY created_at LIMIT 5`);
+          ORDER BY (CASE WHEN request LIKE 'mac_ping%' THEN 0 WHEN request LIKE 'mac_chart:%' THEN 1 ELSE 2 END), created_at DESC LIMIT 5`);
         return json(res, 200, { tasks: r.rows });
       }
       if (path === "/control/next") {
@@ -133,7 +137,8 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
           startedAt: typeof body.startedAt === "string" ? body.startedAt : null,
         });
         if (body.context && typeof body.context === "object") await saveContext(deps.pool, body.context as Record<string, unknown>).catch(() => {});
-        return json(res, 200, { ok: true });
+        const swept = await sweepStaleTasks(deps.pool).catch(() => ({ abandoned: 0, stalled: 0 }));
+        return json(res, 200, { ok: true, swept });
       }
       if (path === "/control/claim") {
         if (typeof body.taskId !== "string") return json(res, 400, { error: "taskId required" });

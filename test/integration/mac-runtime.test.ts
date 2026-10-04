@@ -71,4 +71,29 @@ describe.skipIf(!pool)("Mac runtime (ADR-066)", () => {
     await recordSuccess(pool!, t.rows[0]!.id);
     expect((await getRuntime(pool!))!.lastSuccessAt).not.toBeNull();
   });
+
+  it("sweep: an unclaimed task older than 30min and a stalled claimed task become FAILED with reasons; fresh ones are untouched", async () => {
+    const { sweepStaleTasks } = await import("../../src/mac/runtime.js");
+    const mk = async (req: string) => (await pool!.query<{ id: string }>(`INSERT INTO control_task (request, origin) VALUES ($1, 'chat') RETURNING id`, [req])).rows[0]!.id;
+    const zombie = await mk("control: old abandoned");
+    await pool!.query(`UPDATE control_task SET created_at = now() - interval '2 hours' WHERE id = $1`, [zombie]);
+    const stalled = await mk("control: stalled");
+    await pool!.query(`UPDATE control_task SET claimed_at = now() - interval '1 hour', lease_until = now() - interval '50 minutes', last_progress_at = now() - interval '50 minutes', worker_id = 'dead' WHERE id = $1`, [stalled]);
+    const fresh = await mk("mac_ping");
+    const r = await sweepStaleTasks(pool!);
+    expect(r.abandoned).toBeGreaterThanOrEqual(1); expect(r.stalled).toBeGreaterThanOrEqual(1);
+    const st = async (id: string) => (await pool!.query(`SELECT status, result_summary FROM control_task WHERE id = $1`, [id])).rows[0];
+    expect((await st(zombie)).status).toBe("failed"); expect((await st(zombie)).result_summary).toContain("Abandoned");
+    expect((await st(stalled)).status).toBe("failed"); expect((await st(stalled)).result_summary).toContain("Stalled");
+    expect((await st(fresh)).status).toBe("active");
+  });
+  it("pending order: a fresh mac_ping is served before older open-ended tasks (no starvation)", async () => {
+    const mk = async (req: string) => (await pool!.query<{ id: string; code: string }>(`INSERT INTO control_task (request, origin) VALUES ($1, 'chat') RETURNING id, code`, [req])).rows[0]!;
+    for (let i = 0; i < 6; i++) await mk(`control: long j6 task ${i} ${Date.now()}`);
+    const ping = await mk("mac_ping");
+    const r = await pool!.query(`SELECT id, request FROM control_task WHERE status = 'active' AND (claimed_at IS NULL OR lease_until < now())
+      AND NOT EXISTS (SELECT 1 FROM control_step s WHERE s.task_id = control_task.id AND s.status IN ('proposed','running'))
+      ORDER BY (CASE WHEN request LIKE 'mac_ping%' THEN 0 WHEN request LIKE 'mac_chart:%' THEN 1 ELSE 2 END), created_at DESC LIMIT 5`);
+    expect(r.rows[0]!.id).toBe(ping.id);          // the ping is first even though 6 older J6 tasks exist
+  });
 });
