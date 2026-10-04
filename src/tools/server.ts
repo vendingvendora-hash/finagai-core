@@ -8,6 +8,7 @@
 import type pg from "pg";
 import { getRuntime, macOnline, deriveLifecycle, macStatus } from "../mac/runtime.js";
 import { openInteraction, linkTask, undelivered, markDelivered } from "../concierge/interactions.js";
+import { getContext, resolveFromMac } from "../mac/context.js";
 import { z } from "zod";
 import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import { appendEvent } from "../db/index.js";
@@ -416,6 +417,25 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     for (const i of due) if (i.resultImageB64) content.push({ type: "image", data: i.resultImageB64, mimeType: "image/png" });
     await markDelivered(deps.pool, due.map((i) => i.id));
     return { content };
+  });
+
+  server.registerTool("mac_get_context", {
+    description: "What Julian is looking at on his Mac right now: frontmost app, active window, open document path, selected Finder files, active browser tab (app/url/title), plus the most recent Finagai artifact and how fresh the snapshot is. Deterministic, ephemeral (no history). Use before acting on 'this', 'that', 'this page', 'the spreadsheet I have open'.",
+    inputSchema: z.object({}),
+  }, async () => {
+    const { ctx, ageSeconds } = await getContext(deps.pool);
+    const rt = await getRuntime(deps.pool);
+    await audit("mac_get_context", "ok");
+    return ok("mac_get_context", { macOnline: macOnline(rt), snapshotAgeSeconds: ageSeconds, ...ctx });
+  });
+
+  server.registerTool("resolve_reference", {
+    description: "Deterministically resolve a vague reference — 'this', 'that', 'this file', 'this page', 'the spreadsheet I have open', 'the last chart', 'what I'm looking at' — to a concrete referent (file path, URL, document, or artifact) from Julian's current Mac context and recent artifacts. Returns resolved + candidates; ambiguous:true only when two referents are equally likely — ask then, never otherwise.",
+    inputSchema: z.object({ phrase: z.string().min(1).max(300) }),
+  }, async ({ phrase }) => {
+    const r = await resolveFromMac(deps.pool, phrase);
+    await audit("resolve_reference", r.resolved ? "resolved" : r.ambiguous ? "ambiguous" : "none");
+    return ok("resolve_reference", r);
   });
 
   server.registerTool("mac_status", {

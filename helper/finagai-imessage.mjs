@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { macDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTree, captureScreen } from "./mac-perception.mjs";
+import { macDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTree, captureScreen, getSelectedFiles } from "./mac-perception.mjs";
 
 const run = promisify(execFile);
 const HELPER_VERSION = "runtime-1";
@@ -44,13 +44,31 @@ async function capabilityMatrix() {
   return RUNTIME.caps;
 }
 /** Heartbeat to Core: liveness + capability matrix + current context + current task. Every tick. */
+/** Open document path of the frontmost app, when the app exposes it (Excel, Numbers, Preview, Pages, TextEdit). */
+async function frontDocumentPath(appName) {
+  if (!appName || !/excel|numbers|preview|pages|textedit|keynote|word|powerpoint/i.test(appName)) return null;
+  const js = `(function(){try{var a=Application("${appName.replace(/"/g,'')}");var d=a.documents()[0];if(!d)return "";try{var f=d.file();return f?String(f):"";}catch(e){try{return String(d.path());}catch(e2){return "";}}}catch(e){return "";}})()`;
+  try { const { stdout } = await run("/usr/bin/osascript", ["-l", "JavaScript", "-e", js], { timeout: 4000 }); const v = stdout.trim(); return v && v !== "undefined" ? v.replace(/^file:\/\//, "") : null; }
+  catch { return null; }
+}
+/** Ephemeral current-context snapshot (WO3). Clipboard deliberately excluded. */
+async function gatherContext(fm) {
+  const ctx = { app: fm.ok ? fm.app : null, window: fm.ok ? fm.window : null };
+  ctx.documentPath = await frontDocumentPath(ctx.app).catch(() => null);
+  const sel = await getSelectedFiles(run).catch(() => ({ ok: false }));
+  ctx.selectedFiles = sel.ok && Array.isArray(sel.files) ? sel.files.slice(0, 10) : [];
+  const tab = await browserActiveTab(run).catch(() => ({ ok: false }));
+  ctx.browser = tab.ok && tab.url ? { app: tab.app || "browser", url: tab.url, title: tab.title || "" } : null;
+  return ctx;
+}
 async function heartbeat(cfg) {
   const caps = await capabilityMatrix();
   const fm = await getFrontmost(run).catch(() => ({ ok: false }));
+  const context = await gatherContext(fm).catch(() => ({}));
   try {
     await core(cfg, "/mac/heartbeat", { version: HELPER_VERSION, capabilities: caps,
       frontmostApp: fm.ok ? fm.app : null, frontmostWindow: fm.ok ? fm.window : null,
-      currentTaskId: RUNTIME.currentTaskId, startedAt: RUNTIME.startedAt, reconnects: RUNTIME.reconnects });
+      currentTaskId: RUNTIME.currentTaskId, startedAt: RUNTIME.startedAt, reconnects: RUNTIME.reconnects, context });
     if (RUNTIME.coreDown) { RUNTIME.coreDown = false; RUNTIME.reconnects += 1; log("reconnected to Core", { reconnects: RUNTIME.reconnects }); }
   } catch (e) {
     if (!RUNTIME.coreDown) log("Core unreachable (will keep retrying every tick)", { error: String(e?.message ?? e).slice(0, 120) });

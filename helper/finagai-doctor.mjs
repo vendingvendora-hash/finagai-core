@@ -88,8 +88,12 @@ async function main() {
   try { health = await fetch(new URL("/health", cfg.coreUrl)).then((r) => r.json()); mark("Core reachable (/health)", true, `version ${health.version}`); }
   catch (e) { mark("Core reachable (/health)", false, String(e?.message ?? e).slice(0, 80)); }
   let status = null;
-  try { status = await core(cfg, "/mac/status", {}); mark("Auth accepted (bearer token)", true); }
-  catch (e) { mark("Auth accepted (bearer token)", false, String(e?.message ?? e).slice(0, 80)); }
+  try { status = await core(cfg, "/mac/status", {}); mark("Auth accepted (bearer token)", true); mark("Core has the runtime build (/mac/status)", true); }
+  catch (e) {
+    const msg = String(e?.message ?? e);
+    if (/HTTP 404/.test(msg)) { mark("Auth accepted (bearer token)", true, "(route missing, so auth not exercised)"); mark("Core has the runtime build (/mac/status)", false, `Core is on an older build (${health?.version ?? "?"}): approve pending migrations in Render and redeploy`); }
+    else mark("Auth accepted (bearer token)", false, msg.slice(0, 80));
+  }
 
   // 3. heartbeat as Core sees it
   if (status) {
@@ -101,8 +105,12 @@ async function main() {
   const doc = await macDoctor(run, join(DIR, "doctor-probe.png")).catch((e) => ({ checks: [{ name: "capability probe", ok: false, detail: String(e?.message ?? e) }] }));
   for (const c of doc.checks) mark(c.name, c.ok, c.ok ? "" : `${c.detail}${c.settingsHint ? " → " + c.settingsHint : ""}`);
   // keyboard/mouse: System Events can post keystrokes only with Accessibility; probe a harmless no-op.
-  try { await run("/usr/bin/osascript", ["-e", 'tell application "System Events" to key code 63']); mark("Keyboard/mouse control (System Events)", true); }
-  catch (e) { mark("Keyboard/mouse control (System Events)", false, "Accessibility permission → Privacy & Security → Accessibility"); }
+  try {
+    const { stdout } = await run("/usr/bin/osascript", ["-l", "JavaScript", "-e", "ObjC.import('ApplicationServices'); $.AXIsProcessTrusted()"]);
+    const trusted = stdout.trim() === "true";
+    mark("Keyboard/mouse control (this terminal process is AX-trusted)", trusted, trusted ? "" : "Terminal lacks Accessibility; the daemon's own matrix (from Core /mac/status) is the authority for Finagai");
+  } catch (e) { mark("Keyboard/mouse control (AXIsProcessTrusted)", false, String(e?.message ?? e).slice(0, 100)); }
+  if (status && status.accessibility) mark("Daemon keyboard/mouse (as Core sees the daemon)", status.accessibility === "PASS", `accessibility ${status.accessibility}`);
 
   // 5. round-trip task
   if (status && status.connected) {

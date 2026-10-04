@@ -11,6 +11,7 @@ import { analyzeWorkbookToChart, rankCandidates } from "../mac/operator.js";
 import { registerArtifact, resolveRecentArtifact, markArtifactSent, claimInbound, finishInbound } from "./interaction.js";
 import { recordHeartbeat, claimTask, taskProgress, macStatus, workerMayComplete, recordSuccess } from "../mac/runtime.js";
 import { completeForTask, setState as setInteractionState } from "./interactions.js";
+import { saveContext } from "../mac/context.js";
 const MAX_BODY = 24 * 1024 * 1024; // screenshots + perception
 function json(res, status, body) {
     res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", "x-content-type-options": "nosniff" });
@@ -150,6 +151,8 @@ export function createControlHandler(deps, token, log) {
                     currentTaskId: typeof body.currentTaskId === "string" ? body.currentTaskId : null,
                     startedAt: typeof body.startedAt === "string" ? body.startedAt : null,
                 });
+                if (body.context && typeof body.context === "object")
+                    await saveContext(deps.pool, body.context).catch(() => { });
                 return json(res, 200, { ok: true });
             }
             if (path === "/control/claim") {
