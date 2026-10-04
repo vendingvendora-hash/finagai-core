@@ -14,12 +14,12 @@ import { execFile } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, readdirSync, copyFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { promisify } from "node:util";
 import { macDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTree, captureScreen, getSelectedFiles } from "./mac-perception.mjs";
 
 const run = promisify(execFile);
-const HELPER_VERSION = "runtime-4";
+const HELPER_VERSION = "runtime-5";
 const WORKER_ID = "mac-helper-" + process.pid;
 const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null, reconnects: 0, coreDown: false };
 /** Real capability probe (mac doctor), cached; refreshed every 10 minutes so the matrix stays truthful. */
@@ -337,8 +337,15 @@ export async function runMacChart(cfg, requested, taskId, onProgress = async () 
   // Quick Look only as a fallback — it is a thumbnailer and squared/cropped a 1200x700 chart (task #72).
   const svgText = Buffer.from(resp.svgB64, "base64").toString("utf8");
   const svgW = Number(svgText.match(/<svg[^>]*\swidth="(\d+)"/)?.[1] ?? 0), svgH = Number(svgText.match(/<svg[^>]*\sheight="(\d+)"/)?.[1] ?? 0);
-  let png = await svgToPng(svgPath, join(dir, "chart.png"), svgW, svgH).catch(() => null);
-  if (!png) png = await quickLookPng(svgPath, dir).catch(() => null);
+  // Rasterizer ladder, most deterministic first; the chosen path is logged so a failure is diagnosable.
+  let png = null, via = null;
+  if (svgW && svgH) {
+    png = await chromeSvgPng(svgPath, join(dir, "chart.png"), svgW, svgH).catch((e) => { log("chrome raster failed", { error: String(e?.message ?? e).slice(0, 160) }); return null; });
+    via = png ? "chrome" : null;
+    if (!png) { png = await svgToPng(svgPath, join(dir, "chart-nsimage.png"), svgW, svgH).catch((e) => { log("nsimage raster failed", { error: String(e?.message ?? e).slice(0, 160) }); return null; }); via = png ? "nsimage" : null; }
+  }
+  if (!png) { png = await quickLookPng(svgPath, dir).catch(() => null); via = png ? "quicklook" : null; }
+  log("chart rasterized", { via, svg: `${svgW}x${svgH}` });
   if (!png || !existsSync(png) || statSync(png).size < 1000) return { ok: false, message: "Chart rasterization produced an empty image." };
   // WO9 VERIFY: the artifact must not be materially cropped — its aspect must match the SVG's.
   const dims = await pngDims(png).catch(() => null);
@@ -401,6 +408,15 @@ export function chartSvg(spec) {
 
 const expandHome = (p) => p.replace(/^~(?=\/)/, homedir());
 const allowedLocal = (p) => p.startsWith(homedir() + "/") && !EXCLUDED_PATH.some((r) => r.test(p)) && existsSync(p) && statSync(p).isFile() && statSync(p).size <= MAX_ATTACHMENT_BYTES;
+
+/** Exact-size SVG rasterization via headless Chrome (the path already proven for web screenshots). */
+async function chromeSvgPng(src, out, w, h) {
+  if (!existsSync(CHROME)) return null;
+  // An SVG document loaded directly renders at its intrinsic size from (0,0); window = exact size, 2x DPR.
+  await run(CHROME, ["--headless=new", "--disable-gpu", "--hide-scrollbars", "--force-device-scale-factor=2", `--screenshot=${out}`,
+    `--window-size=${w},${h}`, "--user-data-dir=" + join(dirname(out), ".chrome"), "file://" + src], { timeout: 45_000 });
+  return existsSync(out) && statSync(out).size > 1000 ? out : null;
+}
 
 /** Exact-size SVG rasterization via AppKit (CoreSVG). Returns the PNG path or null. */
 async function svgToPng(src, out, w, h) {
