@@ -23,13 +23,17 @@ export function detectSeries(sheets: Sheet[]): SeriesPick | null {
   let bestScore = -1;
   for (const sheet of sheets) {
     if (sheet.rows.length < 2) continue;
-    // header row = first non-empty row
-    const headerRowIdx = sheet.rows.findIndex((r) => r.some((c) => c != null && String(c).trim() !== ""));
+    // Financial-model layouts (Julian's workbooks): a title in row 1, blank spacer rows, the real header
+    // row several rows down, tables starting in column B. Locate the header row instead of assuming row 1.
+    const headerRowIdx = locateHeaderRow(sheet.rows);
     if (headerRowIdx < 0) continue;
     const header = sheet.rows[headerRowIdx]!.map((c) => (c == null ? "" : String(c)));
-    const dataRows = sheet.rows.slice(headerRowIdx + 1).filter((r) => r.some((c) => c != null));
+    // The table ends at the first fully blank row after the header (so totals blocks below don't bleed in).
+    const after = sheet.rows.slice(headerRowIdx + 1);
+    const endIdx = after.findIndex((r) => !r.some((c) => c != null && String(c).trim() !== ""));
+    const dataRows = (endIdx >= 0 ? after.slice(0, endIdx) : after).filter((r) => r.some((c) => c != null));
     if (dataRows.length < 2) continue;
-    const ncol = header.length;
+    const ncol = Math.max(header.length, ...dataRows.map((r) => r.length));
 
     // classify columns
     const numericCols: number[] = [];
@@ -107,4 +111,28 @@ export function describeWorkbook(sheets: Sheet[]): { sheets: Array<{ name: strin
     out.push({ name: sh.name, rows: body.length, headers: header.filter(Boolean).slice(0, 20), numericColumns, emptyFormulaCells: 0 });
   }
   return { sheets: out };
+}
+
+
+/**
+ * Header-row inference. A header row is the first row with >= 2 non-empty TEXT cells where the next
+ * non-empty row has >= 1 numeric cell under one of those text cells. A lone title ("Labor Build") in row 1
+ * fails the >= 2 test and is skipped. Falls back to the first non-empty row.
+ */
+export function locateHeaderRow(rows: Array<Array<string | number | null>>): number {
+  const isText = (c: unknown) => typeof c === "string" && c.trim() !== "";
+  const nonEmpty = (r: Array<string | number | null>) => r.some((c) => c != null && String(c).trim() !== "");
+  for (let i = 0; i < Math.min(rows.length - 1, 30); i++) {
+    const r = rows[i]!;
+    const textIdx = r.map((c, j) => (isText(c) ? j : -1)).filter((j) => j >= 0);
+    if (textIdx.length < 2) continue;
+    // next non-empty row
+    let k = i + 1; while (k < rows.length && !nonEmpty(rows[k]!)) k++;
+    if (k >= rows.length) break;
+    const next = rows[k]!;
+    const numericUnderHeader = textIdx.some((j) => typeof next[j] === "number");
+    // Also accept label-in-first-text-col + numbers in the others (Role | 150 | 40)
+    if (numericUnderHeader || textIdx.slice(1).some((j) => typeof next[j] === "number")) return i;
+  }
+  return rows.findIndex(nonEmpty);
 }
