@@ -18,9 +18,10 @@ import { join, dirname } from "node:path";
 import { promisify } from "node:util";
 import { macDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTree, captureScreen, getSelectedFiles } from "./mac-perception.mjs";
 import { activateApp, axClick, axSetValue, menuItem, observe as observeUi } from "./mac-actions.mjs";
+import { moveFileVerified, trashVerified } from "./fs-ops.mjs";
 
 const run = promisify(execFile);
-const HELPER_VERSION = "runtime-8";
+const HELPER_VERSION = "runtime-9";
 const WORKER_ID = "mac-helper-" + process.pid;
 const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null, reconnects: 0, coreDown: false };
 /** Real capability probe (mac doctor), cached; refreshed every 10 minutes so the matrix stays truthful. */
@@ -92,7 +93,7 @@ async function heartbeat(cfg) {
     RUNTIME.coreDown = true;                                    // B/C: network or Core restart — next tick reconnects
   }
 }
-const rank = (req) => (String(req || "").startsWith("mac_ping") ? 0 : String(req || "").startsWith("mac_chart:") ? 1 : 2);
+const rank = (req) => (/^mac_(ping|diag_test)/.test(String(req || "")) ? 0 : String(req || "").startsWith("mac_chart:") ? 1 : 2);
 async function claim(cfg, taskId) {
   const r = await core(cfg, "/control/claim", { taskId, workerId: WORKER_ID }).catch(() => null);
   return !!(r && r.claimed);
@@ -501,12 +502,21 @@ export async function buildAttachments(draftId, specs) {
   return files;
 }
 
-/** Phase 1B: did an outgoing attachment to this handle land in the Messages DB after `sinceApple`? */
-async function verifyOutgoingAttachment(handle, sinceApple) {
-  const rows = await sql(`SELECT m.ROWID AS id FROM message m JOIN handle h ON h.ROWID = m.handle_id
+/** Phase 1B: evidence for an outgoing attachment to `handle` after `sinceApple` (Apple epoch ns).
+ *  Returns null (no record) | {rowid, delivered:false} (outgoing recorded locally) | {rowid, delivered:true} (receipt). */
+async function outgoingEvidence(handle, sinceApple) {
+  const rows = await sql(`SELECT m.ROWID AS id, m.is_delivered AS delivered, m.is_sent AS sent, m.error AS err FROM message m JOIN handle h ON h.ROWID = m.handle_id
     WHERE m.is_from_me = 1 AND m.cache_has_attachments = 1 AND m.date > ${Math.floor(sinceApple)} AND h.id = '${String(handle).replace(/'/g, "''")}'
     ORDER BY m.ROWID DESC LIMIT 1`);
-  return Array.isArray(rows) && rows.length > 0;
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const r = rows[0];
+  return { rowid: r.id, delivered: Number(r.delivered) === 1, sent: Number(r.sent) === 1, error: Number(r.err) || 0 };
+}
+function sendWordingLocal(state, label) {
+  if (state === "delivered") return `✅ Delivered to ${label} (Messages delivery receipt).`;
+  if (state === "outgoing_observed") return `📤 Sent to ${label} — the outgoing message is recorded on this Mac; no delivery receipt yet.`;
+  if (state === "accepted") return `📤 Handed to Messages for ${label}, but I couldn't see the outgoing record yet — check the thread.`;
+  return `⚠️ Couldn't send to ${label}.`;
 }
 
 export async function sendIMessageFile(handle, path) {
@@ -585,19 +595,17 @@ export async function runControlStep(step) {
     case "observe": { const o = await observeUi(osaText); return `observed: ${JSON.stringify(o)}`; }
     case "open_url": { if (!/^https?:\/\//.test(String(p.url || ""))) return "refused: bad url"; await run("/usr/bin/open", ["-a", "Google Chrome", String(p.url)], { timeout: 15_000 }).catch(() => run("/usr/bin/open", [String(p.url)], { timeout: 15_000 })); await new Promise((r) => setTimeout(r, 2500)); return "opened url in Chrome"; }
     case "open_path": { const f = expandHome(String(p.path || "")); if (!f.startsWith(homedir())) return "refused"; await run("/usr/bin/open", [f], { timeout: 15_000 }); return "opened"; }
-    case "move_file": {   // Phase 1B: verify resulting state, not the copy call
+    case "move_file": {   // Phase 1B: verified by resulting state (fs-ops.mjs)
       const a = expandHome(String(p.from || "")), b = expandHome(String(p.to || ""));
       if (!a.startsWith(homedir()) || !b.startsWith(homedir())) return "refused";
-      if (!existsSync(a)) return `error: source does not exist: ${a}`;
-      const size = statSync(a).size; copyFileSync(a, b); rmSync(a);
-      const ok = existsSync(b) && statSync(b).size === size && !existsSync(a);
-      return ok ? `verified: moved ${size} bytes to ${b}; source gone` : `error: move not verified (dest exists=${existsSync(b)}, size match=${existsSync(b) && statSync(b).size === size}, source gone=${!existsSync(a)})`;
+      const r = await moveFileVerified(a, b, { overwrite: p.overwrite === true });
+      return `${r.verdict}: ${r.reason}${r.dest ? ` -> ${r.dest}` : ""}`;
     }
     case "trash_file": {
       const f = expandHome(String(p.path || "")); if (!f.startsWith(homedir()) || EXCLUDED_PATH.some((r) => r.test(f))) return "refused";
-      if (!existsSync(f)) return `error: path does not exist: ${f}`;
-      await osa(["on run a", 'tell application "Finder" to delete (POSIX file (item 1 of a) as alias)', "end run"], [f]);
-      return existsSync(f) ? "error: trash not verified — file still present" : `verified: trashed ${f}`;
+      const r = await trashVerified(f, { trashDir: join(homedir(), ".Trash"),
+        trashFn: (x) => osa(["on run a", 'tell application "Finder" to delete (POSIX file (item 1 of a) as alias)', "end run"], [x]) });
+      return `${r.verdict}: ${r.reason}`;
     }
     case "run": { const out = await run("/bin/zsh", ["-lc", String(p.cmd || "")], { timeout: 120_000, maxBuffer: 8 * 1024 * 1024 }).catch((e) => ({ stdout: "", stderr: String(e.message) })); return (out.stdout + (out.stderr ? `\n[stderr] ${out.stderr}` : "")).slice(0, 4000) || "(no output)"; }
     default: return `unknown kind ${step.kind}`;
@@ -807,7 +815,7 @@ async function tick(cfg, state) {
     if (self.has(h)) {
       if (text.startsWith(DRAFT_PREFIX)) continue;
       if (wasRecentlySent(text)) { log("skip self-echo of our reply", { text: text.slice(0, 40) }); continue; }
-      commands.push({ text, guid: r.guid });
+      commands.push({ text, guid: r.guid, rowid: r.id ?? r.ROWID ?? null });
       continue;
     }
     if (allowed.has(h)) contactMsgs.push(toMsg(r, false));
@@ -873,7 +881,7 @@ async function tick(cfg, state) {
       await core(cfg, "/interaction/finish", { guid: cmd.guid, ok: true }).catch(() => {});
     }
     // "send <contact>": forward the recent chart artifact to an allow-listed contact.
-    const sendM = text.trim().match(/^send\s+(.+)$/i);
+    const sendM = text.trim().match(/^send\s+(?:(?:it|that|this|the (?:last |latest )?\w+)\s+)?(?:to\s+)?(.+?)(?:\s+again)?[.!]?$/i);
     if (sendM) {
       const label = sendM[1].trim().toLowerCase();
       const contact = cfg.contacts.find((c) => c.label.toLowerCase() === label);
@@ -882,18 +890,39 @@ async function tick(cfg, state) {
       const art = await core(cfg, "/artifact/recent", { conversation: "self" }).catch(() => null);
       const path = art && art.artifact && existsSync(art.artifact.storageRef) ? art.artifact.storageRef : null;
       if (!path) { await sendIMessage(cfg.selfHandles[0], "I don't have anything recent to send. Ask me to make or find something first."); continue; }
-      // Phase 1B: exactly-once (claim before send) + delivery verified in the Messages DB afterwards.
-      const claim = await core(cfg, "/artifact/send-claim", { id: art.artifact.id, to: contact.handle }).catch((e) => ({ claim: false, error: String(e?.message ?? e) }));
-      if (!claim.claim) { await sendIMessage(cfg.selfHandles[0], `Already sent that to ${contact.label} (not sending twice).`); continue; }
-      const sinceApple = (Date.now() / 1000 - 978307200) * 1e9;
+      // Phase 1B (corrected): idempotency = THIS explicit request (its message guid) × op × artifact × recipient.
+      // A replay of the same message never sends twice; "send it to Santiago again" is a new message → new action.
+      const requestRef = cmd.guid || `self-row-${cmd.rowid ?? Date.now()}`;
+      const claim = await core(cfg, "/action/claim", { requestRef, operation: "send_artifact", artifactId: art.artifact.id, recipient: contact.handle })
+        .catch((e) => ({ decision: "error", error: String(e?.message ?? e) }));
+      if (claim.decision === "already_done" || claim.decision === "in_flight") { log("send suppressed (same request replayed)", { decision: claim.decision, requestRef }); continue; }
+      if (claim.decision === "exhausted" || claim.decision === "error") { await sendIMessage(cfg.selfHandles[0], `⚠️ Couldn't send to ${contact.label} (${claim.decision}).`); continue; }
+      const sinceApple = Math.floor(((claim.decision === "reconcile" ? new Date(claim.requestedAt).getTime() : Date.now()) / 1000 - 978307200 - 5) * 1e9);
+      if (claim.decision === "reconcile") {
+        // Outcome of an earlier attempt is unknown (crash/restart mid-send): look for evidence BEFORE resending.
+        const ev = await outgoingEvidence(contact.handle, sinceApple).catch(() => null);
+        if (ev) { const st = ev.delivered ? "delivered" : "outgoing_observed"; await core(cfg, "/action/report", { actionId: claim.actionId, state: st, evidence: ev }).catch(() => {});
+          await sendIMessage(cfg.selfHandles[0], sendWordingLocal(st, contact.label)); continue; }
+      }
       try {
         await sendIMessageFile(contact.handle, path);
+        await core(cfg, "/action/report", { actionId: claim.actionId, state: "accepted", evidence: { via: "osascript", path } }).catch(() => {});
+      } catch (e) {
+        await core(cfg, "/action/report", { actionId: claim.actionId, state: "failed", evidence: { error: String(e?.message ?? e).slice(0, 160) } }).catch(() => {});
+        await diag("artifact_send_failed", e?.message ?? e);
+        await sendIMessage(cfg.selfHandles[0], `⚠️ Couldn't send to ${contact.label}: ${String(e?.message ?? e).slice(0,120)}`); continue;
+      }
+      // Evidence ladder: outgoing record (local) → delivery receipt (is_delivered). Never claim more than observed.
+      let state = "accepted", ev = null;
+      for (let i = 0; i < 4 && state !== "delivered"; i++) {
         await new Promise((r) => setTimeout(r, 2500));
-        const verified = await verifyOutgoingAttachment(contact.handle, sinceApple).catch(() => false);
-        await core(cfg, "/artifact/sent", { id: art.artifact.id, verified }).catch(() => {});
-        await sendIMessage(cfg.selfHandles[0], verified ? `✅ Sent it to ${contact.label} (delivery confirmed in Messages).` : `⚠️ Asked Messages to send it to ${contact.label}, but I could not confirm the outgoing attachment yet — check the thread.`);
-        log("forwarded artifact to contact", { contact: contact.label, kind: art.artifact?.kind, verified });
-      } catch (e) { await diag("artifact_send_failed", e?.message ?? e); await sendIMessage(cfg.selfHandles[0], `⚠️ Couldn't send to ${contact.label}: ${String(e?.message ?? e).slice(0,120)}`); }
+        ev = await outgoingEvidence(contact.handle, sinceApple).catch(() => null);
+        if (ev) state = ev.delivered ? "delivered" : "outgoing_observed";
+      }
+      if (state !== "accepted") await core(cfg, "/action/report", { actionId: claim.actionId, state, evidence: ev }).catch(() => {});
+      if (art.artifact) await core(cfg, "/artifact/sent", { id: art.artifact.id }).catch(() => {});
+      await sendIMessage(cfg.selfHandles[0], sendWordingLocal(state, contact.label));
+      log("forwarded artifact", { contact: contact.label, state, requestRef });
       continue;
     }
     // "mac doctor": capability diagnostic.

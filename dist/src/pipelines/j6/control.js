@@ -1,5 +1,5 @@
 import { routeHint } from "../../mac/router.js";
-import { deriveContract, verifyCompletion } from "../../mac/acceptance.js";
+import { deriveContract, verifyCompletion, recoveryDecision, REJECTION_MARKER } from "../../mac/acceptance.js";
 import { appendEvent, withTransaction } from "../../db/index.js";
 import { BudgetBlockedError } from "../../llm/types.js";
 import { skillsFor } from "./skills.js";
@@ -177,25 +177,30 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
     }
     if (step.done) {
         // Phase 1A: the planner's `done` is a CLAIM. An independent verifier must pass first.
-        const taskRow = await pool.query(`SELECT acceptance, verify_attempts FROM control_task WHERE id = $1`, [taskId]);
+        const taskRow = await pool.query(`UPDATE control_task SET completion_claims = completion_claims + 1 WHERE id = $1 RETURNING acceptance, verification_rejections, last_claim_summary, created_at`, [taskId]);
         const contract = taskRow.rows[0]?.acceptance ?? deriveContract(task.request);
-        const attempts = Number(taskRow.rows[0]?.verify_attempts ?? 0);
-        const verdict = await verifyCompletion({ model: deps.model, graderModel: deps.graderModel ?? deps.plannerModel ?? deps.modelId }, contract, prior.map((x) => ({ kind: x.kind, summary: x.summary, result: x.result ?? null })), step.summary, screenshotB64);
-        await pool.query(`UPDATE control_task SET verification = $2::jsonb, verify_attempts = verify_attempts + 1, updated_at = now() WHERE id = $1`, [taskId, JSON.stringify({ ...verdict, at: new Date().toISOString() })]);
+        const trace = prior.map((x) => ({ kind: x.kind, summary: x.summary, result: x.result ?? null }));
+        const verdict = await verifyCompletion({ model: deps.model, graderModel: deps.graderModel ?? deps.plannerModel ?? deps.modelId }, contract, trace, step.summary, screenshotB64);
+        await pool.query(`UPDATE control_task SET verification = $2::jsonb, verify_attempts = verify_attempts + 1, last_claim_summary = $3, updated_at = now() WHERE id = $1`, [taskId, JSON.stringify({ ...verdict, at: new Date().toISOString() }), step.summary.slice(0, 500)]);
         if (!verdict.pass) {
-            // Phase 1C: a rejected completion claim is a first-class false_completion. Bounded retry, then fail honestly.
-            await appendEvent(pool, { actor: "j6", action: "false_completion", entityType: "control_task", entityId: taskId, after: { reason: verdict.reason, strategy: verdict.strategy, attempt: attempts + 1 } });
+            // A rejected claim = false_completion (never shown to Julian as success). Then BOUNDED RECOVERY, not failure.
+            const rejections = Number(taskRow.rows[0]?.verification_rejections ?? 0) + 1;
+            const decision = recoveryDecision({ rejectionsIncludingThis: rejections, trace, claimSummary: step.summary,
+                lastClaimSummary: taskRow.rows[0]?.last_claim_summary ?? null, taskStartedAtMs: new Date(taskRow.rows[0]?.created_at ?? Date.now()).getTime(), nowMs: Date.now() });
+            await appendEvent(pool, { actor: "j6", action: "false_completion", entityType: "control_task", entityId: taskId,
+                after: { reason: verdict.reason, strategy: verdict.strategy, rejection: rejections, decision: decision.action, terminalReason: decision.action === "terminal" ? decision.terminalReason : null, strategyChanged: decision.strategyChanged } });
+            await pool.query(`UPDATE control_task SET verification_rejections = $2, recovery_strategy_changed = recovery_strategy_changed OR $3 WHERE id = $1`, [taskId, rejections, decision.strategyChanged]);
             await pool.query(`UPDATE interaction SET false_completion = true, verification_attempts = verification_attempts + 1 WHERE $1 = ANY(task_ids)`, [taskId]).catch(() => { });
-            if (attempts + 1 >= 2) {
-                await pool.query(`UPDATE control_task SET status = 'failed', failure_class = 'false_completion', result_summary = $2, updated_at = now() WHERE id = $1`, [taskId, `Verifier rejected the completion twice: ${verdict.reason}`.slice(0, 1000)]);
+            if (decision.action === "terminal") {
+                await pool.query(`UPDATE control_task SET status = 'failed', failure_class = 'false_completion', terminal_reason = $3, result_summary = $2, updated_at = now() WHERE id = $1`, [taskId, `Not completed — the result could not be verified (${decision.terminalReason}): ${verdict.reason}`.slice(0, 1000), decision.terminalReason]);
                 const { completeForTask } = await import("../../concierge/interactions.js");
-                await completeForTask(pool, taskId, { ok: false, summary: `Not completed — verifier rejected: ${verdict.reason}` }).catch(() => { });
-                return { status: "failed", message: `verification failed: ${verdict.reason}` };
+                await completeForTask(pool, taskId, { ok: false, summary: `Not completed — could not verify the result (${decision.terminalReason.replace(/_/g, " ")}): ${verdict.reason}` }).catch(() => { });
+                return { status: "failed", message: `not verified: ${verdict.reason}` };
             }
-            // Send the planner back: the next step becomes a mandatory re-observation whose summary carries the
-            // verifier's reason (it appears in the step history the planner reads next turn).
+            await pool.query(`UPDATE control_task SET recovery_attempts = recovery_attempts + 1 WHERE id = $1`, [taskId]);
+            // Re-observe (persisted as a normal read step); its summary carries the reason the planner must address.
             step = { kind: "observe", params: {}, risk: "read", done: false,
-                summary: `VERIFIER REJECTED the claimed completion (${verdict.reason.slice(0, 160)}) — re-observe and continue; do not claim done until the expected outcome is visible` };
+                summary: `${REJECTION_MARKER} the claimed completion (${verdict.reason.slice(0, 160)}) — re-observe, diagnose why, and change approach if the last one did not work; claim done only when the expected outcome is observable` };
         }
         else {
             await pool.query(`UPDATE control_task SET verification = verification || '{"accepted":true}'::jsonb WHERE id = $1`, [taskId]).catch(() => { });
@@ -203,7 +208,7 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
             const detail = prior.filter((x) => x.result && x.result.trim()).map((x) => `- ${x.summary}: ${x.result.slice(0, 1200)}`).join("\n").slice(0, 20000);
             const { completeForTask } = await import("../../concierge/interactions.js");
             await completeForTask(pool, taskId, { ok: true, summary: step.summary, imageB64: screenshotB64 && screenshotB64.length < 8_000_000 ? screenshotB64 : null }).catch(() => { });
-            await pool.query(`UPDATE control_task SET status = 'done', result_summary = $2, result_detail = $3, result_image_b64 = COALESCE($4, result_image_b64), updated_at = now() WHERE id = $1`, [taskId, step.summary.slice(0, 1000), detail || null, screenshotB64 && screenshotB64.length < 8_000_000 ? screenshotB64 : null]);
+            await pool.query(`UPDATE control_task SET status = 'done', terminal_reason = 'verified', result_summary = $2, result_detail = $3, result_image_b64 = COALESCE($4, result_image_b64), updated_at = now() WHERE id = $1`, [taskId, step.summary.slice(0, 1000), detail || null, screenshotB64 && screenshotB64.length < 8_000_000 ? screenshotB64 : null]);
             await appendEvent(pool, { actor: "j6", action: "control_task_done", entityType: "control_task", entityId: taskId, after: { summary: step.summary } });
             return task.requester ? { status: "done", message: step.summary, requester: task.requester } : { status: "done", message: step.summary };
         }

@@ -13,10 +13,10 @@ const pool = url ? createPool(url) : undefined;
 
 class Script {
   i = 0;
-  constructor(public steps: object[]) {}
+  constructor(public steps: Array<object | string>) {}
   async complete(req: ModelRequest): Promise<ModelResult> {
     const body = this.steps[Math.min(this.i++, this.steps.length - 1)];
-    return { text: JSON.stringify(body), model: req.model, stopReason: "end_turn", costUsd: 0.01, retries: 0, latencyMs: 1,
+    return { text: typeof body === "string" ? body : JSON.stringify(body), model: req.model, stopReason: "end_turn", costUsd: 0.01, retries: 0, latencyMs: 1,
       usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } };
   }
 }
@@ -32,6 +32,7 @@ describe.skipIf(!pool)("J6 control lifecycle", () => {
       { kind: "open_url", params: { url: "https://drive.google.com/drive/search?q=x" }, risk: "write", summary: "Open Drive search" },
       { kind: "click", params: { x: 1, y: 1 }, risk: "write", summary: "Enviar el archivo a Santiago" },
       { kind: "done", summary: "Sent" },
+      "PASS: the trace shows Drive opened and the approved send step ran",          // independent verifier (Phase 1)
     ]);
     const d = deps(model);
 
@@ -116,6 +117,7 @@ describe.skipIf(!pool)("J6 control lifecycle", () => {
       { kind: "screenshot", params: {}, risk: "read", summary: "look" },
       { kind: "read_file", params: { path: "~/x.csv" }, risk: "read", summary: "read the file" },
       { kind: "done", summary: "Utilization is 72% vs 80% target" },
+      "PASS: the read step returned the utilization figures the summary reports",
     ]);
     const d = deps(model);
     const a = await planNext(d, task.id, "s"); await recordRun(pool!, a.step!.id, true, "screen");
@@ -138,5 +140,42 @@ describe.skipIf(!pool)("J6 control lifecycle", () => {
     expect(r!.imageB64).toBe(tinyPng);
     await setResultImage(pool!, task.id, "replacement");
     expect((await getTaskResult(pool!, task.code))!.imageB64).toBe("replacement");
+  });
+
+  // ---- J6 bounded recovery through independent verification (ADR-072.2) ----
+  const obs = (v: string) => `observed: ${JSON.stringify({ ok: true, app: "TextEdit", window: "Untitled", focusedRole: "AXTextArea", focusedTitle: "", focusedValue: v })}`;
+  const run = async (d: ControlDeps, taskId: string, r: Awaited<ReturnType<typeof planNext>>, result: string) => {
+    if (r.status === "await_approval") await decideStep(pool!, r.step!.code, true);
+    await recordRun(pool!, r.step!.id, true, result);
+  };
+
+  it("false claim → still wrong → replanned → third verification passes ⇒ SUCCESS (not failure)", async () => {
+    const task = await createTask(pool!, 'In TextEdit, type "hello world"', "chat");
+    const d = deps(new Script([
+      { kind: "observe", params: {}, risk: "read", summary: "Look at TextEdit" },
+      { kind: "done", summary: "Typed hello world" },                                                         // claim 1 (false)
+      { kind: "ax_set_value", params: { app: "TextEdit", value: "hello world" }, risk: "write", summary: "Set the text directly instead of typing" },
+      { kind: "done", summary: "Fixed the text" },                                                            // claim 2 (not yet observed)
+      { kind: "done", summary: "Fixed the text" },                                                            // claim 3 (observed correct)
+    ]));
+    let r = await planNext(d, task.id, "s"); await run(d, task.id, r, obs("hello wrld"));
+    r = await planNext(d, task.id, "s"); expect(r.status).toBe("run_read"); expect(r.step!.kind).toBe("observe");   // rejected → re-observe
+    await run(d, task.id, r, obs("hello wrld"));                                                                       // second observation still wrong
+    r = await planNext(d, task.id, "s"); await run(d, task.id, r, "verified: set \"AXTextArea\" = \"hello world\" (read back OK)");
+    r = await planNext(d, task.id, "s"); expect(r.status).toBe("run_read");                                            // claim 2 rejected (stale observation)
+    await run(d, task.id, r, obs("hello world"));
+    r = await planNext(d, task.id, "s"); expect(r.status).toBe("done");                                                // claim 3 verified
+    const row = (await pool!.query(`SELECT status, terminal_reason, completion_claims, verification_rejections, recovery_attempts, recovery_strategy_changed FROM control_task WHERE id = $1`, [task.id])).rows[0];
+    expect(row).toMatchObject({ status: "done", terminal_reason: "verified", completion_claims: 3, verification_rejections: 2, recovery_attempts: 2, recovery_strategy_changed: true });
+  });
+
+  it("identical completion claim with no new evidence → loop guard ends the task honestly (no false success)", async () => {
+    const task = await createTask(pool!, 'In TextEdit, type "abc"', "chat");
+    const d = deps(new Script([{ kind: "observe", params: {}, risk: "read", summary: "Look" }, { kind: "done", summary: "Done" }, { kind: "done", summary: "Done" }]));
+    let r = await planNext(d, task.id, "s"); await run(d, task.id, r, obs("xyz"));
+    r = await planNext(d, task.id, "s"); await run(d, task.id, r, obs("xyz"));
+    r = await planNext(d, task.id, "s"); expect(r.status).toBe("failed");
+    const row = (await pool!.query(`SELECT status, terminal_reason, failure_class FROM control_task WHERE id = $1`, [task.id])).rows[0];
+    expect(row).toMatchObject({ status: "failed", terminal_reason: "repeated_claim_without_new_evidence", failure_class: "false_completion" });
   });
 });

@@ -54,7 +54,7 @@ describe("/mac/* routing (M01 404 regression)", () => {
     expect(seen).toContain("/control/next");
   });
   it("dispatches /artifact/* and /interaction/* to the control handler (not 404)", async () => {
-    for (const path of ["/artifact/register", "/artifact/recent", "/interaction/claim"]) {
+    for (const path of ["/artifact/register", "/artifact/recent", "/interaction/claim", "/action/claim", "/action/report", "/mac/diag"]) {
       const r = await fetch(`${baseUrl}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
       expect(r.status).toBe(401);          // reached the handler, not a 404
       expect(seen).toContain(path);

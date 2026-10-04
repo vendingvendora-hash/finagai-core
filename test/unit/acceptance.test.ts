@@ -3,7 +3,7 @@
  * objective is not achieved; the verifier must reject (false_completion), never trust the planner's claim.
  */
 import { describe, it, expect } from "vitest";
-import { deriveContract, verifyCompletion, lastObservation } from "../../src/mac/acceptance.js";
+import { deriveContract, verifyCompletion, lastObservation, recoveryDecision, REJECTION_MARKER, RECOVERY_BUDGET } from "../../src/mac/acceptance.js";
 
 const noModel = { model: { complete: async () => { throw new Error("grader must not be needed"); } }, graderModel: "x" } as never;
 const obs = (o: object) => `observed: ${JSON.stringify({ ok: true, ...o })}`;
@@ -56,5 +56,26 @@ describe("genuine completions pass", () => {
   });
   it("lastObservation parses the latest observe JSON only", () => {
     expect(lastObservation([{ kind: "observe", summary: "", result: obs({ app: "A" }) }, { kind: "observe", summary: "", result: obs({ app: "B" }) }])!.app).toBe("B");
+  });
+});
+
+describe("bounded recovery policy (replaces 'two rejections → fail')", () => {
+  const t0 = Date.now();
+  it("first rejection → recover", () => {
+    expect(recoveryDecision({ rejectionsIncludingThis: 1, trace: [{ kind: "type", summary: "type" }], claimSummary: "done", lastClaimSummary: null, taskStartedAtMs: t0, nowMs: t0 }).action).toBe("recover");
+  });
+  it("identical claim with no new evidence since the last rejection → loop guard", () => {
+    const trace = [{ kind: "type", summary: "type" }, { kind: "observe", summary: `${REJECTION_MARKER} x` }];
+    const d = recoveryDecision({ rejectionsIncludingThis: 2, trace, claimSummary: "Typed it", lastClaimSummary: "typed it", taskStartedAtMs: t0, nowMs: t0 });
+    expect(d).toMatchObject({ action: "terminal", terminalReason: "repeated_claim_without_new_evidence" });
+  });
+  it("a materially different strategy after rejection → recover, strategyChanged=true", () => {
+    const trace = [{ kind: "type", summary: "type text" }, { kind: "observe", summary: `${REJECTION_MARKER} x` }, { kind: "ax_set_value", summary: "set value directly" }];
+    const d = recoveryDecision({ rejectionsIncludingThis: 2, trace, claimSummary: "Typed it", lastClaimSummary: "Typed it", taskStartedAtMs: t0, nowMs: t0 });
+    expect(d).toEqual({ action: "recover", strategyChanged: true });
+  });
+  it("budget: more than maxRejections → terminal recovery_budget_exhausted", () => {
+    const d = recoveryDecision({ rejectionsIncludingThis: RECOVERY_BUDGET.maxRejections + 1, trace: [{ kind: "x", summary: "new" }], claimSummary: "a", lastClaimSummary: "b", taskStartedAtMs: t0, nowMs: t0 });
+    expect(d).toMatchObject({ action: "terminal", terminalReason: "recovery_budget_exhausted" });
   });
 });

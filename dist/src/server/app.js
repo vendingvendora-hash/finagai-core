@@ -147,7 +147,7 @@ export function createHandler(cfg, info, log, deps) {
             void deps.concierge(req, res, path);
             return;
         }
-        if ((path.startsWith("/control/") || path.startsWith("/mac/") || path.startsWith("/artifact/") || path.startsWith("/interaction/")) && deps.control) {
+        if ((path.startsWith("/control/") || path.startsWith("/mac/") || path.startsWith("/artifact/") || path.startsWith("/interaction/") || path.startsWith("/action/")) && deps.control) {
             void deps.control(req, res, path);
             return;
         }

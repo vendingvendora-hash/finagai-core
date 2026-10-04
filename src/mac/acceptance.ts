@@ -99,3 +99,40 @@ Reply with exactly one line: PASS: <why the evidence shows it> or FAIL: <what is
     return { pass: false, strategy: s, graded: true, reason: `verifier unavailable: ${String((e as Error)?.message ?? e).slice(0, 120)}` };
   }
 }
+
+
+/**
+ * Bounded recovery (ADR-072.2). A verifier rejection means "not yet proven complete", not "impossible".
+ * The task continues — re-observe, diagnose, revise strategy — until acceptance passes, a genuine blocker or
+ * human need appears, or the deterministic budget is exhausted. An identical completion claim with NO new
+ * evidence since the last rejection trips the loop guard; a materially different strategy is allowed.
+ */
+export const RECOVERY_BUDGET = { maxRejections: 4, maxRecoverySteps: 24, maxWallMs: 15 * 60_000 } as const;
+export const REJECTION_MARKER = "VERIFIER REJECTED";
+
+export interface TraceStep { kind: string; summary: string }
+export type RecoveryDecision =
+  | { action: "recover"; strategyChanged: boolean }
+  | { action: "terminal"; terminalReason: "repeated_claim_without_new_evidence" | "recovery_budget_exhausted" | "recovery_time_exhausted" | "recovery_steps_exhausted"; strategyChanged: boolean };
+
+const sig = (t: TraceStep) => `${t.kind}|${t.summary}`.toLowerCase().replace(/\s+/g, " ").trim();
+
+export function recoveryDecision(input: {
+  rejectionsIncludingThis: number; trace: TraceStep[]; claimSummary: string; lastClaimSummary: string | null; taskStartedAtMs: number; nowMs: number;
+}): RecoveryDecision {
+  const markers = input.trace.map((t, i) => (t.summary.startsWith(REJECTION_MARKER) ? i : -1)).filter((i) => i >= 0);
+  const lastM = markers.length ? markers[markers.length - 1]! : -1;
+  const prevM = markers.length > 1 ? markers[markers.length - 2]! : -1;
+  const after = lastM >= 0 ? input.trace.slice(lastM + 1) : [];
+  const before = lastM >= 0 ? input.trace.slice(prevM + 1, lastM) : input.trace;
+  const beforeSigs = new Set(before.map(sig));
+  const strategyChanged = after.some((t) => !beforeSigs.has(sig(t)));
+  const stepsSinceFirst = markers.length ? input.trace.length - markers[0]! : 0;
+
+  if (lastM >= 0 && after.length === 0 && input.lastClaimSummary != null && input.claimSummary.trim().toLowerCase() === input.lastClaimSummary.trim().toLowerCase())
+    return { action: "terminal", terminalReason: "repeated_claim_without_new_evidence", strategyChanged };
+  if (input.rejectionsIncludingThis > RECOVERY_BUDGET.maxRejections) return { action: "terminal", terminalReason: "recovery_budget_exhausted", strategyChanged };
+  if (input.nowMs - input.taskStartedAtMs > RECOVERY_BUDGET.maxWallMs && markers.length) return { action: "terminal", terminalReason: "recovery_time_exhausted", strategyChanged };
+  if (stepsSinceFirst > RECOVERY_BUDGET.maxRecoverySteps) return { action: "terminal", terminalReason: "recovery_steps_exhausted", strategyChanged };
+  return { action: "recover", strategyChanged };
+}

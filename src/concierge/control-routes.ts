@@ -13,6 +13,7 @@ import { registerArtifact, resolveRecentArtifact, markArtifactSent, claimInbound
 import { appendEvent } from "../db/index.js";
 import { recordHeartbeat, claimTask, taskProgress, macStatus, workerMayComplete, recordSuccess, sweepStaleTasks } from "../mac/runtime.js";
 import { completeForTask, setState as setInteractionState } from "./interactions.js";
+import { claimAction, reportAction, type ActionState } from "./actions.js";
 import { saveContext } from "../mac/context.js";
 
 const MAX_BODY = 24 * 1024 * 1024; // screenshots + perception
@@ -63,7 +64,7 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         const r = await deps.pool.query(`SELECT id, code, request FROM control_task WHERE status = 'active'
           AND (claimed_at IS NULL OR lease_until < now())
           AND NOT EXISTS (SELECT 1 FROM control_step s WHERE s.task_id = control_task.id AND s.status IN ('proposed','running'))
-          ORDER BY (CASE WHEN request LIKE 'mac_ping%' THEN 0 WHEN request LIKE 'mac_chart:%' THEN 1 ELSE 2 END), created_at DESC LIMIT 5`);
+          ORDER BY (CASE WHEN request LIKE 'mac_ping%' OR request LIKE 'mac_diag_test%' THEN 0 WHEN request LIKE 'mac_chart:%' THEN 1 ELSE 2 END), created_at DESC LIMIT 5`);
         return json(res, 200, { tasks: r.rows });
       }
       if (path === "/control/next") {
@@ -186,19 +187,21 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         const a = await resolveRecentArtifact(deps.pool, opts);
         return json(res, 200, { artifact: a });
       }
-      if (path === "/artifact/send-claim") {
-        // Phase 1B: exactly-once send. Second claim for the same artifact+recipient within 24h is refused.
-        if (typeof body.id !== "string" || typeof body.to !== "string") return json(res, 400, { error: "id and to required" });
-        const r = await deps.pool.query(
-          `UPDATE artifact SET send_claimed_at = now(), sent_to = $2, state = 'sending'
-             WHERE id = $1 AND NOT (state IN ('sending','sent') AND sent_to = $2 AND coalesce(sent_at, send_claimed_at) > now() - interval '24 hours')
-             RETURNING id`, [body.id, body.to]);
-        if (!r.rowCount) return json(res, 409, { error: "already_sent_or_sending", claim: false });
-        return json(res, 200, { claim: true });
+      if (path === "/action/claim") {
+        // Phase 1B (corrected): idempotency per logical action (request ref × op × artifact × recipient).
+        for (const k of ["requestRef", "operation", "artifactId", "recipient"]) if (typeof body[k] !== "string") return json(res, 400, { error: `${k} required` });
+        const d = await claimAction(deps.pool, { requestRef: body.requestRef as string, operation: body.operation as string, artifactId: body.artifactId as string, recipient: body.recipient as string });
+        return json(res, 200, { decision: d.decision, actionId: d.action.id, state: d.action.state, attempts: d.action.attempts, requestedAt: d.action.requested_at });
+      }
+      if (path === "/action/report") {
+        if (typeof body.actionId !== "string" || typeof body.state !== "string") return json(res, 400, { error: "actionId and state required" });
+        if (!["accepted", "outgoing_observed", "delivered", "failed"].includes(body.state as string)) return json(res, 400, { error: "bad state" });
+        const row = await reportAction(deps.pool, body.actionId as string, body.state as ActionState, (body.evidence && typeof body.evidence === "object") ? body.evidence as Record<string, unknown> : {});
+        return json(res, 200, { state: row.state });
       }
       if (path === "/artifact/sent") {
         if (typeof body.id !== "string") return json(res, 400, { error: "id required" });
-        await deps.pool.query(`UPDATE artifact SET state = 'sent', sent_at = now(), send_verified = $2 WHERE id = $1`, [body.id, body.verified === true]);
+        await markArtifactSent(deps.pool, body.id);
         return json(res, 200, { ok: true });
       }
       if (path === "/mac/chart-done") {

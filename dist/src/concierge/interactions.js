@@ -52,7 +52,9 @@ export async function completeForTask(pool, taskId, outcome) {
        failure_class = CASE WHEN $2 = 'failed' THEN COALESCE((SELECT failure_class FROM control_task WHERE id = $1), i.failure_class, 'failed') ELSE i.failure_class END,
        tool_calls = (SELECT count(*) FROM control_step s WHERE s.task_id = ANY(i.task_ids)),
        model_calls = (SELECT coalesce(sum(model_calls),0) FROM control_task t WHERE t.id = ANY(i.task_ids)),
-       verification_attempts = GREATEST(i.verification_attempts, (SELECT coalesce(sum(verify_attempts),0) FROM control_task t WHERE t.id = ANY(i.task_ids)))
+       verification_attempts = GREATEST(i.verification_attempts, (SELECT coalesce(sum(verify_attempts),0) FROM control_task t WHERE t.id = ANY(i.task_ids))),
+       recovery_attempts = (SELECT coalesce(sum(recovery_attempts),0) FROM control_task t WHERE t.id = ANY(i.task_ids)),
+       terminal_reason = (SELECT terminal_reason FROM control_task WHERE id = $1)
      WHERE $1 = ANY(task_ids) AND state NOT IN ('completed','failed','superseded')`, [taskId, outcome.ok ? "completed" : "failed", outcome.summary.slice(0, 1000), outcome.imageB64 ?? null, outcome.artifactId ?? null]);
 }
 /** Completed/failed interactions whose result has NOT yet reached this conversation. */
