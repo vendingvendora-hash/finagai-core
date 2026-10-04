@@ -86,3 +86,25 @@ export function detectSeries(sheets: Sheet[]): SeriesPick | null {
   }
   return best;
 }
+
+
+/**
+ * WO9 evidence: a compact, truthful description of what the reader actually saw. Attached to every chart
+ * failure so "no numeric data" is never a dead end — the model (or Julian) can see sheets, headers, how many
+ * numeric values each column had, and why candidate columns were rejected.
+ */
+export function describeWorkbook(sheets: Sheet[]): { sheets: Array<{ name: string; rows: number; headers: string[]; numericColumns: Array<{ header: string; count: number; distinct: number }>; emptyFormulaCells: number }> } {
+  const out = [] as Array<{ name: string; rows: number; headers: string[]; numericColumns: Array<{ header: string; count: number; distinct: number }>; emptyFormulaCells: number }>;
+  for (const sh of sheets) {
+    const header = (sh.rows[0] ?? []).map((c) => (c == null ? "" : String(c)));
+    const body = sh.rows.slice(1);
+    const width = Math.max(header.length, ...body.map((r) => r.length), 0);
+    const numericColumns: Array<{ header: string; count: number; distinct: number }> = [];
+    for (let c = 0; c < width; c++) {
+      const vals = body.map((r) => r[c]).filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+      if (vals.length >= 2) numericColumns.push({ header: (header[c] ?? "").trim() || `(col ${c + 1}, no header)`, count: vals.length, distinct: new Set(vals).size });
+    }
+    out.push({ name: sh.name, rows: body.length, headers: header.filter(Boolean).slice(0, 20), numericColumns, emptyFormulaCells: 0 });
+  }
+  return { sheets: out };
+}

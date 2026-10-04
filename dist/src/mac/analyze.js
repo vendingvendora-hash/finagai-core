@@ -89,4 +89,25 @@ export function detectSeries(sheets) {
     }
     return best;
 }
+/**
+ * WO9 evidence: a compact, truthful description of what the reader actually saw. Attached to every chart
+ * failure so "no numeric data" is never a dead end — the model (or Julian) can see sheets, headers, how many
+ * numeric values each column had, and why candidate columns were rejected.
+ */
+export function describeWorkbook(sheets) {
+    const out = [];
+    for (const sh of sheets) {
+        const header = (sh.rows[0] ?? []).map((c) => (c == null ? "" : String(c)));
+        const body = sh.rows.slice(1);
+        const width = Math.max(header.length, ...body.map((r) => r.length), 0);
+        const numericColumns = [];
+        for (let c = 0; c < width; c++) {
+            const vals = body.map((r) => r[c]).filter((v) => typeof v === "number" && Number.isFinite(v));
+            if (vals.length >= 2)
+                numericColumns.push({ header: (header[c] ?? "").trim() || `(col ${c + 1}, no header)`, count: vals.length, distinct: new Set(vals).size });
+        }
+        out.push({ name: sh.name, rows: body.length, headers: header.filter(Boolean).slice(0, 20), numericColumns, emptyFormulaCells: 0 });
+    }
+    return { sheets: out };
+}
 //# sourceMappingURL=analyze.js.map

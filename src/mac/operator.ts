@@ -7,7 +7,7 @@
  * precise reason if any check fails (no silent "I found the file" dead-ends).
  */
 import { readWorkbook } from "./xlsx.js";
-import { detectSeries, type SeriesPick } from "./analyze.js";
+import { describeWorkbook, detectSeries, type SeriesPick } from "./analyze.js";
 import { seriesToSvg } from "./chart.js";
 
 export interface Candidate { path: string; name: string; size: number; mtimeMs: number }
@@ -20,6 +20,7 @@ export interface M01Result {
   pick?: Pick<SeriesPick, "sheet" | "labelColumn" | "valueColumn" | "isTimeLike" | "reason"> & { points: number };
   svg?: string;                       // the chart to rasterize+return
   title?: string;
+  inspection?: ReturnType<typeof describeWorkbook>;   // WO9 evidence on failure
   message: string;
 }
 
@@ -59,8 +60,13 @@ export function analyzeWorkbookToChart(chosen: Candidate, bytes: Buffer, request
 
   // TIME-SERIES / MEASURE DETECTION
   const pick = detectSeries(sheets);
-  if (!add("detect_series", !!pick && pick.values.length >= 2, pick ? pick.reason : "no numeric series with >=2 points"))
-    return { ok: false, stages, chosen, message: "No numeric data suitable for a chart was found. The workbook may have no measurable columns." };
+  if (!add("detect_series", !!pick && pick.values.length >= 2, pick ? pick.reason : "no numeric series with >=2 points")) {
+    // WO9: a failure must carry evidence. Say exactly what was seen so the next step is informed, not a guess.
+    const inspection = describeWorkbook(sheets);
+    const seen = inspection.sheets.map((sh) => `${sh.name}: ${sh.rows} rows; headers [${sh.headers.join(", ")}]; numeric columns ${sh.numericColumns.map((c) => `${c.header}(${c.count} values, ${c.distinct} distinct)`).join(", ") || "none"}`).join(" | ");
+    return { ok: false, stages, chosen, inspection,
+      message: `No chartable series found in ${chosen.name}. What I saw — ${seen}. If one of these is the column you want, say "chart <column> from ${chosen.name.replace(/\.(xlsx|xlsm|xls)$/i, "")}".` };
+  }
 
   // VERIFY (ADR-065): tool completion is not task completion. Reject a degenerate series —
   // a near-constant column, a pure row-index sequence, or one that is mostly blank/zero —
@@ -79,8 +85,12 @@ export function analyzeWorkbookToChart(chosen: Candidate, bytes: Buffer, request
   if (!add("verify", !degenerate, degenerate
       ? `rejected "${pick!.valueColumn}": ${indexLike ? "looks like a row index (1,2,3…)" : distinct <= 1 ? "near-constant" : "mostly blank/zero"}`
       : `"${pick!.valueColumn}" has ${distinct} distinct values over ${vals.length} points`))
-    return { ok: false, stages, chosen,
-      message: `The clearest numeric column ("${pick!.valueColumn}") looks like a row index or blank template rows, not a real measure. Tell me which column to plot (e.g. a rate, hours, or cost field) and I'll chart that.` };
+    {
+      const inspection = describeWorkbook(sheets);
+      const cols = inspection.sheets.flatMap((sh) => sh.numericColumns.filter((c) => c.distinct > 2 && !/^\(col/.test(c.header)).map((c) => `${c.header} (${sh.name})`));
+      return { ok: false, stages, chosen, inspection,
+        message: `The clearest numeric column ("${pick!.valueColumn}") looks like a row index or blank template rows, not a real measure.${cols.length ? ` Other numeric columns I can chart: ${cols.join(", ")}. Say "chart <column> from ${chosen.name.replace(/\.(xlsx|xlsm|xls)$/i, "")}".` : " The other columns are empty — this looks like an unfilled template."}` };
+    }
 
   // CHART (data-driven; trendline when time-like, bar otherwise)
   const fileTitle = chosen.name.replace(/\.(xlsx|xlsm|xls)$/i, "");
