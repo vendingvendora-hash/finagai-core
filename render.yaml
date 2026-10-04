@@ -31,7 +31,7 @@ services:
     buildCommand: npm ci --omit=dev
     startCommand: node dist/src/server/index.js
     healthCheckPath: /health
-    autoDeploy: true
+    autoDeploy: false   # ADR-071: releases are triggered by .github/workflows/release.yml after migrations
     envVars:
       - fromGroup: finagai-core
 

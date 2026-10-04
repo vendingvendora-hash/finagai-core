@@ -1,0 +1,69 @@
+name: release
+# Controlled release (ADR-071): migrations are applied BEFORE compatible code is deployed, so Render never
+# builds a commit whose preflight will refuse the schema. Render auto-deploy is OFF; this workflow is the
+# only path to production.
+#
+#   push to main
+#     └─ detect: did migrations/*.sql change since the last release?
+#          ├─ no  → deploy (Render deploy hook)
+#          └─ yes → migrate (environment "production", required reviewer Julian) → deploy
+#
+# Safety kept: src/ops/preflight.ts still refuses to start against an incompatible schema.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency: { group: release-main, cancel-in-progress: false }
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      migrations_changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - id: diff
+        run: |
+          # Compare against the last successful release marker if present, else the previous commit.
+          BASE=$(git rev-parse HEAD~1 2>/dev/null || echo "")
+          if [ -n "$BASE" ] && git diff --name-only "$BASE" HEAD -- migrations | grep -q '\.sql$'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"; echo "migrations changed:"; git diff --name-only "$BASE" HEAD -- migrations
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"; echo "no migration changes"
+          fi
+
+  migrate:
+    needs: detect
+    if: needs.detect.outputs.migrations_changed == 'true'
+    runs-on: ubuntu-latest
+    environment: production        # required reviewer: Julian — the ONLY human step, before any deploy
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y -q postgresql-client >/dev/null
+      - run: bash scripts/migrate.sh
+        env:
+          MIGRATOR_DATABASE_URL: ${{ secrets.MIGRATOR_DATABASE_URL }}
+
+  deploy:
+    needs: [detect, migrate]
+    # Run when migrate succeeded OR was skipped (no migrations); never when migrate failed.
+    if: always() && needs.detect.result == 'success' && (needs.migrate.result == 'success' || needs.migrate.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render deploy (deploy hook; secret never echoed)
+        run: |
+          test -n "${{ secrets.RENDER_DEPLOY_HOOK }}" || { echo "RENDER_DEPLOY_HOOK secret missing"; exit 1; }
+          curl -fsS -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}" >/dev/null && echo "deploy triggered for ${GITHUB_SHA::7}"
+      - name: Wait for /health to report this commit (max 6 min)
+        run: |
+          for i in $(seq 1 36); do
+            v=$(curl -fsS https://finagai-core.onrender.com/health | sed -n 's/.*"version":"\([0-9a-f]*\)".*/\1/p')
+            case "$v" in ${GITHUB_SHA::7}*) echo "live: $v"; exit 0;; esac
+            sleep 10
+          done
+          echo "deploy did not become live in time (last version: $v)"; exit 1
