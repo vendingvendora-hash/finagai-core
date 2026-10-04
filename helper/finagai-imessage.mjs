@@ -20,7 +20,7 @@ import { macDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTr
 import { activateApp, axClick, axSetValue, menuItem, observe as observeUi } from "./mac-actions.mjs";
 
 const run = promisify(execFile);
-const HELPER_VERSION = "runtime-7";
+const HELPER_VERSION = "runtime-8";
 const WORKER_ID = "mac-helper-" + process.pid;
 const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null, reconnects: 0, coreDown: false };
 /** Real capability probe (mac doctor), cached; refreshed every 10 minutes so the matrix stays truthful. */
@@ -501,6 +501,14 @@ export async function buildAttachments(draftId, specs) {
   return files;
 }
 
+/** Phase 1B: did an outgoing attachment to this handle land in the Messages DB after `sinceApple`? */
+async function verifyOutgoingAttachment(handle, sinceApple) {
+  const rows = await sql(`SELECT m.ROWID AS id FROM message m JOIN handle h ON h.ROWID = m.handle_id
+    WHERE m.is_from_me = 1 AND m.cache_has_attachments = 1 AND m.date > ${Math.floor(sinceApple)} AND h.id = '${String(handle).replace(/'/g, "''")}'
+    ORDER BY m.ROWID DESC LIMIT 1`);
+  return Array.isArray(rows) && rows.length > 0;
+}
+
 export async function sendIMessageFile(handle, path) {
   const script = ["on run argv", "set theFile to POSIX file (item 1 of argv)", "set theHandle to item 2 of argv",
     'tell application "Messages"', "set svc to 1st account whose service type = iMessage", "send theFile to participant theHandle of svc", "end tell", "end run"];
@@ -577,8 +585,20 @@ export async function runControlStep(step) {
     case "observe": { const o = await observeUi(osaText); return `observed: ${JSON.stringify(o)}`; }
     case "open_url": { if (!/^https?:\/\//.test(String(p.url || ""))) return "refused: bad url"; await run("/usr/bin/open", ["-a", "Google Chrome", String(p.url)], { timeout: 15_000 }).catch(() => run("/usr/bin/open", [String(p.url)], { timeout: 15_000 })); await new Promise((r) => setTimeout(r, 2500)); return "opened url in Chrome"; }
     case "open_path": { const f = expandHome(String(p.path || "")); if (!f.startsWith(homedir())) return "refused"; await run("/usr/bin/open", [f], { timeout: 15_000 }); return "opened"; }
-    case "move_file": { const a = expandHome(String(p.from || "")), b = expandHome(String(p.to || "")); if (!a.startsWith(homedir()) || !b.startsWith(homedir())) return "refused"; copyFileSync(a, b); rmSync(a); return "moved"; }
-    case "trash_file": { const f = expandHome(String(p.path || "")); if (!f.startsWith(homedir()) || EXCLUDED_PATH.some((r) => r.test(f))) return "refused"; await osa(["on run a", 'tell application "Finder" to delete (POSIX file (item 1 of a) as alias)', "end run"], [f]); return "trashed"; }
+    case "move_file": {   // Phase 1B: verify resulting state, not the copy call
+      const a = expandHome(String(p.from || "")), b = expandHome(String(p.to || ""));
+      if (!a.startsWith(homedir()) || !b.startsWith(homedir())) return "refused";
+      if (!existsSync(a)) return `error: source does not exist: ${a}`;
+      const size = statSync(a).size; copyFileSync(a, b); rmSync(a);
+      const ok = existsSync(b) && statSync(b).size === size && !existsSync(a);
+      return ok ? `verified: moved ${size} bytes to ${b}; source gone` : `error: move not verified (dest exists=${existsSync(b)}, size match=${existsSync(b) && statSync(b).size === size}, source gone=${!existsSync(a)})`;
+    }
+    case "trash_file": {
+      const f = expandHome(String(p.path || "")); if (!f.startsWith(homedir()) || EXCLUDED_PATH.some((r) => r.test(f))) return "refused";
+      if (!existsSync(f)) return `error: path does not exist: ${f}`;
+      await osa(["on run a", 'tell application "Finder" to delete (POSIX file (item 1 of a) as alias)', "end run"], [f]);
+      return existsSync(f) ? "error: trash not verified — file still present" : `verified: trashed ${f}`;
+    }
     case "run": { const out = await run("/bin/zsh", ["-lc", String(p.cmd || "")], { timeout: 120_000, maxBuffer: 8 * 1024 * 1024 }).catch((e) => ({ stdout: "", stderr: String(e.message) })); return (out.stdout + (out.stderr ? `\n[stderr] ${out.stderr}` : "")).slice(0, 4000) || "(no output)"; }
     default: return `unknown kind ${step.kind}`;
   }
@@ -862,8 +882,18 @@ async function tick(cfg, state) {
       const art = await core(cfg, "/artifact/recent", { conversation: "self" }).catch(() => null);
       const path = art && art.artifact && existsSync(art.artifact.storageRef) ? art.artifact.storageRef : null;
       if (!path) { await sendIMessage(cfg.selfHandles[0], "I don't have anything recent to send. Ask me to make or find something first."); continue; }
-      try { await sendIMessageFile(contact.handle, path); await sendIMessage(cfg.selfHandles[0], `✅ Sent it to ${contact.label}.`); if (art.artifact) await core(cfg, "/artifact/sent", { id: art.artifact.id }).catch(()=>{}); log("forwarded artifact to contact", { contact: contact.label, kind: art.artifact?.kind }); }
-      catch (e) { await sendIMessage(cfg.selfHandles[0], `⚠️ Couldn't send to ${contact.label}: ${String(e?.message ?? e).slice(0,120)}`); }
+      // Phase 1B: exactly-once (claim before send) + delivery verified in the Messages DB afterwards.
+      const claim = await core(cfg, "/artifact/send-claim", { id: art.artifact.id, to: contact.handle }).catch((e) => ({ claim: false, error: String(e?.message ?? e) }));
+      if (!claim.claim) { await sendIMessage(cfg.selfHandles[0], `Already sent that to ${contact.label} (not sending twice).`); continue; }
+      const sinceApple = (Date.now() / 1000 - 978307200) * 1e9;
+      try {
+        await sendIMessageFile(contact.handle, path);
+        await new Promise((r) => setTimeout(r, 2500));
+        const verified = await verifyOutgoingAttachment(contact.handle, sinceApple).catch(() => false);
+        await core(cfg, "/artifact/sent", { id: art.artifact.id, verified }).catch(() => {});
+        await sendIMessage(cfg.selfHandles[0], verified ? `✅ Sent it to ${contact.label} (delivery confirmed in Messages).` : `⚠️ Asked Messages to send it to ${contact.label}, but I could not confirm the outgoing attachment yet — check the thread.`);
+        log("forwarded artifact to contact", { contact: contact.label, kind: art.artifact?.kind, verified });
+      } catch (e) { await diag("artifact_send_failed", e?.message ?? e); await sendIMessage(cfg.selfHandles[0], `⚠️ Couldn't send to ${contact.label}: ${String(e?.message ?? e).slice(0,120)}`); }
       continue;
     }
     // "mac doctor": capability diagnostic.

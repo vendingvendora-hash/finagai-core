@@ -186,8 +186,19 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         const a = await resolveRecentArtifact(deps.pool, opts);
         return json(res, 200, { artifact: a });
       }
+      if (path === "/artifact/send-claim") {
+        // Phase 1B: exactly-once send. Second claim for the same artifact+recipient within 24h is refused.
+        if (typeof body.id !== "string" || typeof body.to !== "string") return json(res, 400, { error: "id and to required" });
+        const r = await deps.pool.query(
+          `UPDATE artifact SET send_claimed_at = now(), sent_to = $2, state = 'sending'
+             WHERE id = $1 AND NOT (state IN ('sending','sent') AND sent_to = $2 AND coalesce(sent_at, send_claimed_at) > now() - interval '24 hours')
+             RETURNING id`, [body.id, body.to]);
+        if (!r.rowCount) return json(res, 409, { error: "already_sent_or_sending", claim: false });
+        return json(res, 200, { claim: true });
+      }
       if (path === "/artifact/sent") {
-        if (typeof body.id === "string") await markArtifactSent(deps.pool, body.id);
+        if (typeof body.id !== "string") return json(res, 400, { error: "id required" });
+        await deps.pool.query(`UPDATE artifact SET state = 'sent', sent_at = now(), send_verified = $2 WHERE id = $1`, [body.id, body.verified === true]);
         return json(res, 200, { ok: true });
       }
       if (path === "/mac/chart-done") {

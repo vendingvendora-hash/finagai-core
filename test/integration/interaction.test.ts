@@ -49,4 +49,17 @@ describe.skipIf(!pool)("Interaction reliability (ADR-061)", () => {
     await pool!.query(`UPDATE inbound_message SET claimed_at = now() - interval '10 minutes' WHERE guid = $1`, [guid]);
     expect((await claimInbound(pool!, guid, "self", 1000)).claim).toBe(true);   // recovered
   });
+
+  it("Phase 1B: an artifact can be claimed for sending to a recipient exactly once within 24h", async () => {
+    const a = await registerArtifact(pool!, { kind: "chart", storageRef: "/tmp/x.png", conversation: "self", summary: "t" } as never);
+    const claim = async () => pool!.query(`UPDATE artifact SET send_claimed_at = now(), sent_to = $2, state = 'sending'
+      WHERE id = $1 AND NOT (state IN ('sending','sent') AND sent_to = $2 AND coalesce(sent_at, send_claimed_at) > now() - interval '24 hours') RETURNING id`, [a.id, "+1555"]);
+    expect((await claim()).rowCount).toBe(1);
+    expect((await claim()).rowCount).toBe(0);                                  // second attempt refused
+    await pool!.query(`UPDATE artifact SET state = 'sent', sent_at = now(), send_verified = true WHERE id = $1`, [a.id]);
+    expect((await claim()).rowCount).toBe(0);                                  // still refused after sent
+    const other = await pool!.query(`UPDATE artifact SET send_claimed_at = now(), sent_to = $2, state = 'sending'
+      WHERE id = $1 AND NOT (state IN ('sending','sent') AND sent_to = $2 AND coalesce(sent_at, send_claimed_at) > now() - interval '24 hours') RETURNING id`, [a.id, "+1666"]);
+    expect(other.rowCount).toBe(1);                                            // a different recipient is a different send
+  });
 });

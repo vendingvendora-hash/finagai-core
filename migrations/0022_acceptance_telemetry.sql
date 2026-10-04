@@ -26,6 +26,15 @@ ALTER TABLE interaction
   ADD COLUMN resources_considered  jsonb,
   ADD COLUMN resources_used        jsonb;
 
+-- Phase 1B: "send artifact X to Y" must be attempted exactly once and its delivery verified.
+ALTER TABLE artifact DROP CONSTRAINT IF EXISTS artifact_state_check;
+ALTER TABLE artifact ADD CONSTRAINT artifact_state_check CHECK (state IN ('ready','sending','sent','expired'));
+ALTER TABLE artifact
+  ADD COLUMN sent_to        text,
+  ADD COLUMN send_claimed_at timestamptz,
+  ADD COLUMN sent_at        timestamptz,
+  ADD COLUMN send_verified  boolean;
+
 -- Queryable aggregates (Phase 1D). p50/p95 via percentile_cont; one row per day and task class.
 CREATE OR REPLACE VIEW interaction_metrics_daily AS
 SELECT date_trunc('day', created_at) AS day,
