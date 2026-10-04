@@ -10,6 +10,7 @@ import type http from "node:http";
 import { cancelTask, createTask, decideStep, getStep, getTaskResult, parseControlCommand, planNext, recordRun, setResultImage, type ControlDeps } from "../pipelines/j6/control.js";
 import { analyzeWorkbookToChart, rankCandidates, type Candidate } from "../mac/operator.js";
 import { registerArtifact, resolveRecentArtifact, markArtifactSent, claimInbound, finishInbound } from "./interaction.js";
+import { appendEvent } from "../db/index.js";
 import { recordHeartbeat, claimTask, taskProgress, macStatus, workerMayComplete, recordSuccess, sweepStaleTasks } from "../mac/runtime.js";
 import { completeForTask, setState as setInteractionState } from "./interactions.js";
 import { saveContext } from "../mac/context.js";
@@ -159,6 +160,12 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         const r = await getTaskResult(deps.pool, code);
         if (!r) return json(res, 404, { error: "no such task" });
         return json(res, 200, { status: r.status, summary: r.summary, hasImage: Boolean(r.imageB64) });
+      }
+      if (path === "/mac/diag") {
+        // Phase 1E: structured, sanitized helper diagnostics (no raw logs). Stored in the audit log.
+        const kind = String(body.kind ?? "unknown").slice(0, 60), detail = String(body.detail ?? "").replace(/Bearer\s+\S+/gi, "[token]").slice(0, 400);
+        await appendEvent(deps.pool, { actor: "system", action: "mac_diag", entityType: "mac_runtime", entityId: "primary", after: { kind, detail, taskId: typeof body.taskId === "string" ? body.taskId : null, helperVersion: typeof body.version === "string" ? body.version : null } });
+        return json(res, 200, { ok: true });
       }
       if (path === "/mac/status") {
         return json(res, 200, await macStatus(deps.pool));

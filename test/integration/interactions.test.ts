@@ -70,4 +70,21 @@ describe.skipIf(!pool)("Durable interactions (WO2 / ADR-067)", () => {
     expect(got.state).toBe("failed");
     expect(got.resultSummary).toContain("Spotlight");
   });
+
+  it("completing a task fills completed_at, tool/model counts, failure_class; the daily metrics view is queryable", async () => {
+    const { metricsSummary } = await import("../../src/concierge/interactions.js");
+    const msg = `in TextEdit type "x" ${Date.now()}`;
+    const ix = await openInteraction(pool!, { conversation: "chat", message: msg });
+    expect(ix.interaction).toBeDefined();
+    const t = await pool!.query<{ id: string }>(`INSERT INTO control_task (request, origin, model_calls, verify_attempts, failure_class) VALUES ($1, 'chat', 3, 1, 'false_completion') RETURNING id`, [msg]);
+    await linkTask(pool!, ix.interaction.id, t.rows[0]!.id);
+    await pool!.query(`INSERT INTO control_step (task_id, seq, kind, params, risk, summary, status) VALUES ($1, 1, 'observe', '{}', 'read', 'o', 'done'), ($1, 2, 'screenshot', '{}', 'read', 's', 'done')`, [t.rows[0]!.id]);
+    await completeForTask(pool!, t.rows[0]!.id, { ok: false, summary: "verifier rejected" });
+    const row = (await pool!.query(`SELECT task_class, failure_class, tool_calls, model_calls, verification_attempts, completed_at, acknowledged_at FROM interaction WHERE id = $1`, [ix.interaction.id])).rows[0];
+    expect(row.task_class).toBe("native-app"); expect(row.failure_class).toBe("false_completion");
+    expect(Number(row.tool_calls)).toBe(2); expect(Number(row.model_calls)).toBe(3); expect(Number(row.verification_attempts)).toBe(1);
+    expect(row.completed_at).not.toBeNull(); expect(row.acknowledged_at).not.toBeNull();
+    const m = await metricsSummary(pool!, 1);
+    expect(m.length).toBeGreaterThan(0); expect(m[0]).toHaveProperty("p95_complete_s");
+  });
 });

@@ -57,6 +57,12 @@ export async function workerMayComplete(pool: pg.Pool, taskId: string, workerId:
   return false;                                                     // a stale/other worker
 }
 
+/** Last helper diagnostics (Phase 1E), newest first. */
+export async function recentDiagnostics(pool: pg.Pool, n = 5): Promise<Array<{ at: string; kind: string; detail: string; taskId: string | null }>> {
+  const r = await pool.query(`SELECT at, after FROM event WHERE action = 'mac_diag' ORDER BY at DESC LIMIT $1`, [n]);
+  return r.rows.map((x: { at: Date; after: { kind: string; detail: string; taskId: string | null } }) => ({ at: new Date(x.at).toISOString(), kind: x.after.kind, detail: x.after.detail, taskId: x.after.taskId }));
+}
+
 export async function recordSuccess(pool: pg.Pool, taskId: string): Promise<void> {
   await pool.query(`UPDATE mac_runtime SET last_success_at = now(), last_success_code = (SELECT code FROM control_task WHERE id = $1) WHERE id = 'primary'`, [taskId]);
 }
@@ -132,6 +138,7 @@ export async function macStatus(pool: pg.Pool): Promise<Record<string, unknown>>
     reconnectCount: rt?.reconnectCount ?? 0, restartCount: rt?.restartCount ?? 0,
     lastSuccess: rt?.lastSuccessAt ? { at: rt.lastSuccessAt.toISOString(), taskCode: rt.lastSuccessCode } : null,
     runtimeStartedAt: rt?.startedAt?.toISOString() ?? null,
+    recentDiagnostics: await recentDiagnostics(pool, 5).catch(() => []),
     currentTask: t ? { code: Number(t.code), request: t.request, ...deriveLifecycle(t, rt, now), note: t.progress_note ?? null } : null,
     remedyIfOffline: online ? null :
       "The Finagai Mac runtime is not connected. On the Mac: `launchctl kickstart -k gui/$(id -u)/com.finagai.imessage` then `tail -5 ~/.finagai/imessage-helper.log` — it should log 'helper started' and heartbeats.",
@@ -148,11 +155,11 @@ export async function macStatus(pool: pg.Pool): Promise<Record<string, unknown>>
  */
 export async function sweepStaleTasks(pool: pg.Pool): Promise<{ abandoned: number; stalled: number }> {
   const a = await pool.query(
-    `UPDATE control_task SET status = 'failed', updated_at = now(),
+    `UPDATE control_task SET status = 'failed', failure_class = 'abandoned', updated_at = now(),
        result_summary = 'Abandoned: no Mac worker claimed this task within 30 minutes (runtime was offline or the task was superseded). Ask again and it will run now.'
      WHERE status = 'active' AND claimed_at IS NULL AND created_at < now() - interval '30 minutes' RETURNING id`);
   const b = await pool.query(
-    `UPDATE control_task SET status = 'failed', updated_at = now(),
+    `UPDATE control_task SET status = 'failed', failure_class = 'stalled', updated_at = now(),
        result_summary = 'Stalled: the Mac worker stopped reporting progress and the lease was not reclaimed within 10 minutes.'
      WHERE status = 'active' AND claimed_at IS NOT NULL AND lease_until < now() AND last_progress_at < now() - interval '10 minutes' RETURNING id`);
   const { completeForTask } = await import("../concierge/interactions.js");

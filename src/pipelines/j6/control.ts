@@ -12,6 +12,7 @@
  */
 import type pg from "pg";
 import { routeHint } from "../../mac/router.js";
+import { deriveContract, verifyCompletion, type AcceptanceContract } from "../../mac/acceptance.js";
 import { appendEvent, withTransaction } from "../../db/index.js";
 import type { MeteredModelClient } from "../../llm/metered.js";
 import { BudgetBlockedError, type ContentBlock } from "../../llm/types.js";
@@ -47,6 +48,8 @@ export interface ControlDeps {
   modelId: string;
   /** Stronger model for the planning loop (ADR-055); falls back to modelId. */
   plannerModel?: string;
+  /** Independent verifier model (Phase 1A); never the planner's word alone. */
+  graderModel?: string;
   /** Extended-thinking budget for the planner. */
   thinkingTokens?: number;
   autoApprove?: boolean;           // per Julian's choice for a task; still never covers irreversible kinds
@@ -124,8 +127,8 @@ export interface TaskView { id: string; code: number; status: string }
 export async function createTask(pool: pg.Pool, request: string, origin: "chat" | "imessage" | "contact", requester?: string): Promise<TaskView> {
   return withTransaction(pool, async (tx) => {
     const r = await tx.query<{ id: string; code: string }>(
-      `INSERT INTO control_task (request, origin, requester) VALUES ($1, $2, $3) RETURNING id, code`,
-      [request.slice(0, 4000), origin, requester ?? null]);
+      `INSERT INTO control_task (request, origin, requester, acceptance) VALUES ($1, $2, $3, $4::jsonb) RETURNING id, code`,
+      [request.slice(0, 4000), origin, requester ?? null, JSON.stringify(deriveContract(request))]);
     const row = r.rows[0]!;
     // The requester (a contact) can ASK; the task is still Julian's and only he approves steps.
     await appendEvent(tx, { actor: requester ? "j6" : "julian", action: "control_task_created", entityType: "control_task", entityId: row.id,
@@ -191,6 +194,7 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
     pipeline: "j6" as const, step: "plan", purpose: "concierge" as const, promptVersion: J6_PROMPT_VERSION,
     system: systemPrompt(now.toTimeString().slice(9), today, task.request), messages: [{ role: "user" as const, content }], maxTokens: 1200,
   };
+  await pool.query(`UPDATE control_task SET model_calls = model_calls + 1 WHERE id = $1`, [taskId]).catch(() => {});
   let step: Step | null;
   try {
     let r;
@@ -214,6 +218,31 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
   if (!step) { await setTaskStatus(pool, taskId, "failed"); return { status: "failed", message: "could not plan the next step" }; }
 
   if (step.done) {
+    // Phase 1A: the planner's `done` is a CLAIM. An independent verifier must pass first.
+    const taskRow = await pool.query<{ acceptance: AcceptanceContract | null; verify_attempts: number }>(`SELECT acceptance, verify_attempts FROM control_task WHERE id = $1`, [taskId]);
+    const contract = taskRow.rows[0]?.acceptance ?? deriveContract(task.request);
+    const attempts = Number(taskRow.rows[0]?.verify_attempts ?? 0);
+    const verdict = await verifyCompletion({ model: deps.model, graderModel: deps.graderModel ?? deps.plannerModel ?? deps.modelId }, contract,
+      prior.map((x) => ({ kind: x.kind, summary: x.summary, result: x.result ?? null })), step.summary, screenshotB64);
+    await pool.query(`UPDATE control_task SET verification = $2::jsonb, verify_attempts = verify_attempts + 1, updated_at = now() WHERE id = $1`,
+      [taskId, JSON.stringify({ ...verdict, at: new Date().toISOString() })]);
+    if (!verdict.pass) {
+      // Phase 1C: a rejected completion claim is a first-class false_completion. Bounded retry, then fail honestly.
+      await appendEvent(pool, { actor: "j6", action: "false_completion", entityType: "control_task", entityId: taskId, after: { reason: verdict.reason, strategy: verdict.strategy, attempt: attempts + 1 } });
+      await pool.query(`UPDATE interaction SET false_completion = true, verification_attempts = verification_attempts + 1 WHERE $1 = ANY(task_ids)`, [taskId]).catch(() => {});
+      if (attempts + 1 >= 2) {
+        await pool.query(`UPDATE control_task SET status = 'failed', failure_class = 'false_completion', result_summary = $2, updated_at = now() WHERE id = $1`,
+          [taskId, `Verifier rejected the completion twice: ${verdict.reason}`.slice(0, 1000)]);
+        const { completeForTask } = await import("../../concierge/interactions.js");
+        await completeForTask(pool, taskId, { ok: false, summary: `Not completed — verifier rejected: ${verdict.reason}` }).catch(() => {});
+        return { status: "failed", message: `verification failed: ${verdict.reason}` };
+      }
+      // Send the planner back: the next step becomes a mandatory re-observation whose summary carries the
+      // verifier's reason (it appears in the step history the planner reads next turn).
+      step = { kind: "observe", params: {}, risk: "read", done: false,
+        summary: `VERIFIER REJECTED the claimed completion (${verdict.reason.slice(0, 160)}) — re-observe and continue; do not claim done until the expected outcome is visible` };
+    } else {
+    await pool.query(`UPDATE control_task SET verification = verification || '{"accepted":true}'::jsonb WHERE id = $1`, [taskId]).catch(() => {});
     // Gather what the read steps found so the chat can read the answer (ADR-056).
     const detail = prior.filter((x) => x.result && x.result.trim()).map((x) => `- ${x.summary}: ${x.result!.slice(0, 1200)}`).join("\n").slice(0, 20000);
     const { completeForTask } = await import("../../concierge/interactions.js");
@@ -222,6 +251,7 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
       [taskId, step.summary.slice(0, 1000), detail || null, screenshotB64 && screenshotB64.length < 8_000_000 ? screenshotB64 : null]);
     await appendEvent(pool, { actor: "j6", action: "control_task_done", entityType: "control_task", entityId: taskId, after: { summary: step.summary } });
     return task.requester ? { status: "done", message: step.summary, requester: task.requester } : { status: "done", message: step.summary };
+    }
   }
   if (step.kind === "ask") { await setTaskStatus(pool, taskId, "waiting_approval"); return { status: "ask", message: step.question ?? step.summary }; }
 

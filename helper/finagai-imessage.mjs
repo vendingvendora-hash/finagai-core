@@ -20,7 +20,7 @@ import { macDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTr
 import { activateApp, axClick, axSetValue, menuItem, observe as observeUi } from "./mac-actions.mjs";
 
 const run = promisify(execFile);
-const HELPER_VERSION = "runtime-6";
+const HELPER_VERSION = "runtime-7";
 const WORKER_ID = "mac-helper-" + process.pid;
 const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null, reconnects: 0, coreDown: false };
 /** Real capability probe (mac doctor), cached; refreshed every 10 minutes so the matrix stays truthful. */
@@ -62,6 +62,14 @@ async function gatherContext(fm) {
   ctx.browser = tab.ok && tab.url ? { app: tab.app || "browser", url: tab.url, title: tab.title || "" } : null;
   return ctx;
 }
+/** Phase 1E: structured diagnostic to Core (sanitized, bounded). Never throws. */
+let DIAG_CFG = null;
+async function diag(kind, detail, taskId = null) {
+  log(kind, { error: String(detail).slice(0, 200), taskId });
+  if (!DIAG_CFG) return;
+  await core(DIAG_CFG, "/mac/diag", { kind, detail: String(detail).slice(0, 400), taskId, version: HELPER_VERSION }).catch(() => {});
+}
+
 /** Render an observe->act->verify outcome for the planner: honest about whether anything changed. */
 function verdict(r) {
   const tag = r.ok ? (r.verified ? "verified" : "unverified") : "error";
@@ -70,6 +78,7 @@ function verdict(r) {
 }
 
 async function heartbeat(cfg) {
+  DIAG_CFG = cfg;
   const caps = await capabilityMatrix();
   const fm = await getFrontmost(run).catch(() => ({ ok: false }));
   const context = await gatherContext(fm).catch(() => ({}));
@@ -348,9 +357,9 @@ export async function runMacChart(cfg, requested, taskId, onProgress = async () 
   // Rasterizer ladder, most deterministic first; the chosen path is logged so a failure is diagnosable.
   let png = null, via = null;
   if (svgW && svgH) {
-    png = await chromeSvgPng(svgPath, join(dir, "chart.png"), svgW, svgH).catch((e) => { log("chrome raster failed", { error: String(e?.message ?? e).slice(0, 160) }); return null; });
+    png = await chromeSvgPng(svgPath, join(dir, "chart.png"), svgW, svgH).catch((e) => { diag("chrome_raster_failed", e?.message ?? e); return null; });
     via = png ? "chrome" : null;
-    if (!png) { png = await svgToPng(svgPath, join(dir, "chart-nsimage.png"), svgW, svgH).catch((e) => { log("nsimage raster failed", { error: String(e?.message ?? e).slice(0, 160) }); return null; }); via = png ? "nsimage" : null; }
+    if (!png) { png = await svgToPng(svgPath, join(dir, "chart-nsimage.png"), svgW, svgH).catch((e) => { diag("nsimage_raster_failed", e?.message ?? e); return null; }); via = png ? "nsimage" : null; }
   }
   if (!png) { png = await quickLookPng(svgPath, dir).catch(() => null); via = png ? "quicklook" : null; }
   log("chart rasterized", { via, svg: `${svgW}x${svgH}` });
@@ -358,7 +367,7 @@ export async function runMacChart(cfg, requested, taskId, onProgress = async () 
   // WO9 VERIFY: the artifact must not be materially cropped — its aspect must match the SVG's.
   const dims = await pngDims(png).catch(() => null);
   if (svgW && svgH && dims && Math.abs(dims.w / dims.h - svgW / svgH) > 0.05) {
-    log("chart rasterization cropped", { expected: `${svgW}x${svgH}`, got: `${dims.w}x${dims.h}` });
+    await diag("chart_cropped", `expected ${svgW}x${svgH}, got ${dims.w}x${dims.h}`);
     return { ok: false, message: `Chart image was cropped by the renderer (expected ${svgW}x${svgH} aspect, got ${dims.w}x${dims.h}); not delivering a cropped artifact.` };
   }
   // Return the PNG to the chat (store on the task) and to iMessage.
@@ -731,7 +740,7 @@ async function tick(cfg, state) {
     state.lastRowId = Number(max ?? 0);                      // never process old messages as new requests
   }
   await heartbeat(cfg);
-  await pickupTasks(cfg).catch((e) => log("task pickup failed", { error: String(e?.message ?? e).slice(0, 160) }));
+  await pickupTasks(cfg).catch((e) => diag("task_pickup_failed", e?.message ?? e));
   // Style history for contacts not yet backfilled (once per contact).
   for (const c of cfg.contacts.filter((x) => !state.backfilled.includes(x.handle))) {
     const rows = (await sql(`${BASE} ORDER BY m.ROWID DESC LIMIT 2000`)).filter((r) => normalizeHandle(r.chat) === c.handle).slice(0, HISTORY);

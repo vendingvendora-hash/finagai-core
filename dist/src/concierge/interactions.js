@@ -20,7 +20,7 @@ export async function openInteraction(pool, opts) {
        AND (state NOT IN ('failed','superseded')) ORDER BY created_at DESC LIMIT 1`, [key, opts.conversation]);
     if (ex.rows[0])
         return { interaction: map(ex.rows[0]), reused: true };
-    const r = await pool.query(`INSERT INTO interaction (conversation, origin_message, request_key) VALUES ($1, $2, $3) RETURNING *`, [opts.conversation, opts.message.slice(0, 1000), key]);
+    const r = await pool.query(`INSERT INTO interaction (conversation, origin_message, request_key, task_class, acknowledged_at) VALUES ($1, $2, $3, $4, now()) RETURNING *`, [opts.conversation, opts.message.slice(0, 1000), key, taskClass(opts.message)]);
     return { interaction: map(r.rows[0]), reused: false };
 }
 export async function linkTask(pool, interactionId, taskId) {
@@ -31,9 +31,28 @@ export async function setState(pool, interactionId, state, note) {
     await pool.query(`UPDATE interaction SET state = $2, progress_note = COALESCE($3, progress_note), updated_at = now() WHERE id = $1`, [interactionId, state, note ?? null]);
 }
 /** Called when the underlying task reaches a terminal state. Result becomes pending delivery. */
+/** Coarse task class for metrics (kept stable so difficulty mix stays visible). */
+export function taskClass(message) {
+    const m = message.toLowerCase();
+    if (/^mac_chart:|\bchart\b/.test(m))
+        return "chart";
+    if (/^mac_ping/.test(m))
+        return "ping";
+    if (/\b(https?:\/\/|chrome|safari|browser|tab|website|gmail|calendar)\b/.test(m))
+        return "browser";
+    if (/\b(finder|file|folder|move|rename|trash|downloads)\b/.test(m))
+        return "files";
+    if (/\b(textedit|notes|pages|numbers|keynote|excel|word|messages|mail|app)\b/.test(m))
+        return "native-app";
+    return "general";
+}
 export async function completeForTask(pool, taskId, outcome) {
-    await pool.query(`UPDATE interaction SET state = $2, result_summary = $3, result_image_b64 = COALESCE($4, result_image_b64),
-       artifact_id = COALESCE($5, artifact_id), final_response_status = 'pending', updated_at = now()
+    await pool.query(`UPDATE interaction i SET state = $2, result_summary = $3, result_image_b64 = COALESCE($4, result_image_b64),
+       artifact_id = COALESCE($5, artifact_id), final_response_status = 'pending', updated_at = now(), completed_at = now(),
+       failure_class = CASE WHEN $2 = 'failed' THEN COALESCE((SELECT failure_class FROM control_task WHERE id = $1), i.failure_class, 'failed') ELSE i.failure_class END,
+       tool_calls = (SELECT count(*) FROM control_step s WHERE s.task_id = ANY(i.task_ids)),
+       model_calls = (SELECT coalesce(sum(model_calls),0) FROM control_task t WHERE t.id = ANY(i.task_ids)),
+       verification_attempts = GREATEST(i.verification_attempts, (SELECT coalesce(sum(verify_attempts),0) FROM control_task t WHERE t.id = ANY(i.task_ids)))
      WHERE $1 = ANY(task_ids) AND state NOT IN ('completed','failed','superseded')`, [taskId, outcome.ok ? "completed" : "failed", outcome.summary.slice(0, 1000), outcome.imageB64 ?? null, outcome.artifactId ?? null]);
 }
 /** Completed/failed interactions whose result has NOT yet reached this conversation. */
@@ -50,5 +69,10 @@ export async function markDelivered(pool, ids) {
 export async function getInteraction(pool, id) {
     const r = await pool.query(`SELECT * FROM interaction WHERE id = $1`, [id]);
     return r.rows[0] ? map(r.rows[0]) : null;
+}
+/** Phase 1D: aggregates for the operating review / scoreboard. */
+export async function metricsSummary(pool, days = 7) {
+    const r = await pool.query(`SELECT * FROM interaction_metrics_daily WHERE day > now() - ($1 || ' days')::interval ORDER BY day DESC, task_class`, [String(days)]);
+    return r.rows;
 }
 //# sourceMappingURL=interactions.js.map

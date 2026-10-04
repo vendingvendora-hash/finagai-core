@@ -71,3 +71,4 @@ Full text of ADR-001 to ADR-026 is in the approved Claude Docs; this index is th
 | ADR-068 | Current-context awareness (WO3): helper gathers app/window/document/selection/tab each heartbeat → ephemeral mac_runtime.context (0021); deterministic resolveReference; mac_get_context + resolve_reference tools; U1–U6. | Decided by Julian |
 | ADR-070 | Control hierarchy (WO4/WO8): AX-first actions with observe→act→verify (mac-actions.mjs); health-aware capability router injected into the planner; routing benchmark. | Decided by Julian |
 | ADR-071 | Controlled release (Phase 0): Render auto-deploy off; release.yml migrates (approval-gated, only when migrations changed) then deploys via hook and verifies /health. | Decided by Julian |
+| ADR-072 | Phase 1: acceptance contracts + independent verifier before done; false_completion class; interaction telemetry + daily metrics view (0022); helper diagnostics to Core. | Decided by Julian |
