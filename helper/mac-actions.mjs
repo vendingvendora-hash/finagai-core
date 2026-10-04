@@ -72,8 +72,9 @@ end tell`;
   try { await osa([script], [], { timeout: 10_000 }); } catch (e) { return { ok: false, result: `menu click failed: ${String(e?.message ?? e).slice(0, 160)}`, before, verified: false }; }
   await sleep(800);
   const after = await observe(osa);
-  const verified = changed(before, after);
-  return { ok: true, result: `clicked menu ${path.join(" > ")}${verified ? "" : " (no visible UI change — verify by other means)"}`, before, after, verified };
+  const verified = inApp(after, app) && changed(before, after);
+  const why = !inApp(after, app) ? ` (frontmost is now ${after.app || "unknown"}, not ${app} — treat as NOT done)` : !verified ? " (no visible UI change — verify by other means)" : "";
+  return { ok: true, result: `clicked menu ${path.join(" > ")}${why}`, before, after, verified };
 }
 
 /**
@@ -129,8 +130,9 @@ end tell`;
   if (out.startsWith("notfound")) return { ok: false, result: `ax_click: no control titled "${title}"${role ? ` with role ${role}` : ""} in ${app}'s front window (${out})`, before, verified: false };
   await sleep(800);
   const after = await observe(osa);
-  const verified = changed(before, after);
-  return { ok: true, result: `${out} "${title}"${verified ? "" : " (no visible UI change)"}`, before, after, verified };
+  const verified = inApp(after, app) && changed(before, after);
+  const why = !inApp(after, app) ? ` (frontmost is now ${after.app || "unknown"}, not ${app} — treat as NOT done)` : !verified ? " (no visible UI change)" : "";
+  return { ok: true, result: `${out} "${title}"${why}`, before, after, verified };
 }
 
 /** Set a text field's value by accessibility identity, then read it back to verify. */
@@ -168,7 +170,7 @@ end tell`;
   catch (e) { return { ok: false, result: `ax_set_value failed: ${String(e?.message ?? e).slice(0, 160)}`, before, verified: false }; }
   if (out === "notfound") return { ok: false, result: `ax_set_value: no ${role}${title ? ` titled "${title}"` : ""} in ${app}'s front window`, before, verified: false };
   const after = await observe(osa);
-  const verified = out === `set:${value}`;
+  const verified = out === `set:${value}` && inApp(after, app);
   return { ok: verified, result: verified ? `set "${title ?? role}" = "${String(value).slice(0, 60)}" (read back OK)` : `set returned ${out} (read-back mismatch)`, before, after, verified };
 }
 
@@ -176,6 +178,13 @@ end tell`;
 export function changed(a, b) {
   if (!a?.ok || !b?.ok) return false;
   return a.app !== b.app || a.window !== b.window || a.focusedRole !== b.focusedRole || a.focusedTitle !== b.focusedTitle || a.focusedValue !== b.focusedValue;
+}
+
+/** Intended-outcome check: the target app is still frontmost after the action (not "any change anywhere"). */
+export function inApp(obs, app) {
+  if (!obs?.ok || !app) return false;
+  const a = String(obs.app || "").toLowerCase(), want = String(app).toLowerCase();
+  return a === want || a.startsWith(want) || want.startsWith(a);
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

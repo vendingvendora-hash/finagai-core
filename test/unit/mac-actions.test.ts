@@ -31,9 +31,9 @@ describe("observe → act → verify", () => {
     expect(r.ok).toBe(false); expect(r.result).toMatch(/no control titled "Reconcile"/);
   });
   it("ax_set_value verifies by read-back", async () => {
-    const ok = await axSetValue(fakeOsa({ frontmost: ["TextEdit"], set: "set:hello" }) as never, "TextEdit", { value: "hello" });
+    const ok = await axSetValue(fakeOsa({ frontmost: ["TextEdit"], set: "set:hello" }) as never, "TextEdit", { title: undefined, value: "hello" });
     expect(ok.verified).toBe(true);
-    const bad = await axSetValue(fakeOsa({ frontmost: ["TextEdit"], set: "set:hell" }) as never, "TextEdit", { value: "hello" });
+    const bad = await axSetValue(fakeOsa({ frontmost: ["TextEdit"], set: "set:hell" }) as never, "TextEdit", { title: undefined, value: "hello" });
     expect(bad.ok).toBe(false); expect(bad.result).toMatch(/read-back mismatch/);
   });
   it("menu_item refuses a path shorter than [menu, item]", async () => {
@@ -43,5 +43,19 @@ describe("observe → act → verify", () => {
   it("changed() detects window/focus deltas only", () => {
     const a = { ok: true, app: "A", window: "W", focusedRole: "r", focusedTitle: "t", focusedValue: "v" };
     expect(changed(a, { ...a })).toBe(false); expect(changed(a, { ...a, window: "W2" })).toBe(true);
+  });
+});
+
+describe("intended-outcome verification (live task #77 finding)", () => {
+  it("a menu click whose observed delta is focus moving to ANOTHER app is NOT verified", async () => {
+    // before: TextEdit; after: Firefox — something changed, but not the intended thing
+    const r = await menuItem(fakeOsa({ frontmost: ["TextEdit", "firefox"] }) as never, "TextEdit", ["File", "New"]);
+    expect(r.ok).toBe(true); expect(r.verified).toBe(false); expect(r.result).toMatch(/frontmost is now firefox.*NOT done/);
+  });
+  it("a menu click that changes TextEdit's own window IS verified", async () => {
+    let n = 0;
+    const osa = async (lines: string[]) => { const src = lines.join("\n"); if (src.includes("AXFocusedUIElement")) return n++ === 0 ? "TextEdit\n\nAXWindow\n\n" : "TextEdit\nUntitled\nAXTextArea\n\n"; return ""; };
+    const r = await menuItem(osa as never, "TextEdit", ["File", "New"]);
+    expect(r.verified).toBe(true);
   });
 });
