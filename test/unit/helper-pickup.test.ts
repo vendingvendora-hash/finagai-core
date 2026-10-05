@@ -30,3 +30,12 @@ describe("helper task pickup is unconditional (WO1)", () => {
     expect(tickBody.indexOf("await heartbeat(cfg)")).toBeLessThan(tickBody.indexOf("await pickupTasks(cfg)"));
   });
 });
+
+describe("heartbeat liveness is independent of task execution (live #107 regression)", () => {
+  it("an independent heartbeat interval exists outside the busy-guarded tick loop", () => {
+    const src = readFileSync(new URL("../../helper/finagai-imessage.mjs", import.meta.url), "utf8");
+    const main = src.slice(src.indexOf("setInterval(loop, POLL_MS)"));
+    expect(main).toMatch(/setInterval\(async \(\) => \{[\s\S]*await heartbeat\(cfg\)[\s\S]*\}, 15_000\)/);
+    expect(main).toMatch(/hbBusy/);
+  });
+});

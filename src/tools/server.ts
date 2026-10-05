@@ -454,11 +454,6 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
   }, async ({ task_code }) => {
     // Brief transport-safe wait so a same-turn re-poll advances the task instead of returning instantly.
     let r = task_code ? await getTaskResult(deps.pool, task_code) : await latestTask(deps.pool);
-    if (r && (r.status === "done" || r.status === "failed")) {
-      // WO2: the result is being shown in the chat now — mark the owning interaction delivered so it stops resurfacing.
-      await deps.pool.query(`UPDATE interaction SET final_response_status = 'delivered', delivered_at = now(), updated_at = now()
-        WHERE final_response_status = 'pending' AND id = (SELECT interaction_id FROM control_task WHERE code = $1)`, [r.code]).catch(() => {});
-    }
     if (r && r.status === "active") {
       const until = Date.now() + 40_000;
       while (Date.now() < until && r && r.status === "active") {
@@ -467,6 +462,14 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
       }
     }
     if (!r) return ok("control_result", { found: false, note: "No such task." });
+    // WO2: mark delivered AFTER the wait loop — a task that finishes during the wait is shown now, so it must not
+    // resurface later (live: V2/V3 kept reappearing in finishedWhileYouWereAway).
+    if ((r.status === "done" || r.status === "failed")) {
+      // WO2: the result is being shown in the chat now — mark the owning interaction delivered so it stops resurfacing.
+      await deps.pool.query(`UPDATE interaction SET final_response_status = 'delivered', delivered_at = now(), updated_at = now()
+        WHERE final_response_status = 'pending' AND id = (SELECT interaction_id FROM control_task WHERE code = $1)`, [r.code]).catch(() => {});
+    }
+
     // Truthful lifecycle (ADR-066): derive from worker heartbeat + claim + progress, never a bare row status.
     const rtNow = await getRuntime(deps.pool);
     const lcRow = await deps.pool.query<{ status: string; claimed_at: Date | null; last_progress_at: Date | null; progress_note: string | null }>(

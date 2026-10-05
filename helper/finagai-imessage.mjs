@@ -21,7 +21,7 @@ import { activateApp, axClick, axSetValue, menuItem, observe as observeUi } from
 import { moveFileVerified, trashVerified } from "./fs-ops.mjs";
 
 const run = promisify(execFile);
-const HELPER_VERSION = "runtime-10";
+const HELPER_VERSION = "runtime-11";
 const WORKER_ID = "mac-helper-" + process.pid;
 const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null, reconnects: 0, coreDown: false, downSince: null };
 /** Real capability probe (mac doctor), cached; refreshed every 10 minutes so the matrix stays truthful. */
@@ -78,8 +78,10 @@ function verdict(r) {
   return `${tag}: ${r.result}${delta}`;
 }
 
+let LAST_HB_AT = 0;
 async function heartbeat(cfg) {
   DIAG_CFG = cfg;
+  LAST_HB_AT = Date.now();
   const caps = await capabilityMatrix();
   const fm = await getFrontmost(run).catch(() => ({ ok: false }));
   const context = await gatherContext(fm).catch(() => ({}));
@@ -770,7 +772,7 @@ async function tick(cfg, state) {
     const [{ max }] = await sql(`SELECT max(ROWID) AS max FROM message`);
     state.lastRowId = Number(max ?? 0);                      // never process old messages as new requests
   }
-  await heartbeat(cfg);
+  if (Date.now() - LAST_HB_AT > 10_000) await heartbeat(cfg);   // the independent timer usually already sent one
   await pickupTasks(cfg).catch((e) => diag("task_pickup_failed", e?.message ?? e));
   // Style history for contacts not yet backfilled (once per contact).
   for (const c of cfg.contacts.filter((x) => !state.backfilled.includes(x.handle))) {
@@ -1037,6 +1039,14 @@ async function main() {
   };
   await loop();
   setInterval(loop, POLL_MS);
+  // Liveness is independent of work: a long J6 drive inside tick() must never suppress heartbeats
+  // (live: Mac reported offline for 62s while executing task #107, and the health gate refused new work).
+  let hbBusy = false;
+  setInterval(async () => {
+    if (hbBusy || Date.now() - LAST_HB_AT < 12_000) return;
+    hbBusy = true;
+    try { await heartbeat(cfg); } catch { /* heartbeat() records coreDown itself */ } finally { hbBusy = false; }
+  }, 15_000);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) main().catch((err) => { log("fatal", { error: String(err?.message ?? err) }); process.exit(1); });
