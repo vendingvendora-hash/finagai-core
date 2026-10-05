@@ -12,8 +12,13 @@ export async function recordHeartbeat(pool, hb) {
        capabilities = CASE WHEN EXCLUDED.capabilities = '{}'::jsonb THEN mac_runtime.capabilities ELSE EXCLUDED.capabilities END,
        frontmost_app = EXCLUDED.frontmost_app, frontmost_window = EXCLUDED.frontmost_window,
        current_task_id = EXCLUDED.current_task_id, started_at = COALESCE(EXCLUDED.started_at, mac_runtime.started_at),
-       reconnect_count = GREATEST(mac_runtime.reconnect_count, $7), updated_at = now()`, [hb.helperVersion ?? null, JSON.stringify(hb.capabilities ?? {}), hb.frontmostApp ?? null, hb.frontmostWindow ?? null,
-        hb.currentTaskId ?? null, hb.startedAt ?? null, hb.reconnects ?? 0]);
+       -- runtime-10+: a reconnect is an event (+1). Legacy helpers still report a per-process count (GREATEST).
+       reconnect_count = CASE WHEN $8::boolean THEN mac_runtime.reconnect_count + 1 ELSE GREATEST(mac_runtime.reconnect_count, $7) END,
+       updated_at = now()`, [hb.helperVersion ?? null, JSON.stringify(hb.capabilities ?? {}), hb.frontmostApp ?? null, hb.frontmostWindow ?? null,
+        hb.currentTaskId ?? null, hb.startedAt ?? null, hb.reconnects ?? 0, !!hb.reconnected]);
+    if (hb.reconnected) {
+        await pool.query(`INSERT INTO event (actor, action, entity_type, after) VALUES ('system', 'mac_reconnected', 'mac_runtime', $1::jsonb)`, [JSON.stringify({ downSince: hb.reconnected.downSince ?? null, downSeconds: hb.reconnected.downSeconds ?? null })]);
+    }
 }
 /** WO1-G: only the worker holding the live lease may complete a task. Unclaimed (legacy) tasks are open. */
 export async function workerMayComplete(pool, taskId, workerId) {
@@ -28,9 +33,16 @@ export async function workerMayComplete(pool, taskId, workerId) {
     return false; // a stale/other worker
 }
 /** Last helper diagnostics (Phase 1E), newest first. */
+/** Phase 1E: store one sanitized helper diagnostic. event.entity_id is a uuid → the Mac runtime is not an entity id. */
+export async function recordDiagnostic(pool, d) {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    await pool.query(`INSERT INTO event (actor, action, entity_type, entity_id, after) VALUES ('system', 'mac_diag', 'mac_runtime', $1, $2::jsonb)`, [d.taskId && uuid.test(d.taskId) ? d.taskId : null,
+        JSON.stringify({ kind: d.kind.slice(0, 60), detail: d.detail.replace(/Bearer\s+\S+/gi, "[token]").slice(0, 400), taskId: d.taskId ?? null, helperVersion: d.helperVersion ?? null })]);
+}
+/** Last helper diagnostics (Phase 1E), newest first. Errors propagate — an empty list must mean "none", not "query failed". */
 export async function recentDiagnostics(pool, n = 5) {
-    const r = await pool.query(`SELECT at, after FROM event WHERE action = 'mac_diag' ORDER BY at DESC LIMIT $1`, [n]);
-    return r.rows.map((x) => ({ at: new Date(x.at).toISOString(), kind: x.after.kind, detail: x.after.detail, taskId: x.after.taskId }));
+    const r = await pool.query(`SELECT occurred_at, after FROM event WHERE action = 'mac_diag' ORDER BY occurred_at DESC LIMIT $1`, [n]);
+    return r.rows.map((x) => ({ at: new Date(x.occurred_at).toISOString(), kind: x.after.kind, detail: x.after.detail, taskId: x.after.taskId }));
 }
 export async function recordSuccess(pool, taskId) {
     await pool.query(`UPDATE mac_runtime SET last_success_at = now(), last_success_code = (SELECT code FROM control_task WHERE id = $1) WHERE id = 'primary'`, [taskId]);
@@ -99,7 +111,9 @@ export async function macStatus(pool) {
         reconnectCount: rt?.reconnectCount ?? 0, restartCount: rt?.restartCount ?? 0,
         lastSuccess: rt?.lastSuccessAt ? { at: rt.lastSuccessAt.toISOString(), taskCode: rt.lastSuccessCode } : null,
         runtimeStartedAt: rt?.startedAt?.toISOString() ?? null,
-        recentDiagnostics: await recentDiagnostics(pool, 5).catch(() => []),
+        recentDiagnostics: await recentDiagnostics(pool, 5).catch((e) => [{ at: new Date().toISOString(), kind: "diagnostics_query_failed", detail: String(e?.message ?? e).slice(0, 200), taskId: null }]),
+        lastReconnect: await pool.query(`SELECT occurred_at, after FROM event WHERE action = 'mac_reconnected' ORDER BY occurred_at DESC LIMIT 1`)
+            .then((r) => (r.rows[0] ? { at: new Date(r.rows[0].occurred_at).toISOString(), downSeconds: r.rows[0].after?.downSeconds ?? null } : null)),
         currentTask: t ? { code: Number(t.code), request: t.request, ...deriveLifecycle(t, rt, now), note: t.progress_note ?? null } : null,
         remedyIfOffline: online ? null :
             "The Finagai Mac runtime is not connected. On the Mac: `launchctl kickstart -k gui/$(id -u)/com.finagai.imessage` then `tail -5 ~/.finagai/imessage-helper.log` — it should log 'helper started' and heartbeats.",

@@ -21,9 +21,9 @@ import { activateApp, axClick, axSetValue, menuItem, observe as observeUi } from
 import { moveFileVerified, trashVerified } from "./fs-ops.mjs";
 
 const run = promisify(execFile);
-const HELPER_VERSION = "runtime-9";
+const HELPER_VERSION = "runtime-10";
 const WORKER_ID = "mac-helper-" + process.pid;
-const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null, reconnects: 0, coreDown: false };
+const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null, reconnects: 0, coreDown: false, downSince: null };
 /** Real capability probe (mac doctor), cached; refreshed every 10 minutes so the matrix stays truthful. */
 async function capabilityMatrix() {
   if (Date.now() - RUNTIME.capsAt < 600_000 && Object.keys(RUNTIME.caps).length) return RUNTIME.caps;
@@ -83,13 +83,16 @@ async function heartbeat(cfg) {
   const caps = await capabilityMatrix();
   const fm = await getFrontmost(run).catch(() => ({ ok: false }));
   const context = await gatherContext(fm).catch(() => ({}));
+  // Reconnect = an EVENT carried by the first successful heartbeat after an outage (Core increments by one).
+  // Never a per-process counter: those reset on restart and were hidden by GREATEST() (Phase 1 live test B).
+  const reconnected = RUNTIME.coreDown ? { downSince: RUNTIME.downSince, downSeconds: Math.round((Date.now() - Date.parse(RUNTIME.downSince ?? new Date().toISOString())) / 1000) } : null;
   try {
     await core(cfg, "/mac/heartbeat", { version: HELPER_VERSION, capabilities: caps,
       frontmostApp: fm.ok ? fm.app : null, frontmostWindow: fm.ok ? fm.window : null,
-      currentTaskId: RUNTIME.currentTaskId, startedAt: RUNTIME.startedAt, reconnects: RUNTIME.reconnects, context });
-    if (RUNTIME.coreDown) { RUNTIME.coreDown = false; RUNTIME.reconnects += 1; log("reconnected to Core", { reconnects: RUNTIME.reconnects }); }
+      currentTaskId: RUNTIME.currentTaskId, startedAt: RUNTIME.startedAt, reconnected, context });
+    if (reconnected) { RUNTIME.coreDown = false; RUNTIME.downSince = null; RUNTIME.reconnects += 1; log("reconnected to Core", reconnected); }
   } catch (e) {
-    if (!RUNTIME.coreDown) log("Core unreachable (will keep retrying every tick)", { error: String(e?.message ?? e).slice(0, 120) });
+    if (!RUNTIME.coreDown) { log("Core unreachable (will keep retrying every tick)", { error: String(e?.message ?? e).slice(0, 120) }); RUNTIME.downSince = new Date().toISOString(); }
     RUNTIME.coreDown = true;                                    // B/C: network or Core restart — next tick reconnects
   }
 }

@@ -15,6 +15,22 @@ export const KNOWN_KINDS = new Set([...READ_KINDS,
 /** Irreversible or high-blast-radius actions ALWAYS need an explicit per-step ok, even in auto mode. */
 export const ALWAYS_CONFIRM = new Set(["run", "trash_file", "move_file"]);
 const IRREVERSIBLE_HINT = /\b(send|enviar|mandar|pay|pagar|transfer|transferir|delete|borrar|eliminar|remove|post|publish|publicar|submit|enviar formulario|confirm purchase|place order|buy|comprar|wire|reply all)\b/i;
+/**
+ * A shell command that provably cannot change anything: an allow-listed read-only binary, no shell
+ * metacharacters (so no redirects, pipes, chaining, substitution, globbing into writes), no destructive flags.
+ * Such a `run` is a READ (live task #104: `cat ~/.finagai/phase1-live.out` should never need Julian's ok).
+ */
+const READONLY_BINARIES = /^(cat|ls|head|tail|wc|stat|file|grep|egrep|mdfind|mdls|pwd|date|sw_vers|shasum|md5|du|df|uptime|whoami|which|plutil -p|defaults read)(\s|$)/;
+export function isReadOnlyCommand(cmd) {
+    if (typeof cmd !== "string")
+        return false;
+    const c = cmd.trim();
+    if (!c || c.length > 400 || /[;&|<>`$(){}\n\\]/.test(c))
+        return false;
+    if (/\s-(exec|delete|ok|fprint|i\b)|\s--in-place|\s-w\b/.test(c))
+        return false;
+    return READONLY_BINARIES.test(c);
+}
 export function classifyRisk(kind) {
     return READ_KINDS.has(kind) ? "read" : "write";
 }
@@ -80,7 +96,8 @@ export function parseStep(text) {
     const params = (raw.params && typeof raw.params === "object") ? raw.params : {};
     // Trust the declared risk only if it is at least as strict as our own classification.
     const risk = classifyRisk(kind) === "write" || raw.risk === "write" ? "write" : "read";
-    const step = { kind, params, risk, summary, done: raw.done === true || kind === "done" };
+    const effectiveRisk = kind === "run" && isReadOnlyCommand(params.cmd) ? "read" : risk;
+    const step = { kind, params, risk: effectiveRisk, summary, done: raw.done === true || kind === "done" };
     if (kind === "ask")
         step.question = String(raw.question ?? raw.summary ?? "").slice(0, 500);
     if (typeof raw.reflection === "string")

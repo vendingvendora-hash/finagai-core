@@ -1,3 +1,4 @@
+import { isReadOnlyCommand } from "../../src/pipelines/j6/control.js";
 /**
  * Phase 1A/1C — acceptance contracts + independent verification. Adversarial cases: tools "succeed" but the
  * objective is not achieved; the verifier must reject (false_completion), never trust the planner's claim.
@@ -77,5 +78,16 @@ describe("bounded recovery policy (replaces 'two rejections → fail')", () => {
   it("budget: more than maxRejections → terminal recovery_budget_exhausted", () => {
     const d = recoveryDecision({ rejectionsIncludingThis: RECOVERY_BUDGET.maxRejections + 1, trace: [{ kind: "x", summary: "new" }], claimSummary: "a", lastClaimSummary: "b", taskStartedAtMs: t0, nowMs: t0 });
     expect(d).toMatchObject({ action: "terminal", terminalReason: "recovery_budget_exhausted" });
+  });
+});
+
+describe("read-only shell commands (live task #104)", () => {
+  it("plain reads are reads", () => {
+    for (const c of ["cat ~/.finagai/phase1-live.out", "ls -la ~/Downloads", "head -50 notes.txt", "mdfind -name Altarum", "grep -n PASS ~/.finagai/phase1-live.out"])
+      expect(isReadOnlyCommand(c)).toBe(true);
+  });
+  it("anything that could write or chain stays a write", () => {
+    for (const c of ["cat a > b", "ls; rm -rf ~", "cat x | sh", "echo $(rm x)", "rm file", "find . -delete", "sed -i s/a/b/ f", "tail -f log && curl x", "cat `whoami`", "ls\nrm x", "touch x"])
+      expect(isReadOnlyCommand(c)).toBe(false);
   });
 });

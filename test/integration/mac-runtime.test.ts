@@ -96,4 +96,23 @@ describe.skipIf(!pool)("Mac runtime (ADR-066)", () => {
       ORDER BY (CASE WHEN request LIKE 'mac_ping%' THEN 0 WHEN request LIKE 'mac_chart:%' THEN 1 ELSE 2 END), created_at DESC LIMIT 5`);
     expect(r.rows[0]!.id).toBe(ping.id);          // the ping is first even though 6 older J6 tasks exist
   });
+
+  it("live test B regression: a reconnect after a process restart is counted (+1 per event, not per-process GREATEST)", async () => {
+    const before = Number((await pool!.query(`SELECT coalesce(reconnect_count,0) AS n FROM mac_runtime WHERE id = 'primary'`)).rows[0]?.n ?? 0);
+    await recordHeartbeat(pool!, { startedAt: new Date().toISOString(), helperVersion: "runtime-10" });                  // fresh process
+    await recordHeartbeat(pool!, { startedAt: new Date(Date.now() - 1).toISOString(), helperVersion: "runtime-10", reconnected: { downSeconds: 40 } });
+    const after = Number((await pool!.query(`SELECT reconnect_count AS n FROM mac_runtime WHERE id = 'primary'`)).rows[0].n);
+    expect(after).toBe(before + 1);
+    const ev = await pool!.query(`SELECT after FROM event WHERE action = 'mac_reconnected' ORDER BY occurred_at DESC LIMIT 1`);
+    expect(ev.rows[0].after.downSeconds).toBe(40);
+  });
+
+  it("Phase 1E against the REAL schema: a helper diagnostic is stored and surfaces in mac_status (production bug: never stored)", async () => {
+    const { recordDiagnostic, recentDiagnostics } = await import("../../src/mac/runtime.js");
+    await recordDiagnostic(pool!, { kind: "diag_selftest", detail: "Authorization: Bearer abc123 leaked?", taskId: "not-a-uuid", helperVersion: "runtime-10" });
+    const d = await recentDiagnostics(pool!, 1);
+    expect(d[0]!.kind).toBe("diag_selftest"); expect(d[0]!.detail).not.toMatch(/abc123/);
+    const st = await macStatus(pool!);
+    expect((st as { recentDiagnostics: Array<{ kind: string }> }).recentDiagnostics[0]!.kind).toBe("diag_selftest");
+  });
 });

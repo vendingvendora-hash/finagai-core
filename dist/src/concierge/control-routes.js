@@ -9,8 +9,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { cancelTask, createTask, decideStep, getStep, getTaskResult, parseControlCommand, planNext, recordRun, setResultImage } from "../pipelines/j6/control.js";
 import { analyzeWorkbookToChart, rankCandidates } from "../mac/operator.js";
 import { registerArtifact, resolveRecentArtifact, markArtifactSent, claimInbound, finishInbound } from "./interaction.js";
-import { appendEvent } from "../db/index.js";
-import { recordHeartbeat, claimTask, taskProgress, macStatus, workerMayComplete, recordSuccess, sweepStaleTasks } from "../mac/runtime.js";
+import { recordDiagnostic, recordHeartbeat, claimTask, taskProgress, macStatus, workerMayComplete, recordSuccess, sweepStaleTasks } from "../mac/runtime.js";
 import { completeForTask, setState as setInteractionState } from "./interactions.js";
 import { claimAction, reportAction } from "./actions.js";
 import { saveContext } from "../mac/context.js";
@@ -150,6 +149,7 @@ export function createControlHandler(deps, token, log) {
             if (path === "/mac/heartbeat") {
                 await recordHeartbeat(deps.pool, {
                     reconnects: typeof body.reconnects === "number" ? body.reconnects : undefined,
+                    reconnected: body.reconnected && typeof body.reconnected === "object" ? body.reconnected : null,
                     helperVersion: typeof body.version === "string" ? body.version : undefined,
                     capabilities: body.capabilities && typeof body.capabilities === "object" ? body.capabilities : undefined,
                     frontmostApp: typeof body.frontmostApp === "string" ? body.frontmostApp : null,
@@ -188,9 +188,9 @@ export function createControlHandler(deps, token, log) {
                 return json(res, 200, { status: r.status, summary: r.summary, hasImage: Boolean(r.imageB64) });
             }
             if (path === "/mac/diag") {
-                // Phase 1E: structured, sanitized helper diagnostics (no raw logs). Stored in the audit log.
-                const kind = String(body.kind ?? "unknown").slice(0, 60), detail = String(body.detail ?? "").replace(/Bearer\s+\S+/gi, "[token]").slice(0, 400);
-                await appendEvent(deps.pool, { actor: "system", action: "mac_diag", entityType: "mac_runtime", entityId: "primary", after: { kind, detail, taskId: typeof body.taskId === "string" ? body.taskId : null, helperVersion: typeof body.version === "string" ? body.version : null } });
+                // Phase 1E: structured, sanitized helper diagnostics (no raw logs) → audit log → mac_status.recentDiagnostics.
+                await recordDiagnostic(deps.pool, { kind: String(body.kind ?? "unknown"), detail: String(body.detail ?? ""),
+                    taskId: typeof body.taskId === "string" ? body.taskId : null, helperVersion: typeof body.version === "string" ? body.version : null });
                 return json(res, 200, { ok: true });
             }
             if (path === "/mac/status") {
