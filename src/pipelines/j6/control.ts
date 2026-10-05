@@ -274,7 +274,12 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
     const verdict = await verifyCompletion({ model: deps.model, graderModel: deps.graderModel ?? deps.plannerModel ?? deps.modelId }, contract, trace, step.summary, screenshotB64);
     await pool.query(`UPDATE control_task SET verification = $2::jsonb, verify_attempts = verify_attempts + 1, last_claim_summary = $3, updated_at = now() WHERE id = $1`,
       [taskId, JSON.stringify({ ...verdict, at: new Date().toISOString() }), step.summary.slice(0, 500)]);
-    if (!verdict.pass) {
+    if (!verdict.pass && verdict.unavailable) {
+      // The verifier could not produce a verdict: this is NOT evidence of failure, and NOT evidence of success.
+      // Complete, but say exactly that — never present it as verified.
+      step = { ...step, summary: `Done, but NOT independently verified (${verdict.reason}). Planner's report: ${step.summary}`.slice(0, 600) };
+      await pool.query(`UPDATE control_task SET terminal_reason = 'verifier_unavailable' WHERE id = $1`, [taskId]).catch(() => {});
+    } else if (!verdict.pass) {
       // A rejected claim = false_completion (never shown to Julian as success). Then BOUNDED RECOVERY, not failure.
       const rejections = Number(taskRow.rows[0]?.verification_rejections ?? 0) + 1;
       const decision = recoveryDecision({ rejectionsIncludingThis: rejections, trace, claimSummary: step.summary,
@@ -300,7 +305,7 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
     const detail = prior.filter((x) => x.result && x.result.trim()).map((x) => `- ${x.summary}: ${x.result!.slice(0, 1200)}`).join("\n").slice(0, 20000);
     const { completeForTask } = await import("../../concierge/interactions.js");
     await completeForTask(pool, taskId, { ok: true, summary: step.summary, imageB64: screenshotB64 && screenshotB64.length < 8_000_000 ? screenshotB64 : null }).catch(() => {});
-    await pool.query(`UPDATE control_task SET status = 'done', terminal_reason = 'verified', result_summary = $2, result_detail = $3, result_image_b64 = COALESCE($4, result_image_b64), updated_at = now() WHERE id = $1`,
+    await pool.query(`UPDATE control_task SET status = 'done', terminal_reason = COALESCE(terminal_reason, 'verified'), result_summary = $2, result_detail = $3, result_image_b64 = COALESCE($4, result_image_b64), updated_at = now() WHERE id = $1`,
       [taskId, step.summary.slice(0, 1000), detail || null, screenshotB64 && screenshotB64.length < 8_000_000 ? screenshotB64 : null]);
     await appendEvent(pool, { actor: "j6", action: "control_task_done", entityType: "control_task", entityId: taskId, after: { summary: step.summary } });
     await pool.query(`UPDATE mac_runtime SET last_success_at = now(), last_success_code = (SELECT code FROM control_task WHERE id = $1) WHERE id = 'primary'`, [taskId]).catch(() => {});
@@ -313,7 +318,9 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
   const recent = prior.slice(-4).map((x) => `${x.kind}|${x.summary}`.toLowerCase());
   const sig = `${step.kind}|${step.summary}`.toLowerCase();
   const repeats = recent.filter((r) => r === sig).length;
-  if (repeats >= 2) {
+  // Verifier-forced re-observations are bounded by recoveryDecision (budget + identical-claim guard);
+  // the generic repeat guard must not turn them into a question for Julian (live #113).
+  if (repeats >= 2 && !step.summary.startsWith(REJECTION_MARKER)) {
     await setTaskStatus(pool, taskId, "waiting_approval");
     deps.log?.("control loop detected", { kind: step.kind });
     return { status: "ask", message: `I keep trying the same step ("${step.summary}") without it working. Tell me how to proceed, or stop ${""}.` };

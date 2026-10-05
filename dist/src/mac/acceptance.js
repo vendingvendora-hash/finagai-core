@@ -10,6 +10,12 @@ export function deriveContract(request) {
     const base = { objective: request.slice(0, 300), allowedSideEffects: noSave ? ["no document saved"] : ["as requested"], terminalConditions: ["verifier passes", "max 2 verifier rejections", "80 steps"] };
     if (/^mac_chart:/.test(request))
         return { ...base, expectedOutcome: "a chart image of a meaningful series from the named workbook", requiredEvidence: ["artifact image", "series metadata"], verificationStrategy: "artifact", artifactRequirements: ["png, aspect = svg aspect"], expect: { screenshot: true } };
+    // File operations verify deterministically from the helper's own state check (fs-ops: hash/size/source gone),
+    // never through a model (live #113: a model grader falsely rejected a hash-verified move).
+    if (/\bmove_file\b|\btrash_file\b|\b(move|rename|trash|delete)\b[^.]{0,80}\b(file|folder|~\/|\.(txt|pdf|csv|xlsx|docx|png|jpg))/i.test(request)) {
+        const op = /trash|delete/i.test(request) && !/move/i.test(request) ? "trash_file" : "move_file";
+        return { ...base, expectedOutcome: `the ${op === "move_file" ? "move" : "trash"} is verified on disk`, requiredEvidence: [`${op} result "verified:"`], verificationStrategy: "deterministic", artifactRequirements: [], expect: { fileOp: op } };
+    }
     if (texts.length && app)
         return { ...base, expectedOutcome: `${app} shows the text ${texts.map((t) => JSON.stringify(t)).join(", ")}`, requiredEvidence: ["observe() after the last write", "frontmost app"], verificationStrategy: "ui_state", artifactRequirements: [], expect: { app, textContains: texts, noSave } };
     if (app && /\b(open|activate|launch|bring)\b/.test(r) && !/\b(type|enter|fill|write|send|click|create)\b/.test(r))
@@ -38,6 +44,13 @@ export async function verifyCompletion(deps, contract, trace, claimedSummary, fi
     const laterObserve = recentBad ? trace.slice(trace.indexOf(recentBad) + 1).some((t) => t.kind === "observe" || t.kind === "screenshot") : true;
     if (recentBad && !laterObserve)
         return { pass: false, strategy: s, reason: `last write step was ${recentBad.result.split(":")[0]} (${recentBad.summary}) and nothing re-observed the UI afterwards` };
+    if (s === "deterministic" && contract.expect.fileOp) {
+        const last = [...trace].reverse().find((t) => t.kind === contract.expect.fileOp);
+        if (!last)
+            return { pass: false, strategy: s, reason: `no ${contract.expect.fileOp} step ran` };
+        return /^verified:/i.test(last.result ?? "") ? { pass: true, strategy: s, reason: (last.result ?? "").slice(0, 200) }
+            : { pass: false, strategy: s, reason: `${contract.expect.fileOp} did not verify: ${(last.result ?? "no result").slice(0, 160)}` };
+    }
     if (s === "artifact")
         return finalScreenshotB64 ? { pass: true, strategy: s, reason: "final image present" } : { pass: false, strategy: s, reason: "no final image/artifact was produced" };
     if (s === "ui_state") {
@@ -63,15 +76,29 @@ ${trace.slice(-12).map((t) => `- [${t.kind}] ${t.summary}: ${(t.result ?? "").sl
 Reply with exactly one line: PASS: <why the evidence shows it> or FAIL: <what is missing or contradicted>.` }];
     if (finalScreenshotB64)
         content.push({ type: "image", mediaType: "image/png", dataBase64: finalScreenshotB64 });
+    const ask = async () => {
+        const r = await deps.model.complete({ pipeline: "j6", step: "verify", purpose: "concierge", promptVersion: "verify-2", model: deps.graderModel, maxTokens: 800,
+            system: "Independent task verifier. Be strict; the planner's claims are untrusted. Answer with one line starting PASS: or FAIL:.", messages: [{ role: "user", content }] });
+        return String(r.text ?? "").trim();
+    };
+    const parse = (text) => {
+        const m = text.match(/\b(PASS|FAIL)\b\W*([\s\S]*)/i);
+        if (!m)
+            return null;
+        const pass = m[1].toUpperCase() === "PASS";
+        return { pass, strategy: s, graded: true, reason: (m[2] ?? "").trim().slice(0, 300) || (pass ? "grader passed" : "grader rejected") };
+    };
     try {
-        const r = await deps.model.complete({ pipeline: "j6", step: "verify", purpose: "concierge", promptVersion: "verify-1", model: deps.graderModel, maxTokens: 200,
-            system: "Independent task verifier. Be strict; the planner's claims are untrusted.", messages: [{ role: "user", content }] });
-        const text = String(r.text ?? "").trim();
-        const pass = /^PASS:/i.test(text);
-        return { pass, strategy: s, graded: true, reason: text.replace(/^(PASS|FAIL):\s*/i, "").slice(0, 300) || (pass ? "grader passed" : "grader failed without reason") };
+        const first = parse(await ask());
+        if (first)
+            return first;
+        const second = parse(await ask()); // one retry: an empty/unparseable reply is not a verdict
+        if (second)
+            return second;
+        return { pass: false, unavailable: true, strategy: s, graded: true, reason: "verifier returned no readable verdict twice" };
     }
     catch (e) {
-        return { pass: false, strategy: s, graded: true, reason: `verifier unavailable: ${String(e?.message ?? e).slice(0, 120)}` };
+        return { pass: false, unavailable: true, strategy: s, graded: true, reason: `verifier unavailable: ${String(e?.message ?? e).slice(0, 120)}` };
     }
 }
 /**

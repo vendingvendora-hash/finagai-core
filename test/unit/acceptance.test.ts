@@ -97,3 +97,22 @@ describe("read-only shell commands (live task #104)", () => {
       expect(isReadOnlyCommand(c)).toBe(false);
   });
 });
+
+describe("live #113 regressions", () => {
+  it("file moves verify deterministically from the helper's verified result — no model grader", async () => {
+    const c = deriveContract("Move ~/Desktop/finagai-move-test.txt to ~/Documents with move_file");
+    expect(c.verificationStrategy).toBe("deterministic"); expect(c.expect.fileOp).toBe("move_file");
+    const ok = await verifyCompletion(noModel, c, [{ kind: "move_file", summary: "move", result: "verified: moved 22 bytes, sha256 ab12… -> ~/Documents/x" }], "Moved", null);
+    expect(ok.pass).toBe(true);
+    const bad = await verifyCompletion(noModel, c, [{ kind: "move_file", summary: "move", result: "error: collision: exists" }], "Moved", null);
+    expect(bad.pass).toBe(false);
+  });
+  it("grader: markdown/lowercase verdicts parse; empty replies retry once and become 'unavailable', never a FAIL", async () => {
+    let n = 0;
+    const md = { model: { complete: async () => ({ text: "**Pass** — the trace shows it" }) }, graderModel: "g" } as never;
+    expect((await verifyCompletion(md, deriveContract("do something open-ended"), [], "Done", null)).pass).toBe(true);
+    const empty = { model: { complete: async () => { n++; return { text: "" }; } }, graderModel: "g" } as never;
+    const v = await verifyCompletion(empty, deriveContract("do something open-ended"), [], "Done", null);
+    expect(v.unavailable).toBe(true); expect(v.pass).toBe(false); expect(n).toBe(2);
+  });
+});
