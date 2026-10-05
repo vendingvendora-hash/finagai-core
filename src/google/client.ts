@@ -186,7 +186,9 @@ export function driveQuery(groups: string[]): string {
   const one = (g: string) => {
     const words = g.split(/\s+/).filter(Boolean);
     const byName = words.map((w) => `name contains '${esc(w)}'`).join(" and ");
-    return `(fullText contains '${esc(words.join(" "))}' or (${byName}))`;
+    // Live fix (R02): full-text AND of several common words ("degree", "leverage", "analysis") matched résumé JSONs.
+    // A multi-word subject must be in the file NAME; full text is used for single-word subjects (entities).
+    return words.length > 1 ? `(${byName})` : `(fullText contains '${esc(words[0]!)}' or ${byName})`;
   };
   return `(${groups.map(one).join(" or ")}) and trashed = false`;
 }

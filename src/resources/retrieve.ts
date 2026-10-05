@@ -27,13 +27,17 @@ const STOP = new Set(["prepare", "prep", "me", "for", "the", "a", "an", "my", "a
 /** Search groups: known entity names, else ONE group of the request's content words (matched together). */
 export function terms(plan: Pick<ResourcePlan, "entities" | "request">): string[] {
   if (plan.entities.length) return [...new Set(plan.entities.map((e) => e.name))];
-  const words = (plan.request.toLowerCase().match(/[a-z0-9áéíóúñ]{3,}/g) ?? []).filter((w) => !STOP.has(w)).slice(0, 4);
+  const raw = (plan.request.match(/[A-Za-z0-9ÁÉÍÓÚÑáéíóúñ]{3,}/g) ?? []).filter((w) => !STOP.has(w.toLowerCase()));
+  // Names Julian capitalizes ("Northwind Analytics", "Degree of Leverage Analysis") identify the subject; descriptive
+  // words around them ("interview", "application") are not required to appear in a matching email or file.
+  const proper = raw.filter((w) => /^[A-ZÁÉÍÓÚÑ0-9]/.test(w));
+  const words = (proper.length ? proper : raw).map((w) => w.toLowerCase()).slice(0, 4);
   return words.length ? [words.join(" ")] : [];
 }
 
 /**
  * Live fix (R09: "When is my Altarum interview?" returned Capital One and Canva mail): a Google result counts only
- * if it mentions the request's content — every word of an entity/one-word group, or at least half of a multi-word group.
+ * if it mentions the request's content — every word of at least one group (live R02: "half" let résumé JSONs through).
  */
 export function relevant<T extends { name: string; text: string }>(rows: T[], groups: string[]): T[] {
   if (!groups.length) return rows;
@@ -42,8 +46,17 @@ export function relevant<T extends { name: string; text: string }>(rows: T[], gr
     return groups.some((g) => {
       const w = g.toLowerCase().split(/\s+/).filter((y) => y.length >= 3);
       const hits = w.filter((y) => hay.includes(y)).length;
-      return w.length <= 1 ? hits === w.length : hits >= Math.ceil(w.length / 2);
+      return hits === w.length;
     });
+  });
+}
+
+/** Collapse timestamped copies (knowledge_base_backup_2026-…json, dossier_2026-…json, intel_…json): keep the first (newest). */
+export function dedupeVersions<T extends { name: string }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  return rows.filter((x) => {
+    const k = x.name.toLowerCase().replace(/\d{4}-\d{2}-\d{2}t[\d-]+(\.\d+)?z?/g, "").replace(/_?backup_?/g, "").replace(/[\s_-]+/g, " ").trim();
+    if (seen.has(k)) return false; seen.add(k); return true;
   });
 }
 
@@ -134,7 +147,7 @@ async function retrieveOne(pool: pg.Pool, plan: ResourcePlan, id: string, deps: 
         const g = deps.google;
         const fn = id === "google.gmail" ? g?.gmail : id === "google.calendar" ? g?.calendar : id === "google.drive" ? g?.drive : undefined;
         if (!g || !fn) { out.push({ capabilityId: id, status: "failed", items: [], note: "Google client not available in this process" }); return out[0]!; }
-        const rows = relevant(await fn.call(g, t), t);
+        const rows = dedupeVersions(relevant(await fn.call(g, t), t));
         const cap = id === "google.gmail" ? MAX_GMAIL_ITEMS : MAX_ITEMS;
         out.push({ capabilityId: id, status: rows.length ? "ok" : "empty", items: rows.slice(0, cap).map((x) => ({ title: x.name,
           detail: clip(x.text, /\[meeting summary\]/.test(x.text) ? MAX_SUMMARY_CHARS : MAX_CHARS), source: `${id} ${x.modified ?? ""}`.trim() })) });

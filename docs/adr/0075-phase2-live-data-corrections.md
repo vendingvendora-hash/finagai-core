@@ -32,3 +32,9 @@ R01–R10 were replayed live at dd3995d against Julian's real data. Seeded tests
 Budget enforcement is unchanged (it already reads llm_call). Adding Julian's university account requires his Google
 consent (human-only). A Workspace admin policy on that account could block a third-party app; if so, it is an external
 blocker to report, not to work around.
+
+## Follow-up (live re-run after deploy, same day)
+"Summarize the Degree of Leverage Analysis spreadsheet" still returned résumé JSONs (full-text AND of common words),
+and Job Finder's timestamped backups filled the result slots. Now: capitalized names in the request define the subject
+(descriptive words like "interview" are not required); a multi-word subject must appear in the Drive file name; a result
+must contain every subject word; timestamped copies collapse to the newest.

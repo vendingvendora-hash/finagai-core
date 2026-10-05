@@ -9,6 +9,9 @@ describe("search terms (live: 'analysis' alone matched unrelated job sheets)", (
     expect(terms({ entities: [], request: "Summarize the Degree of Leverage Analysis spreadsheet" })).toEqual(["degree leverage analysis"]);
     expect(terms({ entities: [], request: "What's the status of Altarum?" })).toEqual(["altarum"]);
     expect(terms({ entities: [], request: "Prepare me for Altarum" })).toEqual(["altarum"]);
+    expect(terms({ entities: [], request: "When is my Altarum interview?" })).toEqual(["altarum"]);
+    expect(terms({ entities: [], request: "Prepare me for my Northwind Analytics interview" })).toEqual(["northwind analytics"]);
+    expect(terms({ entities: [], request: "find the pricing memo" })).toEqual(["pricing memo"]);
   });
   it("Drive requires every word of a group (by name) or the words in full text — never any single word", () => {
     const q = driveQuery(["degree leverage analysis"]);
@@ -63,4 +66,22 @@ describe("relevance guard (live R09: Capital One/Canva mail returned as the Alta
     expect(relevant(rows, ["Altarum"])).toHaveLength(1);
   });
   it("no groups → nothing to filter on", () => { expect(relevant(rows, [])).toHaveLength(3); });
+});
+
+import { dedupeVersions } from "../../src/resources/retrieve.js";
+describe("live R02 follow-up: résumé JSONs and timestamped backups", () => {
+  it("a multi-word Drive subject must be in the file name (no full-text AND of common words)", () => {
+    const q = driveQuery(["degree leverage analysis"]);
+    expect(q).not.toContain("fullText");
+    expect(driveQuery(["altarum"])).toContain("fullText contains 'altarum'");
+  });
+  it("the guard requires every word of a group", () => {
+    expect(relevant([{ name: "Google Drive: knowledge_base.json", text: "B.S. degree ... financial analysis" }], ["degree leverage analysis"])).toHaveLength(0);
+    expect(relevant([{ name: "Google Drive: Degree of Leverage Analysis.xlsx", text: "" }], ["degree leverage analysis"])).toHaveLength(1);
+  });
+  it("timestamped copies collapse to the newest", () => {
+    const rows = ["knowledge_base_backup_2026-10-05T05-40-58-108Z.json", "knowledge_base_backup_2026-10-05T05-40-30-140Z.json", "knowledge_base.json",
+      "intel_2026-09-19T18-06-53-980Z.json", "intel_2026-09-19T18-05-42-914Z.json", "Degree of Leverage Analysis.xlsx"].map((name) => ({ name }));
+    expect(dedupeVersions(rows).map((r) => r.name)).toEqual(["knowledge_base_backup_2026-10-05T05-40-58-108Z.json", "intel_2026-09-19T18-06-53-980Z.json", "Degree of Leverage Analysis.xlsx"]);
+  });
 });
