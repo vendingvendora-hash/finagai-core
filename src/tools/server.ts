@@ -10,6 +10,8 @@ import { getRuntime, macOnline, deriveLifecycle, macStatus } from "../mac/runtim
 import { openInteraction, linkTask, undelivered, markDelivered } from "../concierge/interactions.js";
 import { getContext, resolveFromMac } from "../mac/context.js";
 import { route } from "../mac/router.js";
+import { listCapabilities, refreshRegistry } from "../resources/registry.js";
+import { writeTrace, routeTraceRows } from "../resources/trace.js";
 import { z } from "zod";
 import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import { appendEvent } from "../db/index.js";
@@ -331,6 +333,8 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     const row = t.rows[0]!;
     await linkTask(deps.pool, ix.interaction.id, row.id);
     const routePlan = route(request, (await getRuntime(deps.pool))?.capabilities as never);
+    await writeTrace(deps.pool, { interactionId: ix.interaction.id, taskId: row.id, request }, routeTraceRows(routePlan))
+      .catch((e) => console.error("resource trace failed", e));
     await appendEvent(deps.pool, { actor: "julian", action: "control_task_created", entityType: "control_task", entityId: row.id,
       after: { code: Number(row.code), request: request.slice(0, 200), route: routePlan.primary }, client: deps.client });
     return ok("control_mac", { taskCode: Number(row.code),
@@ -380,6 +384,12 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
       await appendEvent(deps.pool, { actor: "julian", action: "control_task_created", entityType: "control_task", entityId: row.id, after: { code: Number(row.code), kind: "mac_chart", filename } });
     }
     await linkTask(deps.pool, ix.interaction.id, row.id);
+    await writeTrace(deps.pool, { interactionId: ix.interaction.id, taskId: row.id, request }, [
+      { capabilityId: "agent.m01_chart", decision: "used", reason: "deterministic workbook→chart workflow with artifact verification" },
+      { capabilityId: "mac.filesystem", decision: "used", reason: "Spotlight locates the workbook by name; no path needed from Julian" },
+      { capabilityId: "mac.local_parser", decision: "used", reason: "series read by the parser, not by looking at the UI" },
+      { capabilityId: "mac.keyboard_mouse", decision: "skipped", reason: "a parser path exists; visual control would be slower and less reliable" },
+    ]).catch((e) => console.error("resource trace failed", e));
     // Own the request this turn, but return within the MCP transport timeout (~60s) — holding the call
     // open for minutes made the connector report "server isn't responding". We wait a transport-safe 45s
     // here; if it's not done, we return stillRunning and the model keeps ownership by calling
@@ -406,6 +416,17 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     return ok("make_mac_chart", { taskCode: Number(row.code), ...lc, stillRunning: true,
       action: "call control_result with this taskCode again now; keep owning it until done or failed; do NOT ask Julian to check again",
       note: "If the task outlasts this turn, Finagai still delivers the finished chart to Julian's Messages automatically — tell him it's building and will arrive in Messages shortly; do not ask him to check again." });
+  });
+
+  server.registerTool("list_capabilities", {
+    description: "Read-only: what Finagai can use right now — Finagai state, Mac capabilities, Google, email, iMessage, workflows and models — each with live health, why, permissions, empirical reliability (only with >=5 samples), p50 latency, risk, freshness and source authority. Refreshes discovery first. Use before saying Finagai can't do or find something.",
+    inputSchema: z.object({ type: z.enum(["state", "mac", "external", "agent", "model"]).optional() }),
+  }, async ({ type }) => {
+    await refreshRegistry(deps.pool);
+    const rows = await listCapabilities(deps.pool, type ? { type } : undefined);
+    return helpers.ok("list_capabilities", { count: rows.length, capabilities: rows.map((r) => ({ id: r.id, health: r.health, why: r.health_reason, access: r.access,
+      operations: r.operations, reliability: r.reliability != null ? Number(r.reliability) : null, samples: r.samples, p50ms: r.latency_p50_ms, risk: r.risk,
+      freshness: r.freshness, authority: r.authority, permissions: r.permissions })) });
   });
 
   server.registerTool("execution_metrics", {

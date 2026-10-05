@@ -17,6 +17,7 @@ import { runReview } from "../pipelines/j3/review.js";
 import { createHandler } from "./app.js";
 import { createConciergeHandler } from "../concierge/routes.js";
 import { createControlHandler } from "../concierge/control-routes.js";
+import { configureRegistry, refreshRegistry } from "../resources/registry.js";
 import { GoogleClient } from "../google/client.js";
 import { createLogger } from "./log.js";
 const VERSION = process.env.RENDER_GIT_COMMIT?.slice(0, 12) ?? "dev";
@@ -60,6 +61,10 @@ async function main() {
         timezone: cfg.FINAGAI_TIMEZONE, homeBase: "Hyattsville, Maryland (Washington DC area; DCA, IAD and BWI airports)", log,
         ...(cfg.GOOGLE_CLIENT_ID && cfg.GOOGLE_CLIENT_SECRET && cfg.GOOGLE_REFRESH_TOKEN
             ? { google: new GoogleClient({ clientId: cfg.GOOGLE_CLIENT_ID, clientSecret: cfg.GOOGLE_CLIENT_SECRET, refreshToken: cfg.GOOGLE_REFRESH_TOKEN }) } : {}) }, cfg.CONCIERGE_HELPER_TOKEN, log);
+    // Phase 2B: capability registry — configured integrations are discovered here; health/evidence on refresh.
+    configureRegistry({ googleConfigured: !!(cfg.GOOGLE_CLIENT_ID && cfg.GOOGLE_CLIENT_SECRET && cfg.GOOGLE_REFRESH_TOKEN), resendConfigured: !!cfg.RESEND_API_KEY,
+        models: { planner: cfg.MODEL_J6_PLANNER, grader: cfg.MODEL_EVAL_GRADER, concierge: cfg.MODEL_J5_CONCIERGE, review: cfg.MODEL_J3_COMPOSE } });
+    refreshRegistry(pool).then((n) => log("capability registry refreshed", { capabilities: n })).catch((e) => log("capability registry refresh failed", { error: String(e?.message ?? e).slice(0, 200) }));
     const control = createControlHandler({ pool, model, modelId: cfg.MODEL_J5_CONCIERGE, plannerModel: cfg.MODEL_J6_PLANNER, graderModel: cfg.MODEL_EVAL_GRADER, thinkingTokens: cfg.J6_THINKING_TOKENS, log }, cfg.CONCIERGE_HELPER_TOKEN, log);
     const server = http.createServer(createHandler(cfg, { version: VERSION, startedAt: new Date() }, log, { keys: remoteKeys(cfg.OAUTH_JWKS_URL), mcp, approval, concierge, control,
         onClientObserved: async (clientId) => {

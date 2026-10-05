@@ -11,6 +11,7 @@ import { cancelTask, createTask, decideStep, getStep, getTaskResult, parseContro
 import { analyzeWorkbookToChart, rankCandidates, type Candidate } from "../mac/operator.js";
 import { registerArtifact, resolveRecentArtifact, markArtifactSent, claimInbound, finishInbound } from "./interaction.js";
 import { appendEvent } from "../db/index.js";
+import { maybeRefresh } from "../resources/registry.js";
 import { recordDiagnostic, recordHeartbeat, claimTask, taskProgress, macStatus, workerMayComplete, recordSuccess, sweepStaleTasks } from "../mac/runtime.js";
 import { completeForTask, setState as setInteractionState } from "./interactions.js";
 import { claimAction, reportAction, type ActionState } from "./actions.js";
@@ -129,6 +130,7 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
       }
       // ---- Mac runtime (ADR-066): heartbeat, claim/lease/progress, status ----
       if (path === "/mac/heartbeat") {
+        maybeRefresh(deps.pool).catch((e) => log("capability registry refresh failed", { error: String((e as Error)?.message ?? e).slice(0, 200) }));
         await recordHeartbeat(deps.pool, {
           reconnects: typeof body.reconnects === "number" ? body.reconnects : undefined,
           reconnected: body.reconnected && typeof body.reconnected === "object" ? body.reconnected as { downSince?: string | null; downSeconds?: number } : null,

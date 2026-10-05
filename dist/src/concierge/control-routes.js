@@ -9,6 +9,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { cancelTask, createTask, decideStep, getStep, getTaskResult, parseControlCommand, planNext, recordRun, setResultImage } from "../pipelines/j6/control.js";
 import { analyzeWorkbookToChart, rankCandidates } from "../mac/operator.js";
 import { registerArtifact, resolveRecentArtifact, markArtifactSent, claimInbound, finishInbound } from "./interaction.js";
+import { maybeRefresh } from "../resources/registry.js";
 import { recordDiagnostic, recordHeartbeat, claimTask, taskProgress, macStatus, workerMayComplete, recordSuccess, sweepStaleTasks } from "../mac/runtime.js";
 import { completeForTask, setState as setInteractionState } from "./interactions.js";
 import { claimAction, reportAction } from "./actions.js";
@@ -147,6 +148,7 @@ export function createControlHandler(deps, token, log) {
             }
             // ---- Mac runtime (ADR-066): heartbeat, claim/lease/progress, status ----
             if (path === "/mac/heartbeat") {
+                maybeRefresh(deps.pool).catch((e) => log("capability registry refresh failed", { error: String(e?.message ?? e).slice(0, 200) }));
                 await recordHeartbeat(deps.pool, {
                     reconnects: typeof body.reconnects === "number" ? body.reconnects : undefined,
                     reconnected: body.reconnected && typeof body.reconnected === "object" ? body.reconnected : null,

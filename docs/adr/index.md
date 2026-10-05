@@ -72,3 +72,4 @@ Full text of ADR-001 to ADR-026 is in the approved Claude Docs; this index is th
 | ADR-070 | Control hierarchy (WO4/WO8): AX-first actions with observe→act→verify (mac-actions.mjs); health-aware capability router injected into the planner; routing benchmark. | Decided by Julian |
 | ADR-071 | Controlled release (Phase 0): Render auto-deploy off; release.yml migrates (approval-gated, only when migrations changed) then deploys via hook and verifies /health. | Decided by Julian |
 | ADR-072 | Phase 1: acceptance contracts + independent verifier before done; false_completion class; interaction telemetry + daily metrics view (0022); helper diagnostics to Core. | Decided by Julian |
+| ADR-073 | Phase 2: capability registry (0023) with live discovery/health, evidence-gated reliability, resource traces, list_capabilities. | Decided by Julian |
