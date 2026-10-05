@@ -44,7 +44,7 @@ describe("moveFileVerified", () => {
     expect(ok.ok).toBe(true); expect(ok.method).toBe("copy-verify-rename");
     expect(readdirSync(d).filter((f) => f.includes("partial"))).toEqual([]);
     writeFileSync(join(d, "c.txt"), "original");
-    const bad = await moveFileVerified(join(d, "c.txt"), join(d, "e.txt"), { fsImpl: { rename: async () => { throw exdev; }, copyFile: async (_s: string, t: string) => writeFileSync(t, "corrupt!") } });
+    const bad = await moveFileVerified(join(d, "c.txt"), join(d, "e.txt"), { fsImpl: { rename: async () => { throw exdev; }, copyFile: async (_s: unknown, t: unknown) => writeFileSync(String(t), "corrupt!") } });
     expect(bad.ok).toBe(false); expect(existsSync(join(d, "c.txt"))).toBe(true); expect(existsSync(join(d, "e.txt"))).toBe(false);
     expect(readdirSync(d).filter((f) => f.includes("partial"))).toEqual([]);
   });

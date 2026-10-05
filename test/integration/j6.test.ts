@@ -178,4 +178,26 @@ describe.skipIf(!pool)("J6 control lifecycle", () => {
     const row = (await pool!.query(`SELECT status, terminal_reason, failure_class FROM control_task WHERE id = $1`, [task.id])).rows[0];
     expect(row).toMatchObject({ status: "failed", terminal_reason: "repeated_claim_without_new_evidence", failure_class: "false_completion" });
   });
+
+  it("live task #80 regression: a truncated planner reply is repaired once instead of silently failing", async () => {
+    const task = await createTask(pool!, "List the files in ~/Downloads and report them", "chat");
+    const d = deps(new Script([
+      { kind: "list_files", params: { dir: "~/Downloads" }, risk: "read", summary: "List Downloads" },
+      '{"reflection":"got the list","kind":"done","summary":"Files: a.pdf, b.xlsx, c.png, d.dmg, e.zip, f.mov, g',   // cut off mid-JSON
+      { kind: "done", summary: "Listed the Downloads folder (see attached results)." },                             // repaired reply
+      "PASS: the list_files step returned the folder contents",
+    ]));
+    const a = await planNext(d, task.id, "s"); await recordRun(pool!, a.step!.id, true, "a.pdf\nb.xlsx\nc.png");
+    const b = await planNext(d, task.id, "s");
+    expect(b.status).toBe("done");
+  });
+
+  it("two unreadable replies → failed with failure_class model_parse and a stated reason (never silent)", async () => {
+    const task = await createTask(pool!, "List the files in ~/Desktop", "chat");
+    const d = deps(new Script(['{"kind":"list_fi', '{"kind":"li']));
+    const a = await planNext(d, task.id, "s");
+    expect(a.status).toBe("failed");
+    const row = (await pool!.query(`SELECT failure_class, result_summary FROM control_task WHERE id = $1`, [task.id])).rows[0];
+    expect(row.failure_class).toBe("model_parse"); expect(row.result_summary).toMatch(/unreadable reply twice/);
+  });
 });

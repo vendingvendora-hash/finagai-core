@@ -41,6 +41,9 @@ THINK in a plan-act-reflect loop every turn:
 2) PLAN: in one line, the shortest path from here to the goal.
 3) ACT: choose the single next action.
 
+Keep every field short (reflection/plan/summary ≤ 300 characters). Read results (file lists, page text, file
+contents) are attached to the final report automatically — NEVER copy them into "summary"; for done, summarize
+the answer in one or two sentences.
 Output ONLY this JSON object:
 {"reflection":"<what the last result tells you / why it failed>","plan":"<one line to the goal>","kind":"...","params":{...},"risk":"read|write","summary":"<one line Julian could approve without seeing the screen>","expect":"<what the screen should show after this action>","done":false}
 
@@ -142,7 +145,7 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
         content.push({ type: "image", mediaType: "image/png", dataBase64: screenshotB64 });
     const basePlan = {
         pipeline: "j6", step: "plan", purpose: "concierge", promptVersion: J6_PROMPT_VERSION,
-        system: systemPrompt(now.toTimeString().slice(9), today, task.request), messages: [{ role: "user", content }], maxTokens: 1200,
+        system: systemPrompt(now.toTimeString().slice(9), today, task.request), messages: [{ role: "user", content }], maxTokens: 3000,
     };
     await pool.query(`UPDATE control_task SET model_calls = model_calls + 1 WHERE id = $1`, [taskId]).catch(() => { });
     let step;
@@ -161,6 +164,22 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
             r = await deps.model.complete({ ...basePlan, model: deps.modelId });
         }
         step = parseStep(r.text);
+        if (!step) {
+            // An unparseable reply (often truncated JSON) must not silently fail the task: one compact repair attempt.
+            deps.log?.("planner reply unparseable; repairing", { tail: String(r.text).slice(-160) });
+            const repair = await deps.model.complete({ ...basePlan, model: deps.modelId, maxTokens: 800,
+                messages: [{ role: "user", content }, { role: "assistant", content: String(r.text).slice(0, 4000) },
+                    { role: "user", content: "Your reply was not ONE valid JSON step (it may have been cut off). Reply again with ONE short JSON object only, every field ≤ 300 characters; do not list read results." }] });
+            await pool.query(`UPDATE control_task SET model_calls = model_calls + 1 WHERE id = $1`, [taskId]).catch(() => { });
+            step = parseStep(repair.text);
+            if (!step) {
+                await pool.query(`UPDATE control_task SET status = 'failed', failure_class = 'model_parse', terminal_reason = 'model_parse',
+          result_summary = 'The planner returned an unreadable reply twice; nothing was done after the last completed step.', updated_at = now() WHERE id = $1`, [taskId]);
+                const { completeForTask } = await import("../../concierge/interactions.js");
+                await completeForTask(pool, taskId, { ok: false, summary: "Stopped: the planner's reply could not be read (twice)." }).catch(() => { });
+                return { status: "failed", message: "planner reply unreadable twice" };
+            }
+        }
     }
     catch (err) {
         if (err instanceof BudgetBlockedError) {
@@ -168,11 +187,12 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
             return { status: "failed", message: "budget reached" };
         }
         deps.log?.("planner failed", { error: String(err?.message ?? err).slice(0, 160) });
-        await setTaskStatus(pool, taskId, "failed");
+        await pool.query(`UPDATE control_task SET status = 'failed', failure_class = 'model_error', terminal_reason = 'model_error',
+      result_summary = $2, updated_at = now() WHERE id = $1`, [taskId, `The planner model call failed: ${String(err?.message ?? err).slice(0, 200)}`]);
         return { status: "failed", message: "couldn't plan the next step" };
     }
     if (!step) {
-        await setTaskStatus(pool, taskId, "failed");
+        await pool.query(`UPDATE control_task SET status = 'failed', failure_class = 'model_parse', terminal_reason = 'model_parse', result_summary = 'Could not plan the next step.', updated_at = now() WHERE id = $1`, [taskId]);
         return { status: "failed", message: "could not plan the next step" };
     }
     if (step.done) {
