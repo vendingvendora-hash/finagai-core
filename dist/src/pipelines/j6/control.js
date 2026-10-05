@@ -29,7 +29,22 @@ export function isReadOnlyCommand(cmd) {
         return false;
     if (/\s-(exec|delete|ok|fprint|i\b)|\s--in-place|\s-w\b/.test(c))
         return false;
-    return READONLY_BINARIES.test(c);
+    if (!READONLY_BINARIES.test(c))
+        return false;
+    // Protected paths stay behind Julian's ok even for reads — mirrors the helper's EXCLUDED_PATH (the helper
+    // config with its bearer token lives in ~/.finagai; live #104 was correctly refused there).
+    const tokens = c.split(/\s+/).slice(1);
+    for (const t of tokens) {
+        if (/(^|\/)\.[^/\s]/.test(t))
+            return false; // any hidden component (~/.finagai, .ssh, .., .env)
+        if (t.startsWith("/") && !t.startsWith("/Users/"))
+            return false; // system paths (/etc, /private, /var)
+        if (/\/Library\/(?!CloudStorage\/|Mobile Documents\/)|^~?\/?Library\b/.test(t))
+            return false;
+        if (/keychain|password|passwd|\.ssh|\.gnupg|finagai-core|node_modules|\.(key|pem|p12|kdbx|keychain-db|sqlite|db)$/i.test(t))
+            return false;
+    }
+    return true;
 }
 export function classifyRisk(kind) {
     return READ_KINDS.has(kind) ? "read" : "write";

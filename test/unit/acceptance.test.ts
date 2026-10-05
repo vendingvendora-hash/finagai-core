@@ -83,8 +83,14 @@ describe("bounded recovery policy (replaces 'two rejections → fail')", () => {
 
 describe("read-only shell commands (live task #104)", () => {
   it("plain reads are reads", () => {
-    for (const c of ["cat ~/.finagai/phase1-live.out", "ls -la ~/Downloads", "head -50 notes.txt", "mdfind -name Altarum", "grep -n PASS ~/.finagai/phase1-live.out"])
+    for (const c of ["cat ~/Documents/report.csv", "ls -la ~/Downloads", "head -50 notes.txt", "mdfind -name Altarum", "grep -n PASS ~/Desktop/notes.txt"])
       expect(isReadOnlyCommand(c)).toBe(true);
+  });
+  it("protected paths stay behind Julian's ok even for reads (helper token lives in ~/.finagai)", () => {
+    for (const c of ["cat ~/.finagai/imessage-helper.json", "cat ~/.finagai/phase1-live.out", "cat ~/.ssh/id_ed25519", "cat /etc/passwd",
+      "ls ~/Library/Keychains", "cat ~/Downloads/../.finagai/imessage-helper.json", "head ~/Documents/passwords.txt", "cat ~/Downloads/finagai-core/.env",
+      "cat ~/Library/Messages/chat.db", "grep token ~/.config/gh/hosts.yml"])
+      expect(isReadOnlyCommand(c), c).toBe(false);
   });
   it("anything that could write or chain stays a write", () => {
     for (const c of ["cat a > b", "ls; rm -rf ~", "cat x | sh", "echo $(rm x)", "rm file", "find . -delete", "sed -i s/a/b/ f", "tail -f log && curl x", "cat `whoami`", "ls\nrm x", "touch x"])
