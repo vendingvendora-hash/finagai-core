@@ -19,7 +19,7 @@ import { createHandler } from "./app.js";
 import { createConciergeHandler } from "../concierge/routes.js";
 import { createControlHandler } from "../concierge/control-routes.js";
 import { configureRegistry, refreshRegistry } from "../resources/registry.js";
-import { GoogleClient } from "../google/client.js";
+import { MultiGoogleClient } from "../google/multi.js";
 import { createLogger } from "./log.js";
 
 const VERSION = process.env.RENDER_GIT_COMMIT?.slice(0, 12) ?? "dev";
@@ -46,8 +46,10 @@ async function main() {
     budget: async () => ({ monthToDateUsd: await recorder.monthToDateUsd(new Date()),
       targetUsd: cfg.MODEL_BUDGET_TARGET_USD_MONTH, ceilingUsd: cfg.MODEL_HARD_CEILING_USD_MONTH }),
   };
+  // ADR-075: every authorized Google account is searched (primary + GOOGLE_REFRESH_TOKENS_EXTRA).
   const sharedGoogle = cfg.GOOGLE_CLIENT_ID && cfg.GOOGLE_CLIENT_SECRET && cfg.GOOGLE_REFRESH_TOKEN
-    ? new GoogleClient({ clientId: cfg.GOOGLE_CLIENT_ID, clientSecret: cfg.GOOGLE_CLIENT_SECRET, refreshToken: cfg.GOOGLE_REFRESH_TOKEN }) : undefined;
+    ? MultiGoogleClient.fromConfig({ clientId: cfg.GOOGLE_CLIENT_ID, clientSecret: cfg.GOOGLE_CLIENT_SECRET,
+        refreshTokens: [cfg.GOOGLE_REFRESH_TOKEN, ...(cfg.GOOGLE_REFRESH_TOKENS_EXTRA ?? "").split(",")] }) : undefined;
   const mcp = createMcpHandler(() => buildMcpServer({ pool, cfg, client: "claude_ai", j2: { pool, model, cfg }, ...(sharedGoogle ? { google: sharedGoogle } : {}),
     extend: registerJ3Tools(pool, j3) }));
   const base = new URL(cfg.FINAGAI_PUBLIC_BASE_URL);
@@ -63,8 +65,7 @@ async function main() {
   });
   const concierge = createConciergeHandler({ pool, model, modelId: cfg.MODEL_J5_CONCIERGE, maxSearches: cfg.CONCIERGE_MAX_SEARCHES,
     timezone: cfg.FINAGAI_TIMEZONE, homeBase: "Hyattsville, Maryland (Washington DC area; DCA, IAD and BWI airports)", log,
-    ...(cfg.GOOGLE_CLIENT_ID && cfg.GOOGLE_CLIENT_SECRET && cfg.GOOGLE_REFRESH_TOKEN
-      ? { google: new GoogleClient({ clientId: cfg.GOOGLE_CLIENT_ID, clientSecret: cfg.GOOGLE_CLIENT_SECRET, refreshToken: cfg.GOOGLE_REFRESH_TOKEN }) } : {}) }, cfg.CONCIERGE_HELPER_TOKEN, log);
+    ...(sharedGoogle ? { google: sharedGoogle } : {}) }, cfg.CONCIERGE_HELPER_TOKEN, log);
   // Phase 2B: capability registry — configured integrations are discovered here; health/evidence on refresh.
   configureRegistry({ googleConfigured: !!(cfg.GOOGLE_CLIENT_ID && cfg.GOOGLE_CLIENT_SECRET && cfg.GOOGLE_REFRESH_TOKEN), resendConfigured: !!cfg.RESEND_API_KEY,
     ...(sharedGoogle ? { googleAccount: () => sharedGoogle.account() } : {}),

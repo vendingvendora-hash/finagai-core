@@ -77,7 +77,7 @@ Reply with exactly one line: PASS: <why the evidence shows it> or FAIL: <what is
     if (finalScreenshotB64)
         content.push({ type: "image", mediaType: "image/png", dataBase64: finalScreenshotB64 });
     const ask = async () => {
-        const r = await deps.model.complete({ pipeline: "j6", step: "verify", purpose: "concierge", promptVersion: "verify-2", model: deps.graderModel, maxTokens: 800,
+        const r = await deps.model.complete({ pipeline: "j6", step: "verify", purpose: "concierge", promptVersion: "verify-2", model: deps.graderModel, maxTokens: 800, ...(deps.taskId ? { requestId: deps.taskId } : {}),
             system: "Independent task verifier. Be strict; the planner's claims are untrusted. Answer with one line starting PASS: or FAIL:.", messages: [{ role: "user", content }] });
         return String(r.text ?? "").trim();
     };

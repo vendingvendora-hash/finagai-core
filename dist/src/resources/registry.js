@@ -70,7 +70,10 @@ export async function discover(pool, env = ENV) {
     const ageS = rt?.last_heartbeat_at ? (Date.now() - new Date(rt.last_heartbeat_at).getTime()) / 1000 : Infinity;
     const online = ageS < 45;
     const caps = rt?.capabilities ?? {};
-    const probe = (k) => (!online ? "down" : caps[k] === "PASS" ? "healthy" : caps[k] ? "down" : "unknown");
+    // Live fix: the helper reports probes as booleans (accessibility=true) while older builds sent "PASS".
+    const passed = (v) => v === "PASS" || v === true || v === "true" || v === "granted";
+    const failed = (v) => v != null && v !== "unknown" && !passed(v);
+    const probe = (k) => (!online ? "down" : passed(caps[k]) ? "healthy" : failed(caps[k]) ? "down" : "unknown");
     const macMap = { "mac.filesystem": "filesystem", "mac.screen": "screenCapture", "mac.accessibility": "accessibility", "mac.app_scripting": "accessibility",
         "mac.keyboard_mouse": "accessibility", "mac.browser": "browser", "mac.context": "activeWindow" };
     for (const c of CATALOG.filter((x) => x.type === "mac")) {

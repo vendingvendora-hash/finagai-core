@@ -136,6 +136,8 @@ export async function sweepStaleTasks(pool) {
     const { completeForTask } = await import("../concierge/interactions.js");
     for (const r of [...a.rows, ...b.rows])
         await completeForTask(pool, r.id, { ok: false, summary: "task did not complete on the Mac" }).catch(() => { });
+    const { reconcileInteractions } = await import("../concierge/interactions.js");
+    await reconcileInteractions(pool).catch(() => { });
     return { abandoned: a.rowCount ?? 0, stalled: b.rowCount ?? 0 };
 }
 //# sourceMappingURL=runtime.js.map

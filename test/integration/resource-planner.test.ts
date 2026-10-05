@@ -119,9 +119,9 @@ describe.skipIf(!pool)("R03-live: real Altarum data shapes — nothing seeded, e
   const realGoogle = {
     calendar: async () => [],                                               // no Altarum events on Julian's calendar
     gmail: async () => [
-      { name: "Gmail: Interview confirmation: Altarum technical panel Sep 28", path: "gmail:b3", modified: "2026-09-24",
+      { name: "Gmail: Interview confirmation: Northwind Analytics technical panel Sep 28", path: "gmail:b3", modified: "2026-09-24",
         text: "From: Beth Young <byoung@altarum.org>\nPanel: Frank McKenna (Senior Contracts Specialist), Carley Kirk (Senior Director, Strategy)." },
-      { name: "Gmail: Altarum Technical Panel — meeting notes", path: "gmail:ot", modified: "2026-09-28",
+      { name: "Gmail: Northwind Analytics Technical Panel — meeting notes", path: "gmail:ot", modified: "2026-09-28",
         text: "From: Otter.ai\n[meeting summary] " + "Discussion of pricing model assumptions, contract structures and FP&A tooling. ".repeat(30) },
     ],
     drive: async () => [],
@@ -149,5 +149,57 @@ describe.skipIf(!pool)("R03-live: real Altarum data shapes — nothing seeded, e
     g = (await reg.listCapabilities(live)).find((c) => c.id === "google.gmail")!;
     expect(g.health).toBe("degraded"); expect(g.health_reason).toMatch(/invalid_grant/);
     reg.resetAccountCache();
+  });
+});
+
+describe.skipIf(!pool)("ADR-075 live regressions (Oct 5 run against Julian's real data)", () => {
+  const p2 = createPool(url!);
+  beforeAll(async () => { await refreshRegistry(p2, env); });       // isolate from earlier probe-failure tests
+  afterAll(async () => { await p2.end(); });
+  const realShape = {
+    calendar: async () => [],
+    gmail: async (t: string[]) => (/altarum|northwind/.test(t.join(" ").toLowerCase())
+      ? [{ name: "Gmail: Interview with Northwind / Pricing Analyst [perez.julian@correounivalle.edu.co]", path: "gmail:b", text: "From: Beth.Young@altarum.org\nconfirmed for 9/28 panel" }] : []),
+    drive: async () => [],
+  };
+  it("unrelated recent artifacts are NOT returned as prior work for Altarum; deictic requests still get recency", async () => {
+    await p2.query(`INSERT INTO artifact (kind, storage_ref, summary) VALUES ('result', 'x', 'move_file succeeded: finagai-move-test.txt moved')`);
+    const p = await planResources(p2, "Prepare me for Northwind");
+    const r = await retrieve(p2, p, { google: realShape });
+    expect(r.find((x) => x.capabilityId === "state.artifacts")!.status).toBe("empty");
+    const d = await planResources(p2, "Show me the last result");
+    const rd = await retrieve(p2, { ...d, use: [{ capabilityId: "state.artifacts", why: "t", relevance: 1 }] as typeof d.use }, { google: realShape });
+    expect(rd.find((x) => x.capabilityId === "state.artifacts")!.status).toBe("ok");
+  });
+  it("R01-live: status of something Finagai doesn't know yet → answered from email, not 'nothing found'", async () => {
+    const p = await planResources(p2, "What's the status of my Northwind application?");   // unknown to Finagai state, like Altarum live
+    const r = await retrieve(p2, p, { google: realShape });
+    const gm = r.find((x) => x.capabilityId === "google.gmail");
+    expect(gm?.status).toBe("ok");
+    expect(gm!.items[0]!.title).toMatch(/correounivalle/);
+  });
+  it("'that chart' returns the latest CHART; an action capability is not a 'Mac-side source'", async () => {
+    await p2.query(`INSERT INTO artifact (kind, storage_ref, summary) VALUES ('chart', 'c', 'Altarum pricing chart'), ('result', 'r', 'newer non-chart result')`);
+    const d = await planResources(p2, "Send that chart to Beth");
+    const rd = await retrieve(p2, { ...d, use: [{ capabilityId: "state.artifacts", why: "t", relevance: 1 }, { capabilityId: "resend.email", why: "t", relevance: 1 }] as typeof d.use }, { google: realShape });
+    const art = rd.find((x) => x.capabilityId === "state.artifacts")!;
+    expect(art.items.every((i) => i.title.startsWith("chart"))).toBe(true);
+    expect(rd.find((x) => x.capabilityId === "resend.email")!.note).toMatch(/action capability/);
+  });
+  it("a delegated Mac source stays authoritative; Drive is only a supplement, not 'answered by'", async () => {
+    const p = await planResources(p2, "Summarize the Degree of Leverage Analysis spreadsheet");
+    const g = { ...realShape, drive: async () => [{ name: "Google Drive: Degree of Leverage Analysis.xlsx", path: "d", text: "degree leverage analysis" }] };
+    const r = await retrieve(p2, p, { google: g });
+    const { effectiveAuthority } = await import("../../src/resources/retrieve.js");
+    const eff = effectiveAuthority(p, r).documents!;
+    expect(eff.source).toBe("mac.local_parser");
+    expect(eff.note).toMatch(/Mac operator.*google\.drive has supplementary/);
+  });
+  it("Mac helper booleans (accessibility=true) count as PASS, not down", async () => {
+    await recordHeartbeat(p2, { helperVersion: "bool-probe", startedAt: new Date().toISOString(),
+      capabilities: { accessibility: true, browser: true, activeWindow: true } as unknown as Record<string, string> });
+    await refreshRegistry(p2, env);
+    const h = (await p2.query<{ id: string; health: string }>(`SELECT id, health FROM capability WHERE id IN ('mac.accessibility','mac.browser','mac.context')`)).rows;
+    expect(h.every((x) => x.health === "healthy")).toBe(true);
   });
 });

@@ -38,6 +38,8 @@ export const configSchema = z.object({
   GOOGLE_CLIENT_ID: z.string().min(10).optional(),
   GOOGLE_CLIENT_SECRET: z.string().min(10).optional(),
   GOOGLE_REFRESH_TOKEN: z.string().min(10).optional(),
+  /** ADR-075: refresh tokens for Julian's OTHER Google accounts (comma-separated); searched alongside the primary. */
+  GOOGLE_REFRESH_TOKENS_EXTRA: z.string().min(10).optional(),
   /** Searches allowed per concierge draft. */
   CONCIERGE_MAX_SEARCHES: z.coerce.number().int().min(0).max(5).default(3),
   /** ADR-025 (clarified): normal Lean pilot budget. */
@@ -87,6 +89,7 @@ export const SECRET_KEYS = [
   "CONCIERGE_HELPER_TOKEN",
   "GOOGLE_CLIENT_SECRET",
   "GOOGLE_REFRESH_TOKEN",
+  "GOOGLE_REFRESH_TOKENS_EXTRA",
 ] as const satisfies readonly (keyof Config)[];
 
 /** Keys that must hold real values (no angle-bracket placeholders) in production. */

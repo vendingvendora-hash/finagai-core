@@ -62,7 +62,7 @@ export function lastObservation(trace: StepTrace[]): Record<string, string> | nu
 }
 
 export async function verifyCompletion(
-  deps: { model: Pick<MeteredModelClient, "complete">; graderModel: string },
+  deps: { model: Pick<MeteredModelClient, "complete">; graderModel: string; taskId?: string },
   contract: AcceptanceContract, trace: StepTrace[], claimedSummary: string, finalScreenshotB64: string | null,
 ): Promise<Verdict> {
   const s = contract.verificationStrategy;
@@ -102,7 +102,7 @@ ${trace.slice(-12).map((t) => `- [${t.kind}] ${t.summary}: ${(t.result ?? "").sl
 Reply with exactly one line: PASS: <why the evidence shows it> or FAIL: <what is missing or contradicted>.` }];
   if (finalScreenshotB64) content.push({ type: "image", mediaType: "image/png", dataBase64: finalScreenshotB64 });
   const ask = async () => {
-    const r = await deps.model.complete({ pipeline: "j6", step: "verify", purpose: "concierge", promptVersion: "verify-2", model: deps.graderModel, maxTokens: 800,
+    const r = await deps.model.complete({ pipeline: "j6", step: "verify", purpose: "concierge", promptVersion: "verify-2", model: deps.graderModel, maxTokens: 800, ...(deps.taskId ? { requestId: deps.taskId } : {}),
       system: "Independent task verifier. Be strict; the planner's claims are untrusted. Answer with one line starting PASS: or FAIL:.", messages: [{ role: "user", content }] } as never);
     return String((r as { text?: string }).text ?? "").trim();
   };

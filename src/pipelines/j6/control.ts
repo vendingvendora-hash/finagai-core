@@ -278,7 +278,7 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
   if (screenshotB64) content.push({ type: "image", mediaType: "image/png", dataBase64: screenshotB64 });
 
   const basePlan = {
-    pipeline: "j6" as const, step: "plan", purpose: "concierge" as const, promptVersion: J6_PROMPT_VERSION,
+    pipeline: "j6" as const, step: "plan", purpose: "concierge" as const, promptVersion: J6_PROMPT_VERSION, requestId: taskId,   // cost attribution (ADR-075)
     system: systemPrompt(now.toTimeString().slice(9), today, task.request), messages: [{ role: "user" as const, content }], maxTokens: 3000,
   };
   await pool.query(`UPDATE control_task SET model_calls = model_calls + 1 WHERE id = $1`, [taskId]).catch(() => {});
@@ -330,7 +330,7 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
       `UPDATE control_task SET completion_claims = completion_claims + 1 WHERE id = $1 RETURNING acceptance, verification_rejections, last_claim_summary, created_at`, [taskId]);
     const contract = taskRow.rows[0]?.acceptance ?? deriveContract(task.request);
     const trace = prior.map((x) => ({ kind: x.kind, summary: x.summary, result: x.result ?? null }));
-    const verdict = await verifyCompletion({ model: deps.model, graderModel: deps.graderModel ?? deps.plannerModel ?? deps.modelId }, contract, trace, step.summary, screenshotB64);
+    const verdict = await verifyCompletion({ model: deps.model, graderModel: deps.graderModel ?? deps.plannerModel ?? deps.modelId, taskId }, contract, trace, step.summary, screenshotB64);
     await pool.query(`UPDATE control_task SET verification = $2::jsonb, verify_attempts = verify_attempts + 1, last_claim_summary = $3, updated_at = now() WHERE id = $1`,
       [taskId, JSON.stringify({ ...verdict, at: new Date().toISOString() }), step.summary.slice(0, 500)]);
     if (!verdict.pass && verdict.unavailable) {

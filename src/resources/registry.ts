@@ -90,7 +90,10 @@ export async function discover(pool: pg.Pool, env: DiscoveryEnv = ENV): Promise<
   const ageS = rt?.last_heartbeat_at ? (Date.now() - new Date(rt.last_heartbeat_at).getTime()) / 1000 : Infinity;
   const online = ageS < 45;
   const caps = rt?.capabilities ?? {};
-  const probe = (k: string): Health => (!online ? "down" : caps[k] === "PASS" ? "healthy" : caps[k] ? "down" : "unknown");
+  // Live fix: the helper reports probes as booleans (accessibility=true) while older builds sent "PASS".
+  const passed = (v: unknown) => v === "PASS" || v === true || v === "true" || v === "granted";
+  const failed = (v: unknown) => v != null && v !== "unknown" && !passed(v);
+  const probe = (k: string): Health => (!online ? "down" : passed(caps[k]) ? "healthy" : failed(caps[k]) ? "down" : "unknown");
   const macMap: Record<string, string> = { "mac.filesystem": "filesystem", "mac.screen": "screenCapture", "mac.accessibility": "accessibility", "mac.app_scripting": "accessibility",
     "mac.keyboard_mouse": "accessibility", "mac.browser": "browser", "mac.context": "activeWindow" };
   for (const c of CATALOG.filter((x) => x.type === "mac")) {

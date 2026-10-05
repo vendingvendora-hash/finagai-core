@@ -183,5 +183,7 @@ export async function sweepStaleTasks(pool: pg.Pool): Promise<{ abandoned: numbe
      WHERE status = 'active' AND claimed_at IS NOT NULL AND lease_until < now() AND last_progress_at < now() - interval '10 minutes' RETURNING id`);
   const { completeForTask } = await import("../concierge/interactions.js");
   for (const r of [...a.rows, ...b.rows]) await completeForTask(pool, r.id, { ok: false, summary: "task did not complete on the Mac" }).catch(() => {});
+  const { reconcileInteractions } = await import("../concierge/interactions.js");
+  await reconcileInteractions(pool).catch(() => {});
   return { abandoned: a.rowCount ?? 0, stalled: b.rowCount ?? 0 };
 }

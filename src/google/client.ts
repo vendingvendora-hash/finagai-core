@@ -51,8 +51,7 @@ export class GoogleClient {
 
   /** Drive full-text and name search; Google files exported as text, others listed with a link. */
   async drive(terms: string[]): Promise<FileExcerpt[]> {
-    const esc = (t: string) => t.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-    const q = `(${terms.map((t) => `fullText contains '${esc(t)}' or name contains '${esc(t)}'`).join(" or ")}) and trashed = false`;
+    const q = driveQuery(terms);
     const list = await this.json<{ files?: Array<{ id: string; name: string; mimeType: string; modifiedTime: string; webViewLink?: string }> }>(
       `https://www.googleapis.com/drive/v3/files?pageSize=6&orderBy=modifiedTime desc&supportsAllDrives=true&includeItemsFromAllDrives=true&fields=files(id,name,mimeType,modifiedTime,webViewLink)&q=${encodeURIComponent(q)}`);
     const out: FileExcerpt[] = [];
@@ -86,7 +85,7 @@ export class GoogleClient {
    * messages in full. Meeting summaries (e.g. Otter) get a longer excerpt because they carry the substance.
    */
   async gmail(terms: string[], opts: { top?: number } = {}): Promise<FileExcerpt[]> {
-    const q = terms.map((t) => `"${t.replace(/"/g, "")}"`).join(" OR ");
+    const q = gmailQuery(terms);
     const list = await this.json<{ messages?: Array<{ id: string }> }>(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25&q=${encodeURIComponent(q)}`);
     const metas: Array<GmailMeta> = [];
     for (const m of list.messages ?? []) {
@@ -175,4 +174,26 @@ export function passageOf(text: string, terms: string[], max: number = MAX_TEXT)
   for (const w of terms.flatMap((t) => t.toLowerCase().split(/\s+/)).filter((w) => w.length > 2)) { at = lower.indexOf(w); if (at >= 0) break; }
   const start = Math.max(0, at - 1000);
   return text.slice(start, start + MAX_TEXT_);
+}
+
+/**
+ * ADR-075 live fix: each term is a GROUP — an entity name ("Altarum") or the request's content words
+ * ("degree leverage analysis"). Groups are OR'd; words inside a group must ALL match. Previously every word
+ * was OR'd, so "analysis" alone pulled unrelated job-history sheets into a Degree-of-Leverage request.
+ */
+export function driveQuery(groups: string[]): string {
+  const esc = (t: string) => t.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  const one = (g: string) => {
+    const words = g.split(/\s+/).filter(Boolean);
+    const byName = words.map((w) => `name contains '${esc(w)}'`).join(" and ");
+    return `(fullText contains '${esc(words.join(" "))}' or (${byName}))`;
+  };
+  return `(${groups.map(one).join(" or ")}) and trashed = false`;
+}
+
+export function gmailQuery(groups: string[]): string {
+  return groups.map((g) => {
+    const words = g.replace(/"/g, "").split(/\s+/).filter(Boolean);
+    return words.length === 1 ? `"${words[0]}"` : `(${words.join(" ")})`;
+  }).join(" OR ");
 }

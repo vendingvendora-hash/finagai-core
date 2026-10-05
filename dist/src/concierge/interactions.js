@@ -54,7 +54,8 @@ export async function completeForTask(pool, taskId, outcome) {
        model_calls = (SELECT coalesce(sum(model_calls),0) FROM control_task t WHERE t.id = ANY(i.task_ids)),
        verification_attempts = GREATEST(i.verification_attempts, (SELECT coalesce(sum(verify_attempts),0) FROM control_task t WHERE t.id = ANY(i.task_ids))),
        recovery_attempts = (SELECT coalesce(sum(recovery_attempts),0) FROM control_task t WHERE t.id = ANY(i.task_ids)),
-       terminal_reason = (SELECT terminal_reason FROM control_task WHERE id = $1)
+       terminal_reason = (SELECT terminal_reason FROM control_task WHERE id = $1),
+       cost_usd = (SELECT sum(cost_usd) FROM llm_call c WHERE c.request_id = ANY(i.task_ids))   -- ADR-075: was never written
      WHERE $1 = ANY(task_ids) AND state NOT IN ('completed','failed','superseded')`, [taskId, outcome.ok ? "completed" : "failed", outcome.summary.slice(0, 1000), outcome.imageB64 ?? null, outcome.artifactId ?? null]);
 }
 /** Completed/failed interactions whose result has NOT yet reached this conversation. */
@@ -76,5 +77,26 @@ export async function getInteraction(pool, id) {
 export async function metricsSummary(pool, days = 7) {
     const r = await pool.query(`SELECT * FROM interaction_metrics_daily WHERE day > now() - ($1 || ' days')::interval ORDER BY day DESC, task_class`, [String(days)]);
     return r.rows;
+}
+/**
+ * ADR-075 live fix: interactions #41/#80/#104/#107/#113 stayed "executing" for a day after their tasks had ended
+ * (tasks were terminalized by paths that never called completeForTask). Reconcile every open interaction:
+ *  - all linked tasks terminal  -> completed if the last one is done, else failed (via completeForTask)
+ *  - no linked task and no update for 6 hours -> failed, failure_class 'abandoned'
+ */
+export async function reconcileInteractions(pool) {
+    const open = `state NOT IN ('completed','failed','superseded','awaiting_human')`;
+    const done = await pool.query(`SELECT DISTINCT ON (i.id) t.id AS task_id, t.status, t.result_summary AS summary
+       FROM interaction i JOIN control_task t ON t.id = ANY(i.task_ids)
+      WHERE i.${open} AND cardinality(i.task_ids) > 0
+        AND NOT EXISTS (SELECT 1 FROM control_task x WHERE x.id = ANY(i.task_ids) AND x.status NOT IN ('done','failed','cancelled'))
+      ORDER BY i.id, t.updated_at DESC`);
+    for (const r of done.rows) {
+        await completeForTask(pool, r.task_id, { ok: r.status === "done", summary: r.summary ?? (r.status === "done" ? "task completed" : `task ${r.status}`) });
+    }
+    const ab = await pool.query(`UPDATE interaction SET state = 'failed', failure_class = 'abandoned', terminal_reason = 'abandoned', completed_at = now(), updated_at = now(),
+        result_summary = COALESCE(result_summary, 'Abandoned: no task was started for this request within 6 hours.'), final_response_status = 'pending'
+      WHERE ${open} AND cardinality(task_ids) = 0 AND updated_at < now() - interval '6 hours' RETURNING id`);
+    return { closed: done.rowCount ?? 0, abandoned: ab.rowCount ?? 0 };
 }
 //# sourceMappingURL=interactions.js.map

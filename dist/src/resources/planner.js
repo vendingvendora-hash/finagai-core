@@ -45,7 +45,8 @@ export function slotsFor(request) {
 export const SLOT_SOURCES = {
     schedule: ["google.calendar", "state.projects", "google.gmail"],
     correspondence: ["google.gmail", "mac.imessage"],
-    project_state: ["state.areas", "state.projects"],
+    // ADR-075: when Finagai's own memory has nothing on a named thing ("status of Altarum"), its status lives in email.
+    project_state: ["state.areas", "state.projects", "google.gmail"],
     prior_work: ["state.artifacts", "state.interactions"],
     documents: ["mac.local_parser", "mac.filesystem", "google.drive"],
     current_context: ["mac.context", "mac.browser", "mac.screen"],

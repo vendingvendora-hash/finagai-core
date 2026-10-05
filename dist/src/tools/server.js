@@ -385,19 +385,30 @@ export function buildMcpServer(deps) {
         const plan = await planAndTrace(deps.pool, request, {});
         const results = plan.intent === "trivial" ? [] : await retrieve(deps.pool, plan, deps.google ? { google: deps.google } : {});
         await traceRetrieval(deps.pool, { request }, results).catch((e) => console.error("retrieval trace failed", e));
+        const authority = effectiveAuthority(plan, results);
+        // Live fix (ADR-075): say plainly which needs NOTHING answered, and which Google accounts were searched,
+        // so an answer never presents unrelated items as the result and a wrong-account setup is visible.
+        const notFound = Object.entries(authority).filter(([, v]) => !v.source).map(([slot]) => slot.replace(/_/g, " "));
+        const googleScope = results.some((r) => r.capabilityId.startsWith("google."))
+            ? ((await deps.pool.query(`SELECT health_reason FROM capability WHERE id = 'google.gmail'`)).rows[0]?.health_reason ?? null) : null;
+        const retrievedIds = new Set(results.map((r) => r.capabilityId));
         return helpers.ok("plan_resources", {
-            intent: plan.intent, knownToFinagai: plan.entities, authoritativeSource: effectiveAuthority(plan, results),
+            intent: plan.intent, knownToFinagai: plan.entities, authoritativeSource: authority,
             used: plan.use.map((u) => ({ source: u.capabilityId, why: u.why })),
             retrieved: results.map((r) => ({ source: r.capabilityId, status: r.status, items: r.items, note: r.note })),
-            skipped: plan.skip.slice(0, 12), unavailable: plan.unavailable, missing: plan.missing, askJulian: plan.askJulian,
-            instruction: plan.askJulian ? "Ask Julian ONLY about askJulian." : "Answer from what was retrieved; do not ask Julian for information Finagai already has.",
+            skipped: plan.skip.filter((x) => !retrievedIds.has(x.capabilityId)).slice(0, 12), unavailable: plan.unavailable,
+            missing: plan.missing, notFound, searchedGoogle: googleScope, askJulian: plan.askJulian,
+            instruction: plan.askJulian ? "Ask Julian ONLY about askJulian."
+                : notFound.length ? `Answer from what was retrieved. Nothing was found for: ${notFound.join(", ")}${googleScope ? ` (Google searched: ${googleScope})` : ""} — say so plainly; never present unrelated items as the answer.`
+                    : "Answer from what was retrieved; do not ask Julian for information Finagai already has.",
         });
     });
     server.registerTool("execution_metrics", {
         description: "Read-only operational telemetry (Phase 1D): daily aggregates per task class (completion, p50/p95 acknowledgement and completion seconds, false completions, recovery attempts, verification attempts, tool/model calls, cost) plus the most recent interactions with their outcome, failure class and terminal reason. Use to answer 'how is Finagai performing' with real numbers.",
         inputSchema: z.object({ days: z.number().int().min(1).max(90).optional(), recent: z.number().int().min(0).max(50).optional() }),
     }, async ({ days, recent }) => {
-        const { metricsSummary } = await import("../concierge/interactions.js");
+        const { metricsSummary, reconcileInteractions } = await import("../concierge/interactions.js");
+        await reconcileInteractions(deps.pool).catch(() => { });
         const daily = await metricsSummary(deps.pool, days ?? 7);
         const rows = (await deps.pool.query(`SELECT i.created_at, i.task_class, i.state, i.failure_class, i.terminal_reason, i.false_completion, i.recovery_attempts,
               i.verification_attempts, i.tool_calls, i.model_calls, i.cost_usd, i.user_interventions,

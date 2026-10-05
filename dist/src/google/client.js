@@ -43,8 +43,7 @@ export class GoogleClient {
     }
     /** Drive full-text and name search; Google files exported as text, others listed with a link. */
     async drive(terms) {
-        const esc = (t) => t.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-        const q = `(${terms.map((t) => `fullText contains '${esc(t)}' or name contains '${esc(t)}'`).join(" or ")}) and trashed = false`;
+        const q = driveQuery(terms);
         const list = await this.json(`https://www.googleapis.com/drive/v3/files?pageSize=6&orderBy=modifiedTime desc&supportsAllDrives=true&includeItemsFromAllDrives=true&fields=files(id,name,mimeType,modifiedTime,webViewLink)&q=${encodeURIComponent(q)}`);
         const out = [];
         for (const f of list.files ?? []) {
@@ -79,7 +78,7 @@ export class GoogleClient {
      * messages in full. Meeting summaries (e.g. Otter) get a longer excerpt because they carry the substance.
      */
     async gmail(terms, opts = {}) {
-        const q = terms.map((t) => `"${t.replace(/"/g, "")}"`).join(" OR ");
+        const q = gmailQuery(terms);
         const list = await this.json(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25&q=${encodeURIComponent(q)}`);
         const metas = [];
         for (const m of list.messages ?? []) {
@@ -177,5 +176,25 @@ export function passageOf(text, terms, max = MAX_TEXT) {
     }
     const start = Math.max(0, at - 1000);
     return text.slice(start, start + MAX_TEXT_);
+}
+/**
+ * ADR-075 live fix: each term is a GROUP — an entity name ("Altarum") or the request's content words
+ * ("degree leverage analysis"). Groups are OR'd; words inside a group must ALL match. Previously every word
+ * was OR'd, so "analysis" alone pulled unrelated job-history sheets into a Degree-of-Leverage request.
+ */
+export function driveQuery(groups) {
+    const esc = (t) => t.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    const one = (g) => {
+        const words = g.split(/\s+/).filter(Boolean);
+        const byName = words.map((w) => `name contains '${esc(w)}'`).join(" and ");
+        return `(fullText contains '${esc(words.join(" "))}' or (${byName}))`;
+    };
+    return `(${groups.map(one).join(" or ")}) and trashed = false`;
+}
+export function gmailQuery(groups) {
+    return groups.map((g) => {
+        const words = g.replace(/"/g, "").split(/\s+/).filter(Boolean);
+        return words.length === 1 ? `"${words[0]}"` : `(${words.join(" ")})`;
+    }).join(" OR ");
 }
 //# sourceMappingURL=client.js.map
