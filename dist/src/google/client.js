@@ -68,16 +68,33 @@ export class GoogleClient {
         }
         return out;
     }
-    /** Gmail search; subject, sender, date and the start of the plain-text body. */
-    async gmail(terms) {
+    /** Which Google account this client is connected to (registry probe: makes the wrong-account risk visible). */
+    async account() {
+        const p = await this.json("https://gmail.googleapis.com/gmail/v1/users/me/profile");
+        return p.emailAddress ?? "unknown";
+    }
+    /**
+     * Gmail search, ranked (Phase 2D live fix): pull a wider candidate set as metadata, score it — real
+     * correspondence and meeting summaries up, newsletters/digests/notifications down — then fetch only the top
+     * messages in full. Meeting summaries (e.g. Otter) get a longer excerpt because they carry the substance.
+     */
+    async gmail(terms, opts = {}) {
         const q = terms.map((t) => `"${t.replace(/"/g, "")}"`).join(" OR ");
-        const list = await this.json(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=5&q=${encodeURIComponent(q)}`);
-        const out = [];
+        const list = await this.json(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25&q=${encodeURIComponent(q)}`);
+        const metas = [];
         for (const m of list.messages ?? []) {
-            const msg = await this.json(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=full`);
+            const msg = await this.json(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date&metadataHeaders=List-Unsubscribe&metadataHeaders=Precedence`);
             const h = (n) => msg.payload?.headers?.find((x) => x.name.toLowerCase() === n)?.value ?? "";
-            out.push({ name: `Gmail: ${h("subject")}`, path: `gmail:${m.id}`, modified: new Date(Number(msg.internalDate)).toISOString(),
-                text: `From: ${h("from")}\nDate: ${h("date")}\n${passageOf(plainBody(msg.payload) || msg.snippet || "", terms)}` });
+            metas.push({ id: m.id, subject: h("subject"), from: h("from"), date: h("date"), internalDate: Number(msg.internalDate),
+                bulk: !!h("list-unsubscribe") || /bulk|list/i.test(h("precedence")), snippet: msg.snippet ?? "" });
+        }
+        const ranked = rankGmail(metas, terms).slice(0, opts.top ?? 8);
+        const out = [];
+        for (const m of ranked) {
+            const msg = await this.json(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=full`);
+            const summary = isMeetingSummary(m);
+            out.push({ name: `Gmail: ${m.subject}`, path: `gmail:${m.id}`, modified: new Date(m.internalDate).toISOString(),
+                text: `From: ${m.from}\nDate: ${m.date}\n${summary ? "[meeting summary] " : ""}${passageOf(plainBody(msg.payload) || m.snippet || "", terms, summary ? 4000 : undefined)}` });
         }
         return out;
     }
@@ -102,6 +119,37 @@ export class GoogleClient {
         return parts.flat();
     }
 }
+const NOISE_FROM = /(linkedin|noreply|no-reply|newsletter|digest|notifications?@|mailer|marketing|news@)/i;
+const NOISE_SUBJECT = /(weekly|digest|newsletter|viewed (by|your)|who('?s| is) viewing|jobs? (for you|alert)|recommended|webinar|unsubscribe)/i;
+const SIGNAL_SUBJECT = /(interview|schedul|confirm|panel|next steps?|offer|application|phone screen|call with|meeting|follow[- ]?up|availability|invitation)/i;
+export function isMeetingSummary(m) {
+    return /otter\.ai|fireflies|fathom|read\.ai|zoom/i.test(m.from) && !/weekly|digest|tips|plan/i.test(m.subject);
+}
+/** Pure ranking: correspondence about the subject first, meeting summaries kept, notifications pushed down. */
+export function rankGmail(metas, terms) {
+    const ts = terms.map((t) => t.toLowerCase());
+    const score = (m) => {
+        let s = 0;
+        const subj = m.subject.toLowerCase(), from = m.from.toLowerCase();
+        if (ts.some((t) => subj.includes(t)))
+            s += 3;
+        if (ts.some((t) => from.includes(t.replace(/\s+/g, ""))))
+            s += 3; // sender domain/name is the subject (e.g. @altarum.org)
+        if (SIGNAL_SUBJECT.test(m.subject))
+            s += 3;
+        if (isMeetingSummary(m))
+            s += 2;
+        if (m.bulk)
+            s -= 3;
+        if (NOISE_FROM.test(m.from) && !isMeetingSummary(m))
+            s -= 3;
+        if (NOISE_SUBJECT.test(m.subject))
+            s -= 4;
+        return s;
+    };
+    return [...metas].map((m) => ({ m, s: score(m) })).filter((x) => x.s > -4)
+        .sort((a, b) => b.s - a.s || b.m.internalDate - a.m.internalDate).map((x) => x.m);
+}
 export function plainBody(p) {
     if (!p)
         return "";
@@ -116,8 +164,9 @@ export function plainBody(p) {
         return Buffer.from(p.body.data, "base64url").toString("utf8").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
     return "";
 }
-export function passageOf(text, terms) {
-    if (text.length <= MAX_TEXT)
+export function passageOf(text, terms, max = MAX_TEXT) {
+    const MAX_TEXT_ = max;
+    if (text.length <= MAX_TEXT_)
         return text;
     const lower = text.toLowerCase();
     let at = -1;
@@ -127,6 +176,6 @@ export function passageOf(text, terms) {
             break;
     }
     const start = Math.max(0, at - 1000);
-    return text.slice(start, start + MAX_TEXT);
+    return text.slice(start, start + MAX_TEXT_);
 }
 //# sourceMappingURL=client.js.map

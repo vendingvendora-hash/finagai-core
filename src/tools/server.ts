@@ -13,7 +13,7 @@ import { route } from "../mac/router.js";
 import { listCapabilities, refreshRegistry } from "../resources/registry.js";
 import { writeTrace, routeTraceRows } from "../resources/trace.js";
 import { planAndTrace } from "../resources/planner.js";
-import { retrieve, traceRetrieval } from "../resources/retrieve.js";
+import { retrieve, traceRetrieval, effectiveAuthority } from "../resources/retrieve.js";
 import { z } from "zod";
 import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import { appendEvent } from "../db/index.js";
@@ -441,7 +441,7 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     const results = plan.intent === "trivial" ? [] : await retrieve(deps.pool, plan, deps.google ? { google: deps.google } : {});
     await traceRetrieval(deps.pool, { request }, results).catch((e) => console.error("retrieval trace failed", e));
     return helpers.ok("plan_resources", {
-      intent: plan.intent, knownToFinagai: plan.entities, authoritativeSource: plan.authoritative,
+      intent: plan.intent, knownToFinagai: plan.entities, authoritativeSource: effectiveAuthority(plan, results),
       used: plan.use.map((u) => ({ source: u.capabilityId, why: u.why })),
       retrieved: results.map((r) => ({ source: r.capabilityId, status: r.status, items: r.items, note: r.note })),
       skipped: plan.skip.slice(0, 12), unavailable: plan.unavailable, missing: plan.missing, askJulian: plan.askJulian,

@@ -51,9 +51,23 @@ export const CATALOG: CapabilityDef[] = [
 
 export interface DiscoveryEnv {
   googleConfigured: boolean;
+  /** Live probe: which Google account the refresh token belongs to (makes a wrong-account setup visible). */
+  googleAccount?: () => Promise<string>;
   resendConfigured: boolean;
   models: Record<string, string>;
 }
+
+let ACCOUNT_CACHE: { at: number; value?: string; error?: string } | null = null;
+const ACCOUNT_TTL_MS = 10 * 60_000;
+async function probeAccount(fn: () => Promise<string>): Promise<string> {
+  if (ACCOUNT_CACHE && Date.now() - ACCOUNT_CACHE.at < ACCOUNT_TTL_MS) {
+    if (ACCOUNT_CACHE.error) throw new Error(ACCOUNT_CACHE.error);
+    return ACCOUNT_CACHE.value!;
+  }
+  try { const v = await fn(); ACCOUNT_CACHE = { at: Date.now(), value: v }; return v; }
+  catch (e) { ACCOUNT_CACHE = { at: Date.now(), error: String((e as Error)?.message ?? e) }; throw e; }
+}
+export function resetAccountCache(): void { ACCOUNT_CACHE = null; }
 
 let ENV: DiscoveryEnv = { googleConfigured: false, resendConfigured: false, models: {} };
 /** Called once at startup with what is configured; discovery reads it (no config plumbing through every caller). */
@@ -86,8 +100,14 @@ export async function discover(pool: pg.Pool, env: DiscoveryEnv = ENV): Promise<
   }
 
   // External: configuration is discovered; health is only claimed with evidence
-  for (const id of ["google.gmail", "google.calendar", "google.drive"])
-    out.set(id, env.googleConfigured ? { health: "unknown", reason: "configured; not probed yet", source: "discovered" } : { health: "not_configured", reason: "Google credentials not configured", source: "discovered" });
+  let google: Observed;
+  if (!env.googleConfigured) google = { health: "not_configured", reason: "Google credentials not configured", source: "discovered" };
+  else if (!env.googleAccount) google = { health: "unknown", reason: "configured; not probed", source: "discovered" };
+  else {
+    try { const account = await probeAccount(env.googleAccount); google = { health: "healthy", reason: `connected as ${account}`, source: "probe", meta: { account } }; }
+    catch (e) { google = { health: "degraded", reason: `probe failed: ${String((e as Error)?.message ?? e).slice(0, 120)}`, source: "probe" }; }
+  }
+  for (const id of ["google.gmail", "google.calendar", "google.drive"]) out.set(id, google);
   if (!env.resendConfigured) out.set("resend.email", { health: "not_configured", reason: "RESEND_API_KEY missing", source: "discovered" });
   else {
     const d = (await pool.query(`SELECT count(*) FILTER (WHERE status = 'sent')::int AS ok, count(*)::int AS n FROM outbound_delivery WHERE created_at > now() - interval '30 days'`)).rows[0] as { ok: number; n: number };

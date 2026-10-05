@@ -74,16 +74,34 @@ export class GoogleClient {
     return out;
   }
 
-  /** Gmail search; subject, sender, date and the start of the plain-text body. */
-  async gmail(terms: string[]): Promise<FileExcerpt[]> {
+  /** Which Google account this client is connected to (registry probe: makes the wrong-account risk visible). */
+  async account(): Promise<string> {
+    const p = await this.json<{ emailAddress?: string }>("https://gmail.googleapis.com/gmail/v1/users/me/profile");
+    return p.emailAddress ?? "unknown";
+  }
+
+  /**
+   * Gmail search, ranked (Phase 2D live fix): pull a wider candidate set as metadata, score it — real
+   * correspondence and meeting summaries up, newsletters/digests/notifications down — then fetch only the top
+   * messages in full. Meeting summaries (e.g. Otter) get a longer excerpt because they carry the substance.
+   */
+  async gmail(terms: string[], opts: { top?: number } = {}): Promise<FileExcerpt[]> {
     const q = terms.map((t) => `"${t.replace(/"/g, "")}"`).join(" OR ");
-    const list = await this.json<{ messages?: Array<{ id: string }> }>(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=5&q=${encodeURIComponent(q)}`);
-    const out: FileExcerpt[] = [];
+    const list = await this.json<{ messages?: Array<{ id: string }> }>(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25&q=${encodeURIComponent(q)}`);
+    const metas: Array<GmailMeta> = [];
     for (const m of list.messages ?? []) {
-      const msg = await this.json<GmailMessage>(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=full`);
+      const msg = await this.json<GmailMessage>(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date&metadataHeaders=List-Unsubscribe&metadataHeaders=Precedence`);
       const h = (n: string) => msg.payload?.headers?.find((x) => x.name.toLowerCase() === n)?.value ?? "";
-      out.push({ name: `Gmail: ${h("subject")}`, path: `gmail:${m.id}`, modified: new Date(Number(msg.internalDate)).toISOString(),
-        text: `From: ${h("from")}\nDate: ${h("date")}\n${passageOf(plainBody(msg.payload) || msg.snippet || "", terms)}` });
+      metas.push({ id: m.id, subject: h("subject"), from: h("from"), date: h("date"), internalDate: Number(msg.internalDate),
+        bulk: !!h("list-unsubscribe") || /bulk|list/i.test(h("precedence")), snippet: msg.snippet ?? "" });
+    }
+    const ranked = rankGmail(metas, terms).slice(0, opts.top ?? 8);
+    const out: FileExcerpt[] = [];
+    for (const m of ranked) {
+      const msg = await this.json<GmailMessage>(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=full`);
+      const summary = isMeetingSummary(m);
+      out.push({ name: `Gmail: ${m.subject}`, path: `gmail:${m.id}`, modified: new Date(m.internalDate).toISOString(),
+        text: `From: ${m.from}\nDate: ${m.date}\n${summary ? "[meeting summary] " : ""}${passageOf(plainBody(msg.payload) || m.snippet || "", terms, summary ? 4000 : undefined)}` });
     }
     return out;
   }
@@ -112,6 +130,34 @@ export class GoogleClient {
 
 interface GmailPart { mimeType?: string; body?: { data?: string }; parts?: GmailPart[]; headers?: Array<{ name: string; value: string }> }
 interface GmailMessage { internalDate: string; snippet?: string; payload?: GmailPart }
+export interface GmailMeta { id: string; subject: string; from: string; date: string; internalDate: number; bulk: boolean; snippet: string }
+
+const NOISE_FROM = /(linkedin|noreply|no-reply|newsletter|digest|notifications?@|mailer|marketing|news@)/i;
+const NOISE_SUBJECT = /(weekly|digest|newsletter|viewed (by|your)|who('?s| is) viewing|jobs? (for you|alert)|recommended|webinar|unsubscribe)/i;
+const SIGNAL_SUBJECT = /(interview|schedul|confirm|panel|next steps?|offer|application|phone screen|call with|meeting|follow[- ]?up|availability|invitation)/i;
+
+export function isMeetingSummary(m: Pick<GmailMeta, "from" | "subject">): boolean {
+  return /otter\.ai|fireflies|fathom|read\.ai|zoom/i.test(m.from) && !/weekly|digest|tips|plan/i.test(m.subject);
+}
+
+/** Pure ranking: correspondence about the subject first, meeting summaries kept, notifications pushed down. */
+export function rankGmail(metas: GmailMeta[], terms: string[]): GmailMeta[] {
+  const ts = terms.map((t) => t.toLowerCase());
+  const score = (m: GmailMeta) => {
+    let s = 0;
+    const subj = m.subject.toLowerCase(), from = m.from.toLowerCase();
+    if (ts.some((t) => subj.includes(t))) s += 3;
+    if (ts.some((t) => from.includes(t.replace(/\s+/g, "")))) s += 3;            // sender domain/name is the subject (e.g. @altarum.org)
+    if (SIGNAL_SUBJECT.test(m.subject)) s += 3;
+    if (isMeetingSummary(m)) s += 2;
+    if (m.bulk) s -= 3;
+    if (NOISE_FROM.test(m.from) && !isMeetingSummary(m)) s -= 3;
+    if (NOISE_SUBJECT.test(m.subject)) s -= 4;
+    return s;
+  };
+  return [...metas].map((m) => ({ m, s: score(m) })).filter((x) => x.s > -4)
+    .sort((a, b) => b.s - a.s || b.m.internalDate - a.m.internalDate).map((x) => x.m);
+}
 
 export function plainBody(p: GmailPart | undefined): string {
   if (!p) return "";
@@ -121,11 +167,12 @@ export function plainBody(p: GmailPart | undefined): string {
   return "";
 }
 
-export function passageOf(text: string, terms: string[]): string {
-  if (text.length <= MAX_TEXT) return text;
+export function passageOf(text: string, terms: string[], max: number = MAX_TEXT): string {
+  const MAX_TEXT_ = max;
+  if (text.length <= MAX_TEXT_) return text;
   const lower = text.toLowerCase();
   let at = -1;
   for (const w of terms.flatMap((t) => t.toLowerCase().split(/\s+/)).filter((w) => w.length > 2)) { at = lower.indexOf(w); if (at >= 0) break; }
   const start = Math.max(0, at - 1000);
-  return text.slice(start, start + MAX_TEXT);
+  return text.slice(start, start + MAX_TEXT_);
 }

@@ -17,3 +17,12 @@
 - Evals R01–R10 on real Postgres with seeded state and a fake Google client; found and fixed during development:
   trivial-request pattern, messaging detection ("send that chart to Beth"), explicitly named source losing to the
   bound, and a test-isolation leak.
+
+## Live-data revision (from a run against Julian's real Altarum data)
+Seeded tests hid three defects: (1) an authoritative source that is healthy but EMPTY (no Altarum calendar events;
+dates live only in recruiter email) left the need unanswered — retrieval now falls through the slot's source order
+and `effectiveAuthority` reports who actually answered; (2) Gmail took the 5 most recent matches, so LinkedIn
+notices and Otter weekly digests crowded out the recruiter thread — now 25 candidates by metadata, ranked
+(correspondence/sender-domain/interview subjects up, bulk/notifications down), top 8 fetched in full, meeting
+summaries kept at 3000 chars instead of 600; (3) a wrong-account Google token would fail silently — the registry
+now probes and shows "connected as <email>" (cached 10 min), degraded on probe failure.

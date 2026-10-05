@@ -6,7 +6,7 @@
  * Failures are recorded per source (never hidden), and a source that fails falls back per the plan.
  */
 import type pg from "pg";
-import type { ResourcePlan } from "./planner.js";
+import { SLOT_SOURCES, type ResourcePlan } from "./planner.js";
 import { writeTrace } from "./trace.js";
 
 export interface Retrieved { capabilityId: string; status: "ok" | "empty" | "failed" | "delegated"; items: Array<{ title: string; detail: string; source: string }>; note?: string }
@@ -15,8 +15,8 @@ export interface GoogleSearch { search?(terms: string[]): Promise<Array<{ name: 
   calendar?(terms: string[]): Promise<Array<{ name: string; path: string; modified?: string; text: string }>>;
   drive?(terms: string[]): Promise<Array<{ name: string; path: string; modified?: string; text: string }>> }
 
-const MAX_ITEMS = 5, MAX_CHARS = 600;
-const clip = (s: unknown) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, MAX_CHARS);
+const MAX_ITEMS = 5, MAX_CHARS = 600, MAX_SUMMARY_CHARS = 3000, MAX_GMAIL_ITEMS = 8;
+const clip = (s: unknown, max = MAX_CHARS) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 
 function terms(plan: ResourcePlan): string[] {
   if (plan.entities.length) return plan.entities.map((e) => e.name);
@@ -26,9 +26,38 @@ function terms(plan: ResourcePlan): string[] {
 
 export async function retrieve(pool: pg.Pool, plan: ResourcePlan, deps: { google?: GoogleSearch } = {}): Promise<Retrieved[]> {
   const out: Retrieved[] = [];
+  for (const u of plan.use) out.push(await retrieveOne(pool, plan, u.capabilityId, deps));
+  // Live fix: the most authoritative source for a need may be configured, healthy — and EMPTY (e.g. interview
+  // dates that live only in recruiter emails, not on the calendar). Then the next source for that need answers.
+  for (const [slot, auth] of Object.entries(plan.authoritative)) {
+    const a = out.find((r) => r.capabilityId === auth);
+    if (a && a.status === "ok") continue;
+    for (const next of (SLOT_SOURCES[slot] ?? []).filter((id) => id !== auth)) {
+      if (plan.unavailable.some((u) => u.capabilityId === next)) continue;
+      let r = out.find((x) => x.capabilityId === next);
+      if (!r) { r = await retrieveOne(pool, plan, next, deps); out.push(r); }
+      if (r.status === "ok") { r.note = `answers ${slot.replace(/_/g, " ")}: ${auth} returned ${a?.status ?? "nothing"}`; break; }
+    }
+  }
+  return out;
+}
+
+/** Slot → the source that actually answered it (declared authority if it had data, else the fallback). */
+export function effectiveAuthority(plan: ResourcePlan, results: Retrieved[]): Record<string, { source: string | null; note?: string }> {
+  const out: Record<string, { source: string | null; note?: string }> = {};
+  for (const slot of Object.keys(plan.authoritative)) {
+    const order = [plan.authoritative[slot]!, ...(SLOT_SOURCES[slot] ?? []).filter((x) => x !== plan.authoritative[slot])];
+    const hit = order.find((id) => results.some((r) => r.capabilityId === id && r.status === "ok"));
+    out[slot] = hit === plan.authoritative[slot] ? { source: hit ?? null }
+      : { source: hit ?? null, note: `${plan.authoritative[slot]} had nothing${hit ? `; answered by ${hit}` : "; no source had data"}` };
+  }
+  return out;
+}
+
+async function retrieveOne(pool: pg.Pool, plan: ResourcePlan, id: string, deps: { google?: GoogleSearch }): Promise<Retrieved> {
   const t = terms(plan);
-  for (const u of plan.use) {
-    const id = u.capabilityId;
+  const out: Retrieved[] = [];
+  {
     try {
       if (id === "state.projects") {
         const names = plan.entities.filter((e) => e.kind === "project" || e.kind === "entity").map((e) => e.name);
@@ -54,9 +83,11 @@ export async function retrieve(pool: pg.Pool, plan: ResourcePlan, deps: { google
       } else if (id.startsWith("google.")) {
         const g = deps.google;
         const fn = id === "google.gmail" ? g?.gmail : id === "google.calendar" ? g?.calendar : id === "google.drive" ? g?.drive : undefined;
-        if (!g || !fn) { out.push({ capabilityId: id, status: "failed", items: [], note: "Google client not available in this process" }); continue; }
+        if (!g || !fn) { out.push({ capabilityId: id, status: "failed", items: [], note: "Google client not available in this process" }); return out[0]!; }
         const rows = await fn.call(g, t);
-        out.push({ capabilityId: id, status: rows.length ? "ok" : "empty", items: rows.slice(0, MAX_ITEMS).map((x) => ({ title: x.name, detail: clip(x.text), source: `${id} ${x.modified ?? ""}`.trim() })) });
+        const cap = id === "google.gmail" ? MAX_GMAIL_ITEMS : MAX_ITEMS;
+        out.push({ capabilityId: id, status: rows.length ? "ok" : "empty", items: rows.slice(0, cap).map((x) => ({ title: x.name,
+          detail: clip(x.text, /\[meeting summary\]/.test(x.text) ? MAX_SUMMARY_CHARS : MAX_CHARS), source: `${id} ${x.modified ?? ""}`.trim() })) });
       } else {
         out.push({ capabilityId: id, status: "delegated", items: [], note: "Mac-side source: the Mac operator retrieves it" });
       }
@@ -64,7 +95,7 @@ export async function retrieve(pool: pg.Pool, plan: ResourcePlan, deps: { google
       out.push({ capabilityId: id, status: "failed", items: [], note: String((e as Error)?.message ?? e).slice(0, 200) });
     }
   }
-  return out;
+  return out[0]!;
 }
 
 /** Record what retrieval actually returned (R10: the trace explains the outcome, not just the intent). */

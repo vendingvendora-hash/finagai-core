@@ -29,6 +29,25 @@ export const CATALOG = [
     // ---- Models ----
     { id: "model.anthropic", type: "model", scope: "Claude models (planner, grader, extraction, review)", access: "read", operations: ["complete"] },
 ];
+let ACCOUNT_CACHE = null;
+const ACCOUNT_TTL_MS = 10 * 60_000;
+async function probeAccount(fn) {
+    if (ACCOUNT_CACHE && Date.now() - ACCOUNT_CACHE.at < ACCOUNT_TTL_MS) {
+        if (ACCOUNT_CACHE.error)
+            throw new Error(ACCOUNT_CACHE.error);
+        return ACCOUNT_CACHE.value;
+    }
+    try {
+        const v = await fn();
+        ACCOUNT_CACHE = { at: Date.now(), value: v };
+        return v;
+    }
+    catch (e) {
+        ACCOUNT_CACHE = { at: Date.now(), error: String(e?.message ?? e) };
+        throw e;
+    }
+}
+export function resetAccountCache() { ACCOUNT_CACHE = null; }
 let ENV = { googleConfigured: false, resendConfigured: false, models: {} };
 /** Called once at startup with what is configured; discovery reads it (no config plumbing through every caller). */
 export function configureRegistry(env) { ENV = env; }
@@ -60,8 +79,22 @@ export async function discover(pool, env = ENV) {
         out.set(c.id, { health: h, source: "probe", reason: !online ? `Mac offline (last heartbeat ${Number.isFinite(ageS) ? Math.round(ageS) + "s" : "never"} ago)` : key ? `helper probe ${key}=${caps[key] ?? "unknown"}` : "Mac online" });
     }
     // External: configuration is discovered; health is only claimed with evidence
+    let google;
+    if (!env.googleConfigured)
+        google = { health: "not_configured", reason: "Google credentials not configured", source: "discovered" };
+    else if (!env.googleAccount)
+        google = { health: "unknown", reason: "configured; not probed", source: "discovered" };
+    else {
+        try {
+            const account = await probeAccount(env.googleAccount);
+            google = { health: "healthy", reason: `connected as ${account}`, source: "probe", meta: { account } };
+        }
+        catch (e) {
+            google = { health: "degraded", reason: `probe failed: ${String(e?.message ?? e).slice(0, 120)}`, source: "probe" };
+        }
+    }
     for (const id of ["google.gmail", "google.calendar", "google.drive"])
-        out.set(id, env.googleConfigured ? { health: "unknown", reason: "configured; not probed yet", source: "discovered" } : { health: "not_configured", reason: "Google credentials not configured", source: "discovered" });
+        out.set(id, google);
     if (!env.resendConfigured)
         out.set("resend.email", { health: "not_configured", reason: "RESEND_API_KEY missing", source: "discovered" });
     else {

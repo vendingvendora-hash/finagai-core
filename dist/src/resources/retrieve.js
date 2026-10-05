@@ -1,6 +1,7 @@
+import { SLOT_SOURCES } from "./planner.js";
 import { writeTrace } from "./trace.js";
-const MAX_ITEMS = 5, MAX_CHARS = 600;
-const clip = (s) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, MAX_CHARS);
+const MAX_ITEMS = 5, MAX_CHARS = 600, MAX_SUMMARY_CHARS = 3000, MAX_GMAIL_ITEMS = 8;
+const clip = (s, max = MAX_CHARS) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 function terms(plan) {
     if (plan.entities.length)
         return plan.entities.map((e) => e.name);
@@ -9,9 +10,45 @@ function terms(plan) {
 }
 export async function retrieve(pool, plan, deps = {}) {
     const out = [];
+    for (const u of plan.use)
+        out.push(await retrieveOne(pool, plan, u.capabilityId, deps));
+    // Live fix: the most authoritative source for a need may be configured, healthy — and EMPTY (e.g. interview
+    // dates that live only in recruiter emails, not on the calendar). Then the next source for that need answers.
+    for (const [slot, auth] of Object.entries(plan.authoritative)) {
+        const a = out.find((r) => r.capabilityId === auth);
+        if (a && a.status === "ok")
+            continue;
+        for (const next of (SLOT_SOURCES[slot] ?? []).filter((id) => id !== auth)) {
+            if (plan.unavailable.some((u) => u.capabilityId === next))
+                continue;
+            let r = out.find((x) => x.capabilityId === next);
+            if (!r) {
+                r = await retrieveOne(pool, plan, next, deps);
+                out.push(r);
+            }
+            if (r.status === "ok") {
+                r.note = `answers ${slot.replace(/_/g, " ")}: ${auth} returned ${a?.status ?? "nothing"}`;
+                break;
+            }
+        }
+    }
+    return out;
+}
+/** Slot → the source that actually answered it (declared authority if it had data, else the fallback). */
+export function effectiveAuthority(plan, results) {
+    const out = {};
+    for (const slot of Object.keys(plan.authoritative)) {
+        const order = [plan.authoritative[slot], ...(SLOT_SOURCES[slot] ?? []).filter((x) => x !== plan.authoritative[slot])];
+        const hit = order.find((id) => results.some((r) => r.capabilityId === id && r.status === "ok"));
+        out[slot] = hit === plan.authoritative[slot] ? { source: hit ?? null }
+            : { source: hit ?? null, note: `${plan.authoritative[slot]} had nothing${hit ? `; answered by ${hit}` : "; no source had data"}` };
+    }
+    return out;
+}
+async function retrieveOne(pool, plan, id, deps) {
     const t = terms(plan);
-    for (const u of plan.use) {
-        const id = u.capabilityId;
+    const out = [];
+    {
         try {
             if (id === "state.projects") {
                 const names = plan.entities.filter((e) => e.kind === "project" || e.kind === "entity").map((e) => e.name);
@@ -41,10 +78,12 @@ export async function retrieve(pool, plan, deps = {}) {
                 const fn = id === "google.gmail" ? g?.gmail : id === "google.calendar" ? g?.calendar : id === "google.drive" ? g?.drive : undefined;
                 if (!g || !fn) {
                     out.push({ capabilityId: id, status: "failed", items: [], note: "Google client not available in this process" });
-                    continue;
+                    return out[0];
                 }
                 const rows = await fn.call(g, t);
-                out.push({ capabilityId: id, status: rows.length ? "ok" : "empty", items: rows.slice(0, MAX_ITEMS).map((x) => ({ title: x.name, detail: clip(x.text), source: `${id} ${x.modified ?? ""}`.trim() })) });
+                const cap = id === "google.gmail" ? MAX_GMAIL_ITEMS : MAX_ITEMS;
+                out.push({ capabilityId: id, status: rows.length ? "ok" : "empty", items: rows.slice(0, cap).map((x) => ({ title: x.name,
+                        detail: clip(x.text, /\[meeting summary\]/.test(x.text) ? MAX_SUMMARY_CHARS : MAX_CHARS), source: `${id} ${x.modified ?? ""}`.trim() })) });
             }
             else {
                 out.push({ capabilityId: id, status: "delegated", items: [], note: "Mac-side source: the Mac operator retrieves it" });
@@ -54,7 +93,7 @@ export async function retrieve(pool, plan, deps = {}) {
             out.push({ capabilityId: id, status: "failed", items: [], note: String(e?.message ?? e).slice(0, 200) });
         }
     }
-    return out;
+    return out[0];
 }
 /** Record what retrieval actually returned (R10: the trace explains the outcome, not just the intent). */
 export async function traceRetrieval(pool, ctx, results) {

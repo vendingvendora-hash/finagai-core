@@ -112,3 +112,42 @@ describe.skipIf(!pool)("resource planner R01–R10 (ADR-074)", () => {
     expect(p.use.find((u) => u.capabilityId === "google.drive")!.why).toMatch(/explicitly requested/);   // named source beats the bound
   });
 });
+
+describe.skipIf(!pool)("R03-live: real Altarum data shapes — nothing seeded, empty calendar, truth only in Gmail", () => {
+  const live = createPool(url!);
+  afterAll(async () => { await live.end(); });
+  const realGoogle = {
+    calendar: async () => [],                                               // no Altarum events on Julian's calendar
+    gmail: async () => [
+      { name: "Gmail: Interview confirmation: Altarum technical panel Sep 28", path: "gmail:b3", modified: "2026-09-24",
+        text: "From: Beth Young <byoung@altarum.org>\nPanel: Frank McKenna (Senior Contracts Specialist), Carley Kirk (Senior Director, Strategy)." },
+      { name: "Gmail: Altarum Technical Panel — meeting notes", path: "gmail:ot", modified: "2026-09-28",
+        text: "From: Otter.ai\n[meeting summary] " + "Discussion of pricing model assumptions, contract structures and FP&A tooling. ".repeat(30) },
+    ],
+    drive: async () => [],
+  };
+  it("no fabricated upcoming interview; schedule answered by Gmail because the calendar is empty; summary not truncated to 600 chars", async () => {
+    const p = await planResources(live, "Prepare me for my Northwind Analytics interview");   // nothing about it in Finagai state
+    expect(p.entities).toHaveLength(0);
+    const r = await retrieve(live, p, { google: realGoogle });
+    expect(r.find((x) => x.capabilityId === "google.calendar")!.status).toBe("empty");
+    const eff = (await import("../../src/resources/retrieve.js")).effectiveAuthority(p, r);
+    expect(eff.schedule!.source).toBe("google.gmail");
+    expect(eff.schedule!.note).toMatch(/google\.calendar had nothing/);
+    const summary = r.find((x) => x.capabilityId === "google.gmail")!.items.find((i) => /meeting notes/.test(i.title))!;
+    expect(summary.detail.length).toBeGreaterThan(600);
+    expect(p.askJulian).toBeNull();
+  });
+  it("registry shows WHICH Google account Core uses; a failing probe is degraded, not healthy", async () => {
+    const reg = await import("../../src/resources/registry.js");
+    reg.resetAccountCache();
+    await reg.refreshRegistry(live, { googleConfigured: true, resendConfigured: true, models: {}, googleAccount: async () => "perez.julian@correounivalle.edu.co" });
+    let g = (await reg.listCapabilities(live)).find((c) => c.id === "google.gmail")!;
+    expect(g.health).toBe("healthy"); expect(g.health_reason).toMatch(/connected as perez\.julian@correounivalle\.edu\.co/);
+    reg.resetAccountCache();
+    await reg.refreshRegistry(live, { googleConfigured: true, resendConfigured: true, models: {}, googleAccount: async () => { throw new Error("invalid_grant"); } });
+    g = (await reg.listCapabilities(live)).find((c) => c.id === "google.gmail")!;
+    expect(g.health).toBe("degraded"); expect(g.health_reason).toMatch(/invalid_grant/);
+    reg.resetAccountCache();
+  });
+});

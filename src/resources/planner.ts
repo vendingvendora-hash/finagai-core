@@ -62,7 +62,7 @@ export function slotsFor(request: string): Set<string> {
 }
 
 /** Which capability answers which slot, with the slot's authority order (highest first) — R09. */
-const SLOT_SOURCES: Record<string, string[]> = {
+export const SLOT_SOURCES: Record<string, string[]> = {
   schedule: ["google.calendar", "state.projects", "google.gmail"],
   correspondence: ["google.gmail", "mac.imessage"],
   project_state: ["state.areas", "state.projects"],
