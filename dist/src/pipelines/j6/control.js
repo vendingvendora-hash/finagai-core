@@ -1,4 +1,24 @@
 import { routeHint } from "../../mac/router.js";
+import { planResources, planPromptBlock } from "../../resources/planner.js";
+import { retrieve, retrievedBlock, traceRetrieval } from "../../resources/retrieve.js";
+import { writeTrace } from "../../resources/trace.js";
+import { planTraceRows } from "../../resources/planner.js";
+/** Per-task resource context (computed once per task per process; recomputed after a restart). */
+const TASK_CONTEXT = new Map();
+async function taskContext(deps, taskId, request) {
+    const hit = TASK_CONTEXT.get(taskId);
+    if (hit)
+        return hit;
+    const plan = await planResources(deps.pool, request);
+    const results = plan.intent === "trivial" ? [] : await retrieve(deps.pool, plan, deps.google ? { google: deps.google } : {});
+    await writeTrace(deps.pool, { taskId, request }, planTraceRows(plan)).catch(() => { });
+    await traceRetrieval(deps.pool, { taskId, request }, results).catch(() => { });
+    const ctx = { plan, block: [planPromptBlock(plan), retrievedBlock(results)].filter(Boolean).join("\n\n"), askGuarded: false };
+    if (TASK_CONTEXT.size > 200)
+        TASK_CONTEXT.clear();
+    TASK_CONTEXT.set(taskId, ctx);
+    return ctx;
+}
 import { deriveContract, verifyCompletion, recoveryDecision, REJECTION_MARKER } from "../../mac/acceptance.js";
 import { appendEvent, withTransaction } from "../../db/index.js";
 import { BudgetBlockedError } from "../../llm/types.js";
@@ -222,7 +242,15 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
             routeLine = routeHint(row.request, row.capabilities);
     }
     catch { /* routing is advisory */ }
+    let resourceBlock = "";
+    try {
+        resourceBlock = (await taskContext(deps, taskId, task.request)).block;
+    }
+    catch (e) {
+        deps.log?.("resource planning failed", { error: String(e?.message ?? e).slice(0, 160) });
+    }
     const percept = [
+        resourceBlock,
         routeLine,
         ctxLine,
         perception?.pageText ? `Visible page text (truncated):\n${perception.pageText.slice(0, 4000)}` : "",
@@ -327,6 +355,16 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
             await appendEvent(pool, { actor: "j6", action: "control_task_done", entityType: "control_task", entityId: taskId, after: { summary: step.summary } });
             await pool.query(`UPDATE mac_runtime SET last_success_at = now(), last_success_code = (SELECT code FROM control_task WHERE id = $1) WHERE id = 'primary'`, [taskId]).catch(() => { });
             return task.requester ? { status: "done", message: step.summary, requester: task.requester } : { status: "done", message: step.summary };
+        }
+    }
+    if (step.kind === "ask") {
+        const ctx = TASK_CONTEXT.get(taskId);
+        const q = `${step.question ?? ""} ${step.summary}`.toLowerCase();
+        const known = ctx?.plan.entities.find((e) => q.includes(e.name.toLowerCase()));
+        if (ctx && known && !ctx.askGuarded) {
+            ctx.askGuarded = true; // bounded: one bounce per task; a second ask goes to Julian
+            step = { kind: "observe", params: {}, risk: "read", done: false,
+                summary: `RETRIEVE BEFORE ASK: "${known.name}" is already known to Finagai (${known.kind}) — use the retrieved context in the prompt instead of asking Julian; ask only for what is genuinely missing` };
         }
     }
     if (step.kind === "ask") {

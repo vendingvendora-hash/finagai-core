@@ -73,3 +73,4 @@ Full text of ADR-001 to ADR-026 is in the approved Claude Docs; this index is th
 | ADR-071 | Controlled release (Phase 0): Render auto-deploy off; release.yml migrates (approval-gated, only when migrations changed) then deploys via hook and verifies /health. | Decided by Julian |
 | ADR-072 | Phase 1: acceptance contracts + independent verifier before done; false_completion class; interaction telemetry + daily metrics view (0022); helper diagnostics to Core. | Decided by Julian |
 | ADR-073 | Phase 2: capability registry (0023) with live discovery/health, evidence-gated reliability, resource traces, list_capabilities. | Decided by Julian |
+| ADR-074 | Phase 2C-E: registry-driven resource planner, retrieve-before-ask (Core-side retrieval + J6 guard), bounded exhaustion, plan_resources tool; R01–R10. | Decided by Julian |

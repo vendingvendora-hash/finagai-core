@@ -12,6 +12,8 @@ import { getContext, resolveFromMac } from "../mac/context.js";
 import { route } from "../mac/router.js";
 import { listCapabilities, refreshRegistry } from "../resources/registry.js";
 import { writeTrace, routeTraceRows } from "../resources/trace.js";
+import { planAndTrace } from "../resources/planner.js";
+import { retrieve, traceRetrieval } from "../resources/retrieve.js";
 import { z } from "zod";
 import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import { appendEvent } from "../db/index.js";
@@ -37,6 +39,8 @@ export interface ToolDeps {
   cfg: ToolConfig;
   j2: J2Deps;
   client: string;              // "claude_ai" for Client v1
+  /** Read-only Google search (Phase 2D retrieval); absent when not configured. */
+  google?: import("../resources/retrieve.js").GoogleSearch;
   now?: () => Date;
   /** Registered later by J3 (operating_review, get_latest_review). */
   extend?: (server: McpServer, helpers: ToolHelpers) => void;
@@ -427,6 +431,22 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     return helpers.ok("list_capabilities", { count: rows.length, capabilities: rows.map((r) => ({ id: r.id, health: r.health, why: r.health_reason, access: r.access,
       operations: r.operations, reliability: r.reliability != null ? Number(r.reliability) : null, samples: r.samples, p50ms: r.latency_p50_ms, risk: r.risk,
       freshness: r.freshness, authority: r.authority, permissions: r.permissions })) });
+  });
+
+  server.registerTool("plan_resources", {
+    description: "Call FIRST for any substantive request (prepare me for X, what's going on with Y, find Z, handle this): Finagai decides which of its sources matter — its own project/area/follow-up memory, past artifacts and requests, Gmail/Calendar/Drive, Mac files and current screen — retrieves the Core-side ones now, and returns what it found with provenance, the authoritative source per need, what it skipped and why, and the only things genuinely missing. Never ask Julian for something this returns or could retrieve; ask only for items listed in askJulian.",
+    inputSchema: z.object({ request: z.string().min(2).max(2000) }),
+  }, async ({ request }) => {
+    const plan = await planAndTrace(deps.pool, request, {});
+    const results = plan.intent === "trivial" ? [] : await retrieve(deps.pool, plan, deps.google ? { google: deps.google } : {});
+    await traceRetrieval(deps.pool, { request }, results).catch((e) => console.error("retrieval trace failed", e));
+    return helpers.ok("plan_resources", {
+      intent: plan.intent, knownToFinagai: plan.entities, authoritativeSource: plan.authoritative,
+      used: plan.use.map((u) => ({ source: u.capabilityId, why: u.why })),
+      retrieved: results.map((r) => ({ source: r.capabilityId, status: r.status, items: r.items, note: r.note })),
+      skipped: plan.skip.slice(0, 12), unavailable: plan.unavailable, missing: plan.missing, askJulian: plan.askJulian,
+      instruction: plan.askJulian ? "Ask Julian ONLY about askJulian." : "Answer from what was retrieved; do not ask Julian for information Finagai already has.",
+    });
   });
 
   server.registerTool("execution_metrics", {

@@ -200,4 +200,18 @@ describe.skipIf(!pool)("J6 control lifecycle", () => {
     const row = (await pool!.query(`SELECT failure_class, result_summary FROM control_task WHERE id = $1`, [task.id])).rows[0];
     expect(row.failure_class).toBe("model_parse"); expect(row.result_summary).toMatch(/unreadable reply twice/);
   });
+
+  it("retrieve-before-ask: a question about something Finagai already knows is bounced once, then allowed", async () => {
+    await pool!.query(`INSERT INTO project (name, description) SELECT 'Zephyrco', 'test project' WHERE NOT EXISTS (SELECT 1 FROM project WHERE name = 'Zephyrco')`);
+    const task = await createTask(pool!, "Open my Zephyrco notes in TextEdit", "chat");
+    const d = deps(new Script([
+      { kind: "ask", question: "What is Zephyrco?", summary: "Ask Julian what Zephyrco is", risk: "read" },
+      { kind: "ask", question: "Which Zephyrco notes file do you mean?", summary: "Ask Julian which Zephyrco file", risk: "read" },
+    ]));
+    const a = await planNext(d, task.id, "s");
+    expect(a.status).toBe("run_read"); expect(a.step!.kind).toBe("observe"); expect(a.step!.summary).toMatch(/RETRIEVE BEFORE ASK/);
+    await recordRun(pool!, a.step!.id, true, "observed: {}");
+    const b = await planNext(d, task.id, "s");
+    expect(b.status).toBe("ask");                                                       // bounded: the second ask reaches Julian
+  });
 });

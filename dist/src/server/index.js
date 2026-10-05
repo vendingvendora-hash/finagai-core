@@ -43,7 +43,9 @@ async function main() {
         budget: async () => ({ monthToDateUsd: await recorder.monthToDateUsd(new Date()),
             targetUsd: cfg.MODEL_BUDGET_TARGET_USD_MONTH, ceilingUsd: cfg.MODEL_HARD_CEILING_USD_MONTH }),
     };
-    const mcp = createMcpHandler(() => buildMcpServer({ pool, cfg, client: "claude_ai", j2: { pool, model, cfg },
+    const sharedGoogle = cfg.GOOGLE_CLIENT_ID && cfg.GOOGLE_CLIENT_SECRET && cfg.GOOGLE_REFRESH_TOKEN
+        ? new GoogleClient({ clientId: cfg.GOOGLE_CLIENT_ID, clientSecret: cfg.GOOGLE_CLIENT_SECRET, refreshToken: cfg.GOOGLE_REFRESH_TOKEN }) : undefined;
+    const mcp = createMcpHandler(() => buildMcpServer({ pool, cfg, client: "claude_ai", j2: { pool, model, cfg }, ...(sharedGoogle ? { google: sharedGoogle } : {}),
         extend: registerJ3Tools(pool, j3) }));
     const base = new URL(cfg.FINAGAI_PUBLIC_BASE_URL);
     const approval = createApprovalHandler({
@@ -65,7 +67,7 @@ async function main() {
     configureRegistry({ googleConfigured: !!(cfg.GOOGLE_CLIENT_ID && cfg.GOOGLE_CLIENT_SECRET && cfg.GOOGLE_REFRESH_TOKEN), resendConfigured: !!cfg.RESEND_API_KEY,
         models: { planner: cfg.MODEL_J6_PLANNER, grader: cfg.MODEL_EVAL_GRADER, concierge: cfg.MODEL_J5_CONCIERGE, review: cfg.MODEL_J3_COMPOSE } });
     refreshRegistry(pool).then((n) => log("capability registry refreshed", { capabilities: n })).catch((e) => log("capability registry refresh failed", { error: String(e?.message ?? e).slice(0, 200) }));
-    const control = createControlHandler({ pool, model, modelId: cfg.MODEL_J5_CONCIERGE, plannerModel: cfg.MODEL_J6_PLANNER, graderModel: cfg.MODEL_EVAL_GRADER, thinkingTokens: cfg.J6_THINKING_TOKENS, log }, cfg.CONCIERGE_HELPER_TOKEN, log);
+    const control = createControlHandler({ pool, model, modelId: cfg.MODEL_J5_CONCIERGE, plannerModel: cfg.MODEL_J6_PLANNER, graderModel: cfg.MODEL_EVAL_GRADER, thinkingTokens: cfg.J6_THINKING_TOKENS, log, ...(sharedGoogle ? { google: sharedGoogle } : {}) }, cfg.CONCIERGE_HELPER_TOKEN, log);
     const server = http.createServer(createHandler(cfg, { version: VERSION, startedAt: new Date() }, log, { keys: remoteKeys(cfg.OAUTH_JWKS_URL), mcp, approval, concierge, control,
         onClientObserved: async (clientId) => {
             const seen = await pool.query(`SELECT 1 FROM event WHERE action = 'mcp_client_observed' AND after->>'client_id' = $1 LIMIT 1`, [clientId]);

@@ -12,6 +12,25 @@
  */
 import type pg from "pg";
 import { routeHint } from "../../mac/router.js";
+import { planResources, planPromptBlock, type ResourcePlan } from "../../resources/planner.js";
+import { retrieve, retrievedBlock, traceRetrieval } from "../../resources/retrieve.js";
+import { writeTrace } from "../../resources/trace.js";
+import { planTraceRows } from "../../resources/planner.js";
+
+/** Per-task resource context (computed once per task per process; recomputed after a restart). */
+const TASK_CONTEXT = new Map<string, { plan: ResourcePlan; block: string; askGuarded: boolean }>();
+async function taskContext(deps: ControlDeps, taskId: string, request: string) {
+  const hit = TASK_CONTEXT.get(taskId);
+  if (hit) return hit;
+  const plan = await planResources(deps.pool, request);
+  const results = plan.intent === "trivial" ? [] : await retrieve(deps.pool, plan, deps.google ? { google: deps.google } : {});
+  await writeTrace(deps.pool, { taskId, request }, planTraceRows(plan)).catch(() => {});
+  await traceRetrieval(deps.pool, { taskId, request }, results).catch(() => {});
+  const ctx = { plan, block: [planPromptBlock(plan), retrievedBlock(results)].filter(Boolean).join("\n\n"), askGuarded: false };
+  if (TASK_CONTEXT.size > 200) TASK_CONTEXT.clear();
+  TASK_CONTEXT.set(taskId, ctx);
+  return ctx;
+}
 import { deriveContract, verifyCompletion, recoveryDecision, REJECTION_MARKER, type AcceptanceContract } from "../../mac/acceptance.js";
 import { appendEvent, withTransaction } from "../../db/index.js";
 import type { MeteredModelClient } from "../../llm/metered.js";
@@ -48,6 +67,8 @@ export interface ControlDeps {
   modelId: string;
   /** Stronger model for the planning loop (ADR-055); falls back to modelId. */
   plannerModel?: string;
+  /** Read-only Google search for Phase 2D retrieval (optional). */
+  google?: import("../../resources/retrieve.js").GoogleSearch;
   /** Independent verifier model (Phase 1A); never the planner's word alone. */
   graderModel?: string;
   /** Extended-thinking budget for the planner. */
@@ -242,7 +263,11 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
     const row = rt.rows[0];
     if (row) routeLine = routeHint(row.request, row.capabilities);
   } catch { /* routing is advisory */ }
+  let resourceBlock = "";
+  try { resourceBlock = (await taskContext(deps, taskId, task.request)).block; }
+  catch (e) { deps.log?.("resource planning failed", { error: String((e as Error)?.message ?? e).slice(0, 160) }); }
   const percept = [
+    resourceBlock,
     routeLine,
     ctxLine,
     perception?.pageText ? `Visible page text (truncated):\n${perception.pageText.slice(0, 4000)}` : "",
@@ -344,6 +369,16 @@ export async function planNext(deps: ControlDeps, taskId: string, screenshotB64:
     await appendEvent(pool, { actor: "j6", action: "control_task_done", entityType: "control_task", entityId: taskId, after: { summary: step.summary } });
     await pool.query(`UPDATE mac_runtime SET last_success_at = now(), last_success_code = (SELECT code FROM control_task WHERE id = $1) WHERE id = 'primary'`, [taskId]).catch(() => {});
     return task.requester ? { status: "done", message: step.summary, requester: task.requester } : { status: "done", message: step.summary };
+    }
+  }
+  if (step.kind === "ask") {
+    const ctx = TASK_CONTEXT.get(taskId);
+    const q = `${step.question ?? ""} ${step.summary}`.toLowerCase();
+    const known = ctx?.plan.entities.find((e) => q.includes(e.name.toLowerCase()));
+    if (ctx && known && !ctx.askGuarded) {
+      ctx.askGuarded = true;      // bounded: one bounce per task; a second ask goes to Julian
+      step = { kind: "observe", params: {}, risk: "read", done: false,
+        summary: `RETRIEVE BEFORE ASK: "${known.name}" is already known to Finagai (${known.kind}) — use the retrieved context in the prompt instead of asking Julian; ask only for what is genuinely missing` };
     }
   }
   if (step.kind === "ask") { await setTaskStatus(pool, taskId, "waiting_approval"); return { status: "ask", message: step.question ?? step.summary }; }
