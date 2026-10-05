@@ -18,6 +18,11 @@ describe("release gate (migrate before deploy)", () => {
     expect(wf).toMatch(/migrate:[\s\S]*environment: production/);
     expect(wf).toMatch(/if: needs\.detect\.outputs\.migrations_changed == 'true'/);
   });
+  it("detect diffs against the commit before the PUSH (github.event.before), never HEAD~1 — release #1 regression", () => {
+    expect(wf).toMatch(/github\.event\.before/);
+    expect(wf).not.toMatch(/HEAD~1/);
+    expect(wf).toMatch(/no reliable base[\s\S]*changed=true/);   // unknown base fails SAFE (runs migrate)
+  });
   it("Render auto-deploy is off in the blueprint so pushes cannot race the migration", () => {
     expect(render).toMatch(/autoDeploy: false/);
   });
