@@ -39,3 +39,12 @@ describe("heartbeat liveness is independent of task execution (live #107 regress
     expect(main).toMatch(/hbBusy/);
   });
 });
+
+describe("special task types are dispatched by the helper, not sent to the J6 planner (live #108 regression)", () => {
+  it("mac_diag_test has its own branch before mac_ping/mac_chart/J6", () => {
+    const src = readFileSync(new URL("../../helper/finagai-imessage.mjs", import.meta.url), "utf8");
+    const pick = src.slice(src.indexOf("async function pickupTasks"));
+    expect(pick).toMatch(/startsWith\("mac_diag_test"\)[\s\S]*diag\("diag_selftest"/);
+    expect(pick.indexOf('startsWith("mac_diag_test")')).toBeLessThan(pick.indexOf('startsWith("mac_ping")'));
+  });
+});

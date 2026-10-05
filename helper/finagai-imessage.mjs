@@ -21,7 +21,7 @@ import { activateApp, axClick, axSetValue, menuItem, observe as observeUi } from
 import { moveFileVerified, trashVerified } from "./fs-ops.mjs";
 
 const run = promisify(execFile);
-const HELPER_VERSION = "runtime-11";
+const HELPER_VERSION = "runtime-12";
 const WORKER_ID = "mac-helper-" + process.pid;
 const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null, reconnects: 0, coreDown: false, downSince: null };
 /** Real capability probe (mac doctor), cached; refreshed every 10 minutes so the matrix stays truthful. */
@@ -740,7 +740,11 @@ for (const t of tasks) {
   if (!(await claim(cfg, t.id))) { log("task already claimed elsewhere", { code: t.code }); continue; }
   RUNTIME.currentTaskId = t.id;
   try {
-    if (typeof t.request === "string" && t.request.startsWith("mac_ping")) {
+    if (typeof t.request === "string" && t.request.startsWith("mac_diag_test")) {
+      // Phase 1E live proof: emit one safe, sanitized diagnostic through Core, then complete the task.
+      await diag("diag_selftest", `requested by task; helper ${HELPER_VERSION}; no action taken`, t.id);
+      await core(cfg, "/mac/chart-done", { taskId: t.id, workerId: WORKER_ID, done: true, summary: "diagnostic self-test emitted" });
+    } else if (typeof t.request === "string" && t.request.startsWith("mac_ping")) {
       await core(cfg, "/mac/chart-done", { taskId: t.id, workerId: WORKER_ID, done: true, summary: `pong from ${HELPER_VERSION} at ${new Date().toISOString()}` });
     } else if (typeof t.request === "string" && t.request.startsWith("mac_chart:")) {
       const spec = t.request.slice("mac_chart:".length);
