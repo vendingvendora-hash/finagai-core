@@ -408,6 +408,21 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
       note: "If the task outlasts this turn, Finagai still delivers the finished chart to Julian's Messages automatically — tell him it's building and will arrive in Messages shortly; do not ask him to check again." });
   });
 
+  server.registerTool("execution_metrics", {
+    description: "Read-only operational telemetry (Phase 1D): daily aggregates per task class (completion, p50/p95 acknowledgement and completion seconds, false completions, recovery attempts, verification attempts, tool/model calls, cost) plus the most recent interactions with their outcome, failure class and terminal reason. Use to answer 'how is Finagai performing' with real numbers.",
+    inputSchema: z.object({ days: z.number().int().min(1).max(90).optional(), recent: z.number().int().min(0).max(50).optional() }),
+  }, async ({ days, recent }) => {
+    const { metricsSummary } = await import("../concierge/interactions.js");
+    const daily = await metricsSummary(deps.pool, days ?? 7);
+    const rows = (await deps.pool.query(
+      `SELECT i.created_at, i.task_class, i.state, i.failure_class, i.terminal_reason, i.false_completion, i.recovery_attempts,
+              i.verification_attempts, i.tool_calls, i.model_calls, i.cost_usd, i.user_interventions,
+              extract(epoch FROM (i.completed_at - i.created_at))::int AS completion_s,
+              (SELECT array_agg(t.code ORDER BY t.code) FROM control_task t WHERE t.id = ANY(i.task_ids)) AS task_codes
+         FROM interaction i ORDER BY i.created_at DESC LIMIT $1`, [recent ?? 15])).rows;
+    return helpers.ok("execution_metrics", { daily, recent: rows });
+  });
+
   server.registerTool("pending_results", {
     description: "Results of earlier Finagai requests that finished after their chat turn ended (charts, Mac task results). Returns each with its image and marks them delivered. Call when a tool response mentions finishedWhileYouWereAway, or when Julian asks what finished.",
     inputSchema: z.object({}),
