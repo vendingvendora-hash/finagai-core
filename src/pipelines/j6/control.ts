@@ -112,6 +112,8 @@ THINK in a plan-act-reflect loop every turn:
 Keep every field short (reflection/plan/summary ≤ 300 characters). Read results (file lists, page text, file
 contents) are attached to the final report automatically — NEVER copy them into "summary"; for done, summarize
 the answer in one or two sentences.
+You have NO tools in this conversation: never write <invoke>, <parameter>, function-call or XML syntax, and never
+write "Human:" — the action is expressed only by the JSON below.
 Output ONLY this JSON object:
 {"reflection":"<what the last result tells you / why it failed>","plan":"<one line to the goal>","kind":"...","params":{...},"risk":"read|write","summary":"<one line Julian could approve without seeing the screen>","expect":"<what the screen should show after this action>","done":false}
 
@@ -130,14 +132,46 @@ Operating principles:
 - When the task is done, output done with a summary that CONTAINS the answer (the numbers, the file name, what you found), not just "done".${skillsFor(request)}`;
 }
 
+/** Every top-level balanced {...} in the text (string/escape aware), in order. */
+export function jsonObjects(text: string): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  let depth = 0, start = -1, inStr = false, esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (inStr) { if (esc) esc = false; else if (ch === "\\") esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') { if (depth > 0) inStr = true; continue; }
+    if (ch === "{") { if (depth === 0) start = i; depth++; }
+    else if (ch === "}" && depth > 0) {
+      depth--;
+      if (depth === 0 && start >= 0) { try { const o = JSON.parse(text.slice(start, i + 1)); if (o && typeof o === "object" && !Array.isArray(o)) out.push(o); } catch { /* not JSON */ } start = -1; }
+    }
+  }
+  return out;
+}
+
+/** The model sometimes answers in pseudo tool-call XML (<invoke name=..><parameter name=..>) — read it as a step. */
+export function invokeObjects(text: string): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const m of text.matchAll(/<invoke name="([^"]*)">([\s\S]*?)<\/invoke>/g)) {
+    const obj: Record<string, unknown> = {};
+    for (const p of m[2]!.matchAll(/<parameter name="([^"]+)">([\s\S]*?)<\/parameter>/g)) {
+      const v = p[2]!.trim();
+      try { obj[p[1]!] = JSON.parse(v); } catch { obj[p[1]!] = v; }
+    }
+    if (!obj.kind && KNOWN_KINDS.has(m[1]!)) {               // <invoke name="list_files"><parameter name="dir">…
+      const { summary, risk, expect, reflection, plan, done, ...rest } = obj;
+      out.push({ kind: m[1], params: rest, summary, risk, expect, reflection, plan, done });
+    } else if (obj.kind) out.push(obj);                       // <invoke name="computer"><parameter name="kind">scroll…
+  }
+  return out;
+}
+
 export function parseStep(text: string): Step | null {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) return null;
-  let raw: Record<string, unknown>;
-  try { raw = JSON.parse(text.slice(start, end + 1)); } catch { return null; }
+  // Prefer the LAST well-formed JSON object with a known kind; fall back to the <invoke> form (live #113/#115).
+  const candidates = [...jsonObjects(text)].reverse().concat(invokeObjects(text));
+  const raw = candidates.find((o) => KNOWN_KINDS.has(String(o.kind ?? "")));
+  if (!raw) return null;
   const kind = String(raw.kind ?? "");
-  if (!KNOWN_KINDS.has(kind)) return null;
   const summary = String(raw.summary ?? "").trim().slice(0, 500) || kind;
   const params = (raw.params && typeof raw.params === "object") ? raw.params as Record<string, unknown> : {};
   // Trust the declared risk only if it is at least as strict as our own classification.
