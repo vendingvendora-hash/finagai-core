@@ -45,6 +45,20 @@ export function dedupeVersions(rows) {
         return true;
     });
 }
+/**
+ * Live acceptance ("say no next round is scheduled"): from calendar lines "ISO | title | …", state the next
+ * upcoming event, or that none is scheduled, plus the most recent past one — computed, never left to inference.
+ */
+export function scheduleNote(text, now = new Date()) {
+    const ev = [...text.matchAll(/^(\d{4}-\d{2}-\d{2}(?:T[\d:.+-]+Z?)?) \| ([^|\n]*)/gm)].map((m) => ({ at: new Date(m[1]), title: m[2].trim() }))
+        .filter((e) => !Number.isNaN(e.at.getTime())).sort((a, b) => a.at.getTime() - b.at.getTime());
+    if (!ev.length)
+        return undefined;
+    const next = ev.find((e) => e.at >= now);
+    const last = [...ev].reverse().find((e) => e.at < now);
+    const d = (e) => `${e.at.toISOString().slice(0, 10)} ${e.title}`;
+    return `${next ? `next scheduled: ${d(next)}` : "no upcoming event is scheduled"}${last ? `; most recent: ${d(last)}` : ""}`;
+}
 /** Deictic requests ("that chart", "the last report") mean recency, not content match. */
 const deictic = (r) => /\b(that|those|last|latest|previous|recent|just)\b/i.test(r);
 /** SQL ILIKE ALL patterns: every content word must appear (with one entity this is just the entity name). */
@@ -138,10 +152,13 @@ async function retrieveOne(pool, plan, id, deps) {
                     out.push({ capabilityId: id, status: "failed", items: [], note: "Google client not available in this process" });
                     return out[0];
                 }
-                const rows = dedupeVersions(relevant(await fn.call(g, t), t));
+                const raw = relevant(await fn.call(g, t), t);
+                const rows = id === "google.drive" ? dedupeVersions(raw) : raw; // Gmail subjects legitimately repeat (9/21 vs 9/28 confirmations)
                 const cap = id === "google.gmail" ? MAX_GMAIL_ITEMS : MAX_ITEMS;
+                const sched = id === "google.calendar" ? scheduleNote(rows.map((x) => x.text).join("\n")) : undefined;
                 out.push({ capabilityId: id, status: rows.length ? "ok" : "empty", items: rows.slice(0, cap).map((x) => ({ title: x.name,
-                        detail: clip(x.text, /\[meeting summary\]/.test(x.text) ? MAX_SUMMARY_CHARS : MAX_CHARS), source: `${id} ${x.modified ?? ""}`.trim() })) });
+                        detail: clip(x.text, /\[meeting summary\]/.test(x.text) ? MAX_SUMMARY_CHARS : id === "google.calendar" ? MAX_SUMMARY_CHARS : MAX_CHARS), source: `${id} ${x.modified ?? ""}`.trim() })),
+                    ...(sched ? { note: sched } : {}) });
             }
             else {
                 out.push({ capabilityId: id, status: "delegated", items: [], note: id.startsWith("mac.")

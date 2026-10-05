@@ -452,7 +452,8 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
       used: plan.use.map((u) => ({ source: u.capabilityId, why: u.why })),
       retrieved: results.map((r) => ({ source: r.capabilityId, status: r.status, items: r.items, note: r.note })),
       skipped: plan.skip.filter((x) => !retrievedIds.has(x.capabilityId)).slice(0, 12), unavailable: plan.unavailable,
-      missing: plan.missing, notFound, searchedGoogle: googleScope, askJulian: plan.askJulian,
+      missing: plan.missing, notFound, searchedGoogle: googleScope,
+      schedule: results.find((r) => r.capabilityId === "google.calendar")?.note ?? null, askJulian: plan.askJulian,
       instruction: plan.askJulian ? "Ask Julian ONLY about askJulian."
         : notFound.length ? `Answer from what was retrieved. Nothing was found for: ${notFound.join(", ")}${googleScope ? ` (Google searched: ${googleScope})` : ""} — say so plainly; never present unrelated items as the answer.`
         : "Answer from what was retrieved; do not ask Julian for information Finagai already has.",

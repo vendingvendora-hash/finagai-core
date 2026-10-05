@@ -85,3 +85,26 @@ describe("live R02 follow-up: résumé JSONs and timestamped backups", () => {
     expect(dedupeVersions(rows).map((r) => r.name)).toEqual(["knowledge_base_backup_2026-10-05T05-40-58-108Z.json", "intel_2026-09-19T18-06-53-980Z.json", "Degree of Leverage Analysis.xlsx"]);
   });
 });
+
+import { rankGmail, isMeetingSummary, passageOf } from "../../src/google/client.js";
+import { scheduleNote } from "../../src/resources/retrieve.js";
+describe("live 'Prepare me for Altarum' acceptance (both accounts connected)", () => {
+  it("Otter notifications are not summaries; the real summary is, and it is not penalised as bulk", () => {
+    expect(isMeetingSummary({ from: "no-reply@otter.ai", subject: "Meeting Summary for Interview with Altarum / Julian - Pricing Analyst" })).toBe(true);
+    expect(isMeetingSummary({ from: "no-reply@otter.ai", subject: "Unable to record Interview with Altarum" })).toBe(false);
+    expect(isMeetingSummary({ from: "no-reply@otter.ai", subject: "Your upcoming meetings" })).toBe(false);
+    const m = (id: string, subject: string, from: string, bulk = false) => ({ id, threadId: id, subject, from, date: "", internalDate: 1, bulk, snippet: "" });
+    const r = rankGmail([m("a", "Your upcoming meetings", "no-reply@otter.ai", true),
+      m("s", "Meeting Summary for Interview with Altarum", "no-reply@otter.ai", true)], ["altarum"]);
+    expect(r[0]!.id).toBe("s");
+  });
+  it("states that no next round is scheduled, with the most recent event", () => {
+    const cal = "2026-09-14T11:30:00-04:00 | Phone Screen with Altarum | |\n2026-09-28T15:00:00-04:00 | Interview with Altarum | | panel";
+    expect(scheduleNote(cal, new Date("2026-10-05T12:00:00Z"))).toBe("no upcoming event is scheduled; most recent: 2026-09-28 Interview with Altarum");
+    expect(scheduleNote(cal, new Date("2026-09-20T12:00:00Z"))).toMatch(/^next scheduled: 2026-09-28/);
+  });
+  it("Drive previews start at the match, not 1000 characters before it", () => {
+    const text = "x".repeat(5000) + "Altarum,Pricing Analyst" + "y".repeat(5000);
+    expect(passageOf(text, ["altarum"]).slice(0, 600)).toContain("Altarum");
+  });
+});

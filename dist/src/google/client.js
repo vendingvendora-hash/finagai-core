@@ -84,10 +84,22 @@ export class GoogleClient {
         for (const m of list.messages ?? []) {
             const msg = await this.json(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date&metadataHeaders=List-Unsubscribe&metadataHeaders=Precedence`);
             const h = (n) => msg.payload?.headers?.find((x) => x.name.toLowerCase() === n)?.value ?? "";
-            metas.push({ id: m.id, subject: h("subject"), from: h("from"), date: h("date"), internalDate: Number(msg.internalDate),
+            metas.push({ id: m.id, ...(m.threadId ? { threadId: m.threadId } : {}), subject: h("subject"), from: h("from"), date: h("date"), internalDate: Number(msg.internalDate),
                 bulk: !!h("list-unsubscribe") || /bulk|list/i.test(h("precedence")), snippet: msg.snippet ?? "" });
         }
-        const ranked = rankGmail(metas, terms).slice(0, opts.top ?? 8);
+        // Live fix: eight same-subject recruiter confirmations crowded the Otter summary out of the top 8.
+        // Collapse each thread to its best-ranked message (distinct confirmations with the same subject are distinct
+        // threads and stay), and always keep up to two meeting summaries.
+        const byThread = new Map();
+        for (const m of rankGmail(metas, terms)) {
+            const k = m.threadId ?? m.id;
+            if (!byThread.has(k))
+                byThread.set(k, m);
+        }
+        const uniq = [...byThread.values()];
+        const top = uniq.slice(0, opts.top ?? 8);
+        const summaries = uniq.filter((m) => isMeetingSummary(m) && !top.includes(m)).slice(0, 2);
+        const ranked = [...top, ...summaries];
         const out = [];
         for (const m of ranked) {
             const msg = await this.json(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=full`);
@@ -122,7 +134,9 @@ const NOISE_FROM = /(linkedin|noreply|no-reply|newsletter|digest|notifications?@
 const NOISE_SUBJECT = /(weekly|digest|newsletter|viewed (by|your)|who('?s| is) viewing|jobs? (for you|alert)|recommended|webinar|unsubscribe)/i;
 const SIGNAL_SUBJECT = /(interview|schedul|confirm|panel|next steps?|offer|application|phone screen|call with|meeting|follow[- ]?up|availability|invitation)/i;
 export function isMeetingSummary(m) {
-    return /otter\.ai|fireflies|fathom|read\.ai|zoom/i.test(m.from) && !/weekly|digest|tips|plan/i.test(m.subject);
+    // Live fix: Otter's "Unable to record …" and "Your upcoming meetings" are notifications, not summaries.
+    return /otter\.ai|fireflies|fathom|read\.ai|zoom/i.test(m.from) && /summary|notes|recap|transcript|highlights/i.test(m.subject)
+        && !/weekly|digest|tips|plan|unable|upcoming/i.test(m.subject);
 }
 /** Pure ranking: correspondence about the subject first, meeting summaries kept, notifications pushed down. */
 export function rankGmail(metas, terms) {
@@ -138,8 +152,8 @@ export function rankGmail(metas, terms) {
             s += 3;
         if (isMeetingSummary(m))
             s += 2;
-        if (m.bulk)
-            s -= 3;
+        if (m.bulk && !isMeetingSummary(m))
+            s -= 3; // summary senders always carry List-Unsubscribe
         if (NOISE_FROM.test(m.from) && !isMeetingSummary(m))
             s -= 3;
         if (NOISE_SUBJECT.test(m.subject))
@@ -174,7 +188,7 @@ export function passageOf(text, terms, max = MAX_TEXT) {
         if (at >= 0)
             break;
     }
-    const start = Math.max(0, at - 1000);
+    const start = Math.max(0, at - 200); // live fix: the 600-char preview showed text BEFORE the match (other jobs' rows)
     return text.slice(start, start + MAX_TEXT_);
 }
 /**

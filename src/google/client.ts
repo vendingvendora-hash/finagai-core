@@ -86,15 +86,23 @@ export class GoogleClient {
    */
   async gmail(terms: string[], opts: { top?: number } = {}): Promise<FileExcerpt[]> {
     const q = gmailQuery(terms);
-    const list = await this.json<{ messages?: Array<{ id: string }> }>(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25&q=${encodeURIComponent(q)}`);
+    const list = await this.json<{ messages?: Array<{ id: string; threadId?: string }> }>(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25&q=${encodeURIComponent(q)}`);
     const metas: Array<GmailMeta> = [];
     for (const m of list.messages ?? []) {
       const msg = await this.json<GmailMessage>(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date&metadataHeaders=List-Unsubscribe&metadataHeaders=Precedence`);
       const h = (n: string) => msg.payload?.headers?.find((x) => x.name.toLowerCase() === n)?.value ?? "";
-      metas.push({ id: m.id, subject: h("subject"), from: h("from"), date: h("date"), internalDate: Number(msg.internalDate),
+      metas.push({ id: m.id, ...(m.threadId ? { threadId: m.threadId } : {}), subject: h("subject"), from: h("from"), date: h("date"), internalDate: Number(msg.internalDate),
         bulk: !!h("list-unsubscribe") || /bulk|list/i.test(h("precedence")), snippet: msg.snippet ?? "" });
     }
-    const ranked = rankGmail(metas, terms).slice(0, opts.top ?? 8);
+    // Live fix: eight same-subject recruiter confirmations crowded the Otter summary out of the top 8.
+    // Collapse each thread to its best-ranked message (distinct confirmations with the same subject are distinct
+    // threads and stay), and always keep up to two meeting summaries.
+    const byThread = new Map<string, GmailMeta>();
+    for (const m of rankGmail(metas, terms)) { const k = m.threadId ?? m.id; if (!byThread.has(k)) byThread.set(k, m); }
+    const uniq = [...byThread.values()];
+    const top = uniq.slice(0, opts.top ?? 8);
+    const summaries = uniq.filter((m) => isMeetingSummary(m) && !top.includes(m)).slice(0, 2);
+    const ranked = [...top, ...summaries];
     const out: FileExcerpt[] = [];
     for (const m of ranked) {
       const msg = await this.json<GmailMessage>(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=full`);
@@ -129,14 +137,16 @@ export class GoogleClient {
 
 interface GmailPart { mimeType?: string; body?: { data?: string }; parts?: GmailPart[]; headers?: Array<{ name: string; value: string }> }
 interface GmailMessage { internalDate: string; snippet?: string; payload?: GmailPart }
-export interface GmailMeta { id: string; subject: string; from: string; date: string; internalDate: number; bulk: boolean; snippet: string }
+export interface GmailMeta { id: string; threadId?: string; subject: string; from: string; date: string; internalDate: number; bulk: boolean; snippet: string }
 
 const NOISE_FROM = /(linkedin|noreply|no-reply|newsletter|digest|notifications?@|mailer|marketing|news@)/i;
 const NOISE_SUBJECT = /(weekly|digest|newsletter|viewed (by|your)|who('?s| is) viewing|jobs? (for you|alert)|recommended|webinar|unsubscribe)/i;
 const SIGNAL_SUBJECT = /(interview|schedul|confirm|panel|next steps?|offer|application|phone screen|call with|meeting|follow[- ]?up|availability|invitation)/i;
 
 export function isMeetingSummary(m: Pick<GmailMeta, "from" | "subject">): boolean {
-  return /otter\.ai|fireflies|fathom|read\.ai|zoom/i.test(m.from) && !/weekly|digest|tips|plan/i.test(m.subject);
+  // Live fix: Otter's "Unable to record …" and "Your upcoming meetings" are notifications, not summaries.
+  return /otter\.ai|fireflies|fathom|read\.ai|zoom/i.test(m.from) && /summary|notes|recap|transcript|highlights/i.test(m.subject)
+    && !/weekly|digest|tips|plan|unable|upcoming/i.test(m.subject);
 }
 
 /** Pure ranking: correspondence about the subject first, meeting summaries kept, notifications pushed down. */
@@ -149,7 +159,7 @@ export function rankGmail(metas: GmailMeta[], terms: string[]): GmailMeta[] {
     if (ts.some((t) => from.includes(t.replace(/\s+/g, "")))) s += 3;            // sender domain/name is the subject (e.g. @altarum.org)
     if (SIGNAL_SUBJECT.test(m.subject)) s += 3;
     if (isMeetingSummary(m)) s += 2;
-    if (m.bulk) s -= 3;
+    if (m.bulk && !isMeetingSummary(m)) s -= 3;   // summary senders always carry List-Unsubscribe
     if (NOISE_FROM.test(m.from) && !isMeetingSummary(m)) s -= 3;
     if (NOISE_SUBJECT.test(m.subject)) s -= 4;
     return s;
@@ -172,7 +182,7 @@ export function passageOf(text: string, terms: string[], max: number = MAX_TEXT)
   const lower = text.toLowerCase();
   let at = -1;
   for (const w of terms.flatMap((t) => t.toLowerCase().split(/\s+/)).filter((w) => w.length > 2)) { at = lower.indexOf(w); if (at >= 0) break; }
-  const start = Math.max(0, at - 1000);
+  const start = Math.max(0, at - 200);   // live fix: the 600-char preview showed text BEFORE the match (other jobs' rows)
   return text.slice(start, start + MAX_TEXT_);
 }
 
