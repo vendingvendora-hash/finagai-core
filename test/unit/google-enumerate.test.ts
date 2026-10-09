@@ -79,3 +79,23 @@ describe("messageText (deterministic body + LinkedIn template ids)", () => {
     expect(messageText({ mimeType: "text/plain", body: { data: b64("x https://a.b/?trk=eml-email_application_confirmation_with_nba_01-x") } }).templates).toEqual(["application_confirmation_with_nba_01"]);
   });
 });
+
+describe("Gmail 403 handling (live 2026-10-09: exhaustive acquisition hit the per-user rate limit)", () => {
+  const mk = (bodies: Array<{ status: number; body: unknown }>) => {
+    let n = 0;
+    return (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
+      if (url.includes("oauth2")) return json({ access_token: "t", expires_in: 3600 });
+      const b = bodies[Math.min(n++, bodies.length - 1)]!; return json(b.body, b.status);
+    }) as typeof fetch;
+  };
+  it("403 userRateLimitExceeded is retried; the reason is reported", async () => {
+    const f = mk([{ status: 403, body: { error: { errors: [{ reason: "userRateLimitExceeded" }] } } }, { status: 200, body: { messages: [] } }]);
+    expect((await client(f).gmailEnumerate("q")).records).toEqual([]);
+  }, 10_000);
+  it("403 insufficientPermissions is permanent and names the reason", async () => {
+    const f = mk([{ status: 403, body: { error: { errors: [{ reason: "insufficientPermissions" }] } } }]);
+    await expect(client(f).gmailEnumerate("q")).rejects.toThrow(/HTTP 403 insufficientPermissions/);
+  });
+});

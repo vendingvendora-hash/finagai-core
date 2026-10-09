@@ -15,6 +15,8 @@ const TEXT_EXPORT: Record<string, string> = {
 };
 const MAX_TEXT = 3000;
 
+const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+
 export class GoogleClient {
   private token: { value: string; expires: number } | null = null;
   private refreshing: Promise<string> | null = null;
@@ -158,20 +160,36 @@ export class GoogleClient {
     return { records: out, pages };
   }
 
-  /** GET with bounded retry on 429/5xx/network; a final failure throws (callers record it, never hide it). */
-  private async jsonRetry<T>(url: string, tries = 6): Promise<T> {
+  /**
+   * GET with bounded retry; a final failure throws WITH Google's reason (callers record it, never hide it).
+   * Retryable: network errors, 429, 5xx, and 403 whose reason is a rate/quota/concurrency limit — Gmail reports
+   * per-user rate limits as 403 userRateLimitExceeded (live, 2026-10-09: the first exhaustive acquisition hit it).
+   * Retry-After is honoured. Requests are paced (Gmail: 250 quota units/user/s; messages.get costs 5).
+   */
+  private async jsonRetry<T>(url: string, tries = 7): Promise<T> {
     let last: unknown;
     for (let i = 0; i < tries; i++) {
+      await this.pace();
       let r: Response;
-      try { r = await this.get(url); } catch (e) { last = e; await new Promise((res) => setTimeout(res, 300 * 2 ** i)); continue; }   // network/timeout: retry
+      try { r = await this.get(url); } catch (e) { last = e; await sleep(500 * 2 ** i); continue; }   // network/timeout: retry
       if (r.ok) return (await r.json()) as T;
-      last = new Error(`google ${new URL(url).hostname} HTTP ${r.status}`);
-      if (r.status !== 429 && r.status < 500) throw last;                                                                       // permanent: surface now
-      await new Promise((res) => setTimeout(res, 300 * 2 ** i));
+      const body = await r.text().catch(() => "");
+      const reason = /"reason"\s*:\s*"([^"]+)"/.exec(body)?.[1] ?? /"status"\s*:\s*"([^"]+)"/.exec(body)?.[1] ?? "";
+      last = new Error(`google ${new URL(url).hostname} HTTP ${r.status}${reason ? ` ${reason}` : ""}`);
+      const retryable = r.status === 429 || r.status >= 500 || (r.status === 403 && /rate|quota|concurren|backend/i.test(reason + body.slice(0, 300)));
+      if (!retryable) throw last;                                                                                // permanent: surface now
+      const ra = Number(r.headers.get("retry-after"));
+      await sleep(Number.isFinite(ra) && ra > 0 ? Math.min(ra * 1000, 30_000) : 500 * 2 ** i);
     }
     throw last;
   }
 
+  /** Minimum spacing between paced API calls from this client (≈20 req/s ⇒ ≤100 Gmail quota units/s). */
+  private nextSlot = 0;
+  private async pace(): Promise<void> {
+    const now = Date.now(); const at = Math.max(now, this.nextSlot); this.nextSlot = at + 50;
+    if (at > now) await sleep(at - now);
+  }
 
   /** Which Google account this client is connected to (registry probe: makes the wrong-account risk visible). */
   async account(): Promise<string> {

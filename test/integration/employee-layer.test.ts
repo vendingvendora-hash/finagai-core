@@ -78,7 +78,7 @@ describe.skipIf(!pool)("Career bootstrap (ADR-080): acquire → snapshot → int
     const p = await proposeCareerBootstrap(pool!, google(BEFORE) as never, T);
     expect((await pool!.query(`SELECT count(*)::int AS n FROM opportunity`)).rows[0].n).toBe(before);
     expect(p.summary.provenance).toEqual(expect.objectContaining({ complete: true, interpreterVersion: "career-interpret-3", previousSnapshot: null }));
-    expect(p.summary.activeProjects.map((a) => `${a.org}:${a.status}`).sort()).toEqual(["Altarum Institute:interviewing", "Amazon:applied", "Chimes:applied", "Vallum Associates:applied"]);
+    expect(p.summary.activeProjects.map((a) => `${a.org}:${a.status}`).sort()).toEqual(["Altarum:interviewing", "Amazon:applied", "Chimes:applied", "Vallum Associates:applied"]);
     expect(p.summary.closed!.map((c) => `${c.org}:${c.status}`).sort()).toEqual(["Accenture:rejected", "Cvent:rejected", "Immuta:rejected", "Johns Hopkins University:rejected", "Transurban:rejected", "Window Nation:rejected", "Yahoo:rejected"]);
     const row = (await pool!.query(`SELECT snapshot_digest, interpretation_digest, interpreter_version FROM bootstrap_proposal WHERE code = $1`, [p.code])).rows[0];
     expect(row.snapshot_digest).toBe(p.summary.provenance!.snapshotDigest);

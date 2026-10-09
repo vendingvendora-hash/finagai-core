@@ -404,8 +404,13 @@ export function interpretCareer(s, opts = {}) {
     for (const key of [...keys].sort(cmp)) {
         const evs = byOrg.get(key) ?? []; // already in total order (records were sorted)
         const rows = sheetByOrg.get(key) ?? [];
-        const names = [...evs.map((e) => e.t.org), ...rows.map((r) => r.org)];
-        const display = [...names].sort((a, b) => b.length - a.length || cmp(a, b))[0];
+        // Display name: the spelling the evidence uses most (then the sheet's), ties → longer, then lexical. Deterministic.
+        const freq = new Map();
+        for (const e of evs)
+            freq.set(e.t.org, (freq.get(e.t.org) ?? 0) + 2);
+        for (const r of rows)
+            freq.set(r.org, (freq.get(r.org) ?? 0) + 1);
+        const display = [...freq.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || cmp(a[0], b[0]))[0][0];
         const init = sheetInitial(rows);
         let st = init;
         const recs = [];

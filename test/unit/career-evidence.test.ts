@@ -43,9 +43,9 @@ function permute(s: CareerSnapshot, seed: number): CareerSnapshot {
 describe("interpretation of the real 2026-10-09 evidence", () => {
   it("statuses from the real evidence: active vs closed (Immuta AND Transurban were rejected — neither is active)", async () => {
     const i = interpretCareer(await acquireCareerSnapshot(sources(ALL), "Career Copilot", NOW));
-    expect(status(i)).toEqual({ "Altarum Institute": "interviewing", Amazon: "applied", Chimes: "applied", "Resource Innovations": "applied", "Vallum Associates": "applied",
+    expect(status(i)).toEqual({ Altarum: "interviewing", Amazon: "applied", Chimes: "applied", "Resource Innovations": "applied", "Vallum Associates": "applied",
       Accenture: "rejected", Cvent: "rejected", Immuta: "rejected", "Johns Hopkins University": "rejected", Transurban: "rejected", "Window Nation": "rejected", Yahoo: "rejected" });
-    expect(i.active.map((o) => o.org).sort()).toEqual(["Altarum Institute", "Amazon", "Chimes", "Resource Innovations", "Vallum Associates"]);
+    expect(i.active.map((o) => o.org).sort()).toEqual(["Altarum", "Amazon", "Chimes", "Resource Innovations", "Vallum Associates"]);
     expect(i.closed.find((c) => c.org === "Immuta")).toEqual(expect.objectContaining({ status: "rejected", evidenceIds: ["1a10d239a91c2453", "1a11212c71b7bd81"] }));
     expect(i.closed.find((c) => c.org === "Transurban")).toEqual(expect.objectContaining({ status: "rejected", evidenceIds: ["1a0fa482078ecbcb", "1a0fcd31d9610ef9", "1a0fcfae55d6732e"] }));
   });
@@ -92,7 +92,7 @@ describe("interpretation of the real 2026-10-09 evidence", () => {
     expect(a.aliases).toEqual(["altarum", "altarum institute"]);
     expect(a.contact).toBe("Beth Young"); expect(a.sheetRows).toEqual(["mtdy30"]);
     expect(a.evidence.map((e) => e.kind)).toContain("screen");
-    expect(i.conflicts.join("\n")).toMatch(/Altarum Institute: Career Copilot sheet says "analyzed" but .* show "interviewing"/);
+    expect(i.conflicts.join("\n")).toMatch(/Altarum: Career Copilot sheet says "analyzed" but .* show "interviewing"/);
     expect(i.pipeline.shortlist.map((s) => s.org)).toEqual(["M.C. Dean, Inc."]);   // Altarum engaged, Northrop needs clearance
   });
   it("Immuta: the HTML-escaped rejection is recognised (root cause of 'Immuta active')", () => {
