@@ -57,6 +57,7 @@ describe("job identity: one opportunity per job/application, never per employer"
       ["10471926", "Senior Financial Analyst, R2L Sub Same Day - Delivery Finance", "applied"],
       ["10491543", "Lease Financial Transformation Manager, Lease Accounting FBI", "withdrawn"],
       ["10499413", "Senior Financial Analyst, AWS Networking Infrastructure Finance", "closed"],
+      ["10507439", "Senior Financial Analyst, Sustainability Finance", "rejected"],          // "decided to progress with other candidates" (body)
     ]);
     expect(amz.every((o) => o.identityBasis === "requisition" && o.key === `job:amazon|req:${o.reqId!.toLowerCase()}`)).toBe(true);
     // Same title, two requisitions → two jobs (NACF), never merged.
@@ -219,7 +220,7 @@ describe("proposal payload (what approval would write)", () => {
     expect(r2l.events.map((e) => e.kind)).toEqual(["started", "application"]);
     expect(p.activeProjects.map((a) => a.name)).toEqual(expect.arrayContaining(["Altarum — Pricing Analyst", "Amazon — Senior Financial Analyst, R2L Sub Same Day - Delivery Finance (10471926)", "Vallum Associates — Project Finance Analyst - SMR"]));
     expect(p.activeProjects.some((a) => a.name.startsWith("Vallum Associates — Structured"))).toBe(false);
-    expect(p.employers!.find((e) => e.key === "amazon")!.jobs).toBe(6);
+    expect(p.employers!.find((e) => e.key === "amazon")!.jobs).toBe(7);
   });
 });
 
@@ -229,5 +230,22 @@ describe("identity safety", () => {
     const all = i.opportunities.flatMap((o) => o.aliasKeys);
     expect(all.length).toBe(new Set(all).size);
     expect(i.opportunities.filter((o) => o.reqId === "10383371" || o.reqId === "10466286").flatMap((o) => o.aliasKeys).some((k) => k.includes("|title:"))).toBe(false);
+  });
+});
+
+describe("live reinterpretation of #42 (proposal #43) — title artifacts fixed", () => {
+  it("email signatures are never job titles ('Beth Young', 'O | 734.302.4736', 'Best regards'); Altarum stays ONE job", async () => {
+    const i = interpretCareer(await acquireCareerSnapshot(sources(ALL), "Career Copilot", NOW));
+    expect(i.opportunities.filter((o) => o.employerKey === "altarum").map((o) => o.title)).toEqual(["Pricing Analyst"]);
+    expect(i.opportunities.every((o) => !o.title || /analyst|manager|accountant|specialist|associate|director|coordinator|consultant|controller|strategist|estimator|lead|officer/i.test(o.title))).toBe(true);
+    expect(i.opportunities.every((o) => !o.location || o.location.length <= 60)).toBe(true);
+  });
+});
+
+describe("title edge cases from #43", () => {
+  const one = (x: GmailRecord) => classifyRecord(evidenceRecords({ gmail: [{ key: "a", account: ACCOUNT, records: [x] }], calendar: [], carryForward: [] } as never)[0]!, new Set());
+  it("JHU requisition title and Accenture reference role are read cleanly (no signature/team suffix)", () => {
+    expect(one(REC.jhuRejected0911)).toEqual(expect.objectContaining({ reqId: "120088", title: "Financial Analyst (DOM General Internal Medicine)" }));
+    expect(one(REC.accentureRejected0903)).toEqual(expect.objectContaining({ reqId: "R00336590", title: "Pricing & Deal Structuring Specialist" }));
   });
 });

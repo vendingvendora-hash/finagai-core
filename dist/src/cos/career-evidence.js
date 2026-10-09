@@ -21,7 +21,7 @@
  */
 import { createHash } from "node:crypto";
 import { dedupeKey, extractSheet, normOrg } from "./bootstrap.js";
-export const INTERPRETER_VERSION = "career-interpret-5";
+export const INTERPRETER_VERSION = "career-interpret-6";
 /** Fixed acquisition lower bound (NOT rolling with the clock, so a record can't age out between two runs). */
 export const CAREER_EPOCH = "2026/06/01";
 export const CALENDAR_AHEAD_DAYS = 120;
@@ -233,7 +233,7 @@ const TITLE_WORDS = /^(senior|sr\.?|junior|jr\.?|lead|principal|staff|associate|
  *  "unfortunately we can't reply to everyone"). Live examples: JHU, Cvent ("Thank You For Applying" — a rejection), Accenture. */
 /** The posting itself closed (not a decision about Julian): Amazon "this position is no longer available". */
 const POSTING_CLOSED = /\b(position is no longer available|no longer accepting applications|(?:posting|requisition) (?:has been |was )?(?:closed|cancell?ed))\b/i;
-const REJECT = /\b(regret to inform|not (?:to )?(?:move|moving) forward with (?:your|you)|decided not to (?:move forward|proceed|pursue)|(?:will|are) not be (?:moving forward|proceeding)|not be proceeding|unable to move forward|(?:decided|chosen|elected|decision) to (?:move forward|proceed|pursue|go) with (?:other|another) (?:candidate|applicant)|move forward with (?:other|another) (?:candidate|applicant)|we(?:'|’)?ve made the decision|we have made the decision|no longer (?:being )?(?:considered|under consideration)|position (?:has been|is now) (?:filled|closed)|(?:have|has) not been selected|not selected (?:to|for)|pursue other candidates)/i;
+const REJECT = /\b(regret to inform|not (?:to )?(?:move|moving) forward with (?:your|you)|decided not to (?:move forward|proceed|pursue)|(?:will|are) not be (?:moving forward|proceeding)|not be proceeding|unable to move forward|(?:decided|chosen|elected|decision) to (?:move forward|proceed|pursue|go|progress|continue) with (?:other|another) (?:candidate|applicant)|(?:move|go|progress) (?:forward )?with (?:other|another) (?:candidate|applicant)|we(?:'|’)?ve made the decision|we have made the decision|no longer (?:being )?(?:considered|under consideration)|position (?:has been|is now) (?:filled|closed)|(?:have|has) not been selected|not selected (?:to|for)|pursue other candidates)/i;
 const OFFER = /\b(offer letter|pleased to (?:offer|extend)|extend(?:ing)? (?:you )?an offer|job offer|offer of employment)\b/i;
 const NOT_ORG = /^(julian|your|you|the|a|an|us|me|our|linkedin|indeed|workable|lever|greenhouse)$/i;
 const ATS_OR_JOBS = /(\.jobs>?\s*$|jobs-noreply@linkedin|lever\.co|greenhouse|workablemail|workable|ashbyhq|smartrecruiters|icims|myworkday|jobvite|bamboohr|paylocity|ultipro|taleo|successfactors|jazzhr|breezy|recruitee|teamtailor|rippling|dayforce|paycom)/i;
@@ -379,16 +379,23 @@ export function resolveAliases(keys) {
 //   employer has exactly one job in evidence, otherwise it is kept as an UNASSIGNED employer event (never guessed).
 const normTitle = (t) => t.toLowerCase().replace(/&/g, " and ").replace(/\bsr\b\.?/g, "senior").replace(/\bjr\b\.?/g, "junior").replace(/[^a-z0-9]+/g, " ").trim();
 const normLoc = (l) => l.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+/** A job title names a role; signatures ("Best regards", "Beth Young", "O | 734…") and boilerplate never do. */
+const ROLE_WORD = /\b(analyst|manager|accountant|specialist|associate|director|coordinator|consultant|controller|strategist|estimator|officer|engineer|lead|intern|administrator|planner|advisor|adviser|auditor|economist|representative|assistant|partner|head|vp|vice president|executive|developer|scientist|bookkeeper|treasurer|clerk|cfo|fp&a|fp and a)\b/i;
 const BAD_TITLE = /\b(julian|your application|job below|application data|safekeeping|personal information)\b|^(?:the )?(?:position|role|job|opening)$/i;
 function cleanTitle(raw, org) {
     if (!raw)
         return undefined;
-    let t = raw.replace(/\s*\(ID:?\s*\d+\)\s*/gi, " ").replace(/^\s*(?:R\d{4}-\d{3,}|R\d{6,}|req(?:uisition)?\s*#?\s*\w+)\s+/i, "")
+    let t = raw.replace(/^\s*reference role:\s*/i, "").replace(/\s*\(ID:?\s*\d+\)\s*/gi, " ").replace(/^\s*(?:R\d{4}-\d{3,}|R\d{6,}|req(?:uisition)?\s*#?\s*\w+)\s+/i, "")
+        .replace(/\s+(?:\||[\w&]+ (?:recruitment|recruiting|talent acquisition) team\b).*$/i, "")
         .replace(/^(?:the|a|an)\s+/i, "").replace(/^position of\s+/i, "").replace(/\s+(?:position|role|job|opening)$/i, "").replace(/[\s.,;:!|-]+$/, "").replace(/\s+/g, " ").trim();
-    if (t.length < 3 || t.length > 140 || BAD_TITLE.test(t))
+    if (t.length < 3 || t.length > 140 || BAD_TITLE.test(t) || !ROLE_WORD.test(t))
         return undefined;
-    if (org && normOrg(t) === normOrg(org))
-        return undefined;
+    if (org) {
+        const esc = org.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        t = t.replace(new RegExp(`\\s+${esc}$`, "i"), "").trim();
+        if (normOrg(t) === normOrg(org))
+            return undefined;
+    }
     return t;
 }
 const REQ_PATTERNS = [
@@ -422,7 +429,9 @@ export function jobIdentity(r, t) {
     const amz = /(?:position of|for the|interest in|application for(?: the)?(?: position of)?)\s+(.{3,160}?)\s*\(ID:?\s*\d{5,}\)/.exec(body) ?? /(?:position of|for the|interest in|application for(?: the)?(?: position of)?)\s+(.{3,160}?)\s*\(ID:?\s*\d{5,}\)/.exec(snippet);
     const candidates = [[amz?.[1], "title before the requisition id"], [t.title, `title from ${t.rule}`]];
     // LinkedIn cards: "<title>\n<company>\n<location>\nView job:" — the line before the company line is the title.
-    const lines = body.split("\n").map((x) => x.trim()).slice(0, 12);
+    // Only LinkedIn's own card layout (first line "Your application was sent to / viewed by …"); elsewhere the line before
+    // the company name is usually a signature ("Best regards", "Beth Young").
+    const lines = /^Your application was (?:sent to|viewed by)\b/i.test(body) ? body.split("\n").map((x) => x.trim()).slice(0, 6) : [];
     const isOrgLine = (x) => { const k = normOrg(x); return !!k && !!t.orgKey && (k === t.orgKey || k.startsWith(`${t.orgKey} `) || t.orgKey.startsWith(`${k} `)); };
     for (let i = 1; i < lines.length; i++) {
         if (/^view similar jobs/i.test(lines[i]))
@@ -430,13 +439,16 @@ export function jobIdentity(r, t) {
         if (isOrgLine(lines[i]) && !/^(your application|your update|-{3})/i.test(lines[i - 1])) {
             candidates.push([lines[i - 1], "title line of the LinkedIn job card"]);
             const loc = lines[i + 1];
-            if (loc && !/^(view job|-{3}|applied on)/i.test(loc) && /,|\barea\b|remote|hybrid|united states/i.test(loc))
+            if (loc && loc.length <= 60 && !/^(view job|-{3}|applied on)/i.test(loc) && /,|\barea\b|remote|hybrid|united states/i.test(loc))
                 out.location = loc;
             break;
         }
     }
     const generic = /(?:application for|applying (?:to|for)|apply (?:to|for)|interest in|apply for)(?: the)? (?:position of )?(.{3,120}?) (?:position|role|opening|job)\b/i;
     candidates.push([generic.exec(snippet)?.[1], "title in the snippet"], [generic.exec(body)?.[1], "title in the body"]);
+    const req = /application for req(?:uisition)?\.? ?#? ?\w[\w-]* (.{3,100}?)(?:\.\s|\.$|$)/im.exec(`${body}\n${snippet}`); // JHU "application for req #120088 Financial Analyst (DOM …)."
+    candidates.push([req?.[1], "title after the requisition number"]);
+    candidates.push([/Reference Role:\s*(.{3,140}?)\s*(?:\||$)/m.exec(body)?.[1], "reference role line"]); // Accenture
     const iv = / \/ [^/]*? - ([^/]{3,100})$/.exec(subj); // "Interview with Altarum / Julian … - Pricing Analyst"
     candidates.push([iv?.[1], "title after the candidate name in the subject"]);
     const inmail = /^(.{3,100}?) \| [^|]{3,80} \| [^|]{3,60} \| #\d/m.exec(body); // "Senior Staff Accountant | Political … | Annapolis, MD | #3572772-2"

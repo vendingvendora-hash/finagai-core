@@ -81,7 +81,7 @@ describe.skipIf(!pool)("Career bootstrap (ADR-080): acquire → snapshot → int
     const before = await careerCounts();
     const p = await proposeCareerBootstrap(pool!, google(BEFORE) as never, T);
     expect(await careerCounts()).toEqual(before);                                  // read-only until approval
-    expect(p.summary.provenance).toEqual(expect.objectContaining({ complete: true, interpreterVersion: "career-interpret-5", previousSnapshot: null }));
+    expect(p.summary.provenance).toEqual(expect.objectContaining({ complete: true, interpreterVersion: "career-interpret-6", previousSnapshot: null }));
     expect(p.summary.activeProjects.map((a) => `${a.name}:${a.status}`)).toEqual(expect.arrayContaining(["Altarum — Pricing Analyst:interviewing", "Vallum Associates — Project Finance Analyst - SMR:applied",
       "Amazon — Senior Financial Analyst, R2L Sub Same Day - Delivery Finance (10471926):applied"]));
     expect(p.summary.closed!.map((c) => c.job)).toEqual(expect.arrayContaining(["Amazon — Sr. Financial Analyst, Amazon Business Finance (10460629)", "Transurban — Senior Financial Planning Analyst", "Vallum Associates — Structured Finance Analyst"]));
@@ -113,7 +113,7 @@ describe.skipIf(!pool)("Career bootstrap (ADR-080): acquire → snapshot → int
     // One row per JOB; the employer is shared; each job has its own status, requisition, history and project.
     const amz = (await pool!.query(`SELECT o.requisition_id, o.status, o.title, e.name AS employer, (SELECT count(*)::int FROM opportunity_event v WHERE v.opportunity_id = o.id) AS events
       FROM opportunity o JOIN employer e ON e.id = o.employer_id WHERE e.key = 'amazon' AND o.requisition_id IS NOT NULL ORDER BY o.requisition_id`)).rows;
-    expect(amz.map((r) => [r.requisition_id, r.status, r.events])).toEqual([["10383371", "applied", 2], ["10460629", "rejected", 3], ["10466286", "applied", 1], ["10471926", "applied", 2], ["10491543", "withdrawn", 3], ["10499413", "closed", 3]]);
+    expect(amz.map((r) => [r.requisition_id, r.status, r.events])).toEqual([["10383371", "applied", 2], ["10460629", "rejected", 3], ["10466286", "applied", 1], ["10471926", "applied", 2], ["10491543", "withdrawn", 3], ["10499413", "closed", 3], ["10507439", "rejected", 2]]);
     expect(new Set(amz.map((r) => r.employer))).toEqual(new Set(["Amazon"]));
     const vallum = (await pool!.query(`SELECT title, status FROM opportunity WHERE org = 'Vallum Associates' AND archived_at IS NULL ORDER BY title`)).rows;
     expect(vallum).toEqual([{ title: "Project Finance Analyst - SMR", status: "applied" }, { title: "Structured Finance Analyst", status: "rejected" }]);
