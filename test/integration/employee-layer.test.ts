@@ -44,6 +44,7 @@ describe.skipIf(!pool)("employee layer (Phase 3)", () => {
     const b = await executiveBriefV2(pool!);
     expect(Object.keys(b)).toEqual(["generatedAt", "headline", "decisions", "blocked", "changes", "risks", "completed", "rest"]);
     expect(b.blocked.join(" ")).toMatch(/Overdue: Waiting on Broker/);
+    expect(b.blocked.join(" ")).not.toMatch(/No answer from Julian/);   // live: expired test tasks are a change, not a decision
   });
 
   it("due-date parsing", () => {

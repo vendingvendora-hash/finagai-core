@@ -91,6 +91,7 @@ describe.skipIf(!enabled)("Phase 1 — real browser operation (Chromium + extens
     expect(await step("browser_find", { label: "First name", role: "textbox" })).toMatch(/textbox "First name \*"/);
     expect(await step("browser_find", { label: "Email address", role: "textbox" })).toMatch(/textbox "Email address \*"/);
     expect(await step("browser_find", { label: "Phone" })).toMatch(/textbox "Phone"/);
+    expect(await step("browser_find", { label: "First name *", role: "textbox" })).toMatch(/textbox "First name \*"/);   // live #126
   });
 
   it("B11 unexpected page change: Next with missing fields shows validation → unverified/visible errors, then recovery", async () => {

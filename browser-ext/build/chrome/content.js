@@ -178,7 +178,8 @@
   /** Find controls by label/name/role/text/selector. Ranked; exact name beats partial. */
   function find(q = {}) {
     const wantRole = q.role ? String(q.role).toLowerCase() : null;
-    const needle = String(q.label ?? q.name ?? q.text ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+    // Labels are matched without required-field asterisks on EITHER side (live #126: planner asked for "First name *").
+    const needle = String(q.label ?? q.name ?? q.text ?? "").toLowerCase().replace(/\*/g, "").replace(/\s+/g, " ").trim();
     let pool;
     if (q.selector) { try { pool = Array.from(document.querySelectorAll(q.selector)); } catch (e) { throw new Error("bad_selector: " + e.message); } }
     else pool = Array.from(walk(document.documentElement)).filter((el) => el.matches(INTERACTIVE) || (q.text && /^h[1-6]$|^(p|span|div|li|td|label)$/i.test(el.tagName)));

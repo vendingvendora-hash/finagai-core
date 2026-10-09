@@ -76,6 +76,8 @@ function engagementFrom(subj: string, text: string, when: string | null, source:
   if (!m) return null;
   const org = m[2]!.replace(/\s+(Pricing|Senior|Financial|Analyst|Role|Position|Julian)\b.*$/, "").trim();
   if (!org || /^(Julian|Your|The|A|An|Us|Me)$/i.test(org)) return null;
+  // Live: "Senior" became an org from a LinkedIn application email ("application for Senior Financial Analyst").
+  if (/^(Senior|Junior|Lead|Principal|Staff|Associate|Assistant|Financial|Finance|Pricing|Accounting|Business|Data|Cost|Budget|Program|Analyst|Manager|Director|Specialist|Coordinator|Consultant|FP|Sr|Jr)\b/i.test(org)) return null;
   const kind: Engagement["kind"] = /screen/i.test(m[1]!) ? "screen" : /interview/i.test(m[1]!) ? "interview" : "application";
   const from = /From:\s*"?([^<"\n]+?)"?\s*</.exec(text)?.[1]?.trim() ?? null;
   return { org, kind, when, subject: subj.slice(0, 160), contact: from && !/julian|otter|no-?reply/i.test(from) ? from : null, source };

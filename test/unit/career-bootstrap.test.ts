@@ -43,6 +43,11 @@ describe("engagement evidence (real Gmail/Calendar shapes from the 2026-10-09 au
     expect(g.map((e) => [e.org, e.kind])).toEqual([["Altarum", "interview"], ["Altarum", "screen"], ["Altarum", "interview"]]);
     expect(g[0]!.contact).toBe("Beth Young"); expect(g[2]!.contact).toBeNull();
   });
+  it("live: job-title words are never an employer ('Senior' from a LinkedIn application email)", () => {
+    const g = extractEngagement([{ name: "Gmail: Your application for Senior Financial Analyst [x]", text: "From: LinkedIn <jobs-noreply@linkedin.com>\n" },
+      { name: "Gmail: Julian, your application was sent to Capital One [x]", text: "From: LinkedIn <jobs-noreply@linkedin.com>\n" }], "gmail");
+    expect(g.map((e) => e.org)).not.toContain("Senior");
+  });
   it("Calendar excerpt with several events", () => {
     const c = extractEngagement([{ name: "Google Calendar [perez.julian@correounivalle.edu.co]",
       text: "2026-09-14T11:30:00-04:00 | Phone Screen with Altarum / Julian David Perez Cardozo - Pricing Analyst | | Hi Julian\n2026-09-28T15:00:00-04:00 | Interview with Altarum / Julian David Perez Cardozo - Pricing Analyst | | panel\n2026-10-01T09:00:00-04:00 | Dentist | |" }], "calendar");

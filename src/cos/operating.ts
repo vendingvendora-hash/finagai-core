@@ -208,15 +208,19 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
   const blocked: string[] = [];
   for (const f of (await pool.query(`SELECT counterparty, summary, due_at FROM followup WHERE state = 'overdue' ORDER BY due_at LIMIT 10`)).rows)
     blocked.push(`Overdue: ${f.summary} (due ${new Date(f.due_at).toISOString().slice(0, 10)})`);
-  for (const t of (await pool.query(`SELECT code, result_summary FROM control_task WHERE (status = 'expired' OR verification_status = 'needs_review') AND updated_at > now() - interval '3 days' LIMIT 5`)).rows)
-    blocked.push(`Task ${t.code}: ${String(t.result_summary ?? "").slice(0, 140)}`);
+  // Needs-review results are blocked work; expired waits are a CHANGE (compressed), not a decision — live: five
+  // days-old test tasks crowded the brief as "5 things need you".
+  for (const t of (await pool.query(`SELECT code, result_summary FROM control_task WHERE verification_status = 'needs_review' AND updated_at > now() - interval '3 days' LIMIT 5`)).rows)
+    blocked.push(`Task ${t.code} needs your review: ${String(t.result_summary ?? "").slice(0, 140)}`);
+  const exp = (await pool.query(`SELECT array_agg(code ORDER BY code) AS codes FROM control_task WHERE status = 'expired' AND updated_at > now() - interval '3 days'`)).rows[0]?.codes as string[] | null;
   const areas = (await pool.query(`SELECT name FROM area WHERE archived_at IS NULL AND status = 'active' ORDER BY name`)).rows;
   const health = [];
   for (const a of areas) { const s = await areaStatus(pool, a.name as string, now); if (!("error" in s)) health.push(s); }
   for (const s of health) if (s.color === "red") blocked.push(`${s.area} is RED: ${s.breaches.join("; ")}`);
 
   const changes: string[] = [];
-  for (const e of (await pool.query(`SELECT action, after FROM event WHERE action IN ('followup_done','area_created','objective_set','project_placed','control_task_expired') AND occurred_at > now() - interval '48 hours' ORDER BY occurred_at DESC LIMIT 8`)).rows)
+  if (exp?.length) changes.push(`${exp.length} stale Mac task(s) expired unanswered (${exp.join(", ")}) — say "resume <code>" only if still wanted`);
+  for (const e of (await pool.query(`SELECT action, after FROM event WHERE action IN ('followup_done','area_created','objective_set','project_placed') AND occurred_at > now() - interval '48 hours' ORDER BY occurred_at DESC LIMIT 8`)).rows)
     changes.push(`${String(e.action).replace(/_/g, " ")}${e.after?.outcome ? `: ${e.after.outcome}` : e.after?.name ? `: ${e.after.name}` : ""}`);
 
   const risks: string[] = [];
