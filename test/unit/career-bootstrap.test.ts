@@ -48,6 +48,14 @@ describe("engagement evidence (real Gmail/Calendar shapes from the 2026-10-09 au
       { name: "Gmail: Julian, your application was sent to Capital One [x]", text: "From: LinkedIn <jobs-noreply@linkedin.com>\n" }], "gmail");
     expect(g.map((e) => e.org)).not.toContain("Senior");
   });
+  it("live: LinkedIn application notices yield the real employer (Transurban)", () => {
+    const g = extractEngagement([
+      { name: "Gmail: Your application to Senior Financial Planning Analyst at Transurban [u]", modified: "2026-10-02T14:18:15Z", text: "From: LinkedIn <jobs-noreply@linkedin.com>\n" },
+      { name: "Gmail: Your application was viewed by Transurban [u]", modified: "2026-10-02T13:34:48Z", text: "From: LinkedIn <jobs-noreply@linkedin.com>\n" },
+      { name: "Gmail: Julian David, your application was sent to Transurban [u]", modified: "2026-10-02T01:43:46Z", text: "From: LinkedIn <jobs-noreply@linkedin.com>\n" }], "gmail");
+    expect(g.map((e) => [e.org, e.kind])).toEqual([["Transurban", "application"], ["Transurban", "application"], ["Transurban", "application"]]);
+    expect(g.every((e) => e.contact === null)).toBe(true);
+  });
   it("Calendar excerpt with several events", () => {
     const c = extractEngagement([{ name: "Google Calendar [perez.julian@correounivalle.edu.co]",
       text: "2026-09-14T11:30:00-04:00 | Phone Screen with Altarum / Julian David Perez Cardozo - Pricing Analyst | | Hi Julian\n2026-09-28T15:00:00-04:00 | Interview with Altarum / Julian David Perez Cardozo - Pricing Analyst | | panel\n2026-10-01T09:00:00-04:00 | Dentist | |" }], "calendar");

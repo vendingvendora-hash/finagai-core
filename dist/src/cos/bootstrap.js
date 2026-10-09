@@ -88,7 +88,22 @@ export function extractSheet(csv) {
     return { rows: out, dropped, duplicates };
 }
 const ORG_AFTER = /\b([Pp]hone [Ss]creen|[Ii]nterview|[Aa]pplication)\b[^A-Za-z]{0,3}(?:with|for|at|to)\s+([A-Z][\w&.'-]*(?:\s+[A-Z][\w&.'-]*){0,4})/;
+const ORG = "([A-Z][\\w&.'-]*(?:\\s+[A-Z][\\w&.'-]*){0,4})";
+/** LinkedIn/ATS application notices (live: "Your application to Senior Financial Planning Analyst at Transurban"). */
+const APPLICATION_NOTICE = [
+    new RegExp(`application to (.{3,120}?) at ${ORG}`),
+    new RegExp(`application was (?:sent to|viewed by|received by) ${ORG}`),
+    new RegExp(`(?:applied|applying) (?:to|for) (?:.{3,120}? at )?${ORG}`),
+];
 function engagementFrom(subj, text, when, source) {
+    for (const re of APPLICATION_NOTICE) {
+        const a = re.exec(subj);
+        if (a) {
+            const org = (a[2] ?? a[1]).trim();
+            if (org && !/^(Senior|Junior|Lead|Principal|Financial|Pricing|Analyst|LinkedIn|Indeed)\b/.test(org))
+                return { org, kind: "application", when, subject: subj.slice(0, 160), contact: null, source };
+        }
+    }
     const m = ORG_AFTER.exec(subj);
     if (!m)
         return null;
@@ -151,11 +166,14 @@ export async function proposeCareerBootstrap(pool, google, now = new Date()) {
         const latest = evs.map((e) => e.when).filter(Boolean).sort().pop() ?? null;
         const sheetRows = ex.rows.filter((r) => normOrg(r.org) === k);
         const existing = projects.find((p) => normOrg(p) === k) ?? null;
+        // The strongest evidence decides the proposed status: an interview/screen → interviewing; an application notice → applied.
+        const proposed = evs.some((e) => e.kind === "interview" || e.kind === "screen") ? "interviewing" : "applied";
+        const label = proposed === "interviewing" ? "interview/screen" : "application";
         if (sheetRows.length && sheetRows.every((r) => ["analyzed", "discovered"].includes(r.status)))
-            conflicts.push(`${evs[0].org}: the Career Copilot sheet still says "${sheetRows[0].status}" but ${evs.length} interview/screen record(s) exist — pipeline status lags reality (proposed: interviewing)`);
+            conflicts.push(`${evs[0].org}: the Career Copilot sheet still says "${sheetRows[0].status}" but ${evs.length} ${label} record(s) exist — pipeline status lags reality (proposed: ${proposed})`);
         for (const r of sheetRows)
             if (["analyzed", "discovered"].includes(r.status))
-                r.status = "interviewing";
+                r.status = proposed;
         const stale = latest ? now.getTime() - Date.parse(latest) > 7 * day : false;
         const contact = evs.find((e) => e.contact)?.contact ?? null;
         activeProjects.push({ org: evs[0].org, evidence: Array.from(new Set(evs.map((e) => `${e.kind} (${e.source}${e.when ? ` ${e.when.slice(0, 10)}` : ""})`))).slice(0, 6),
