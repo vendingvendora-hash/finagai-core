@@ -1,3 +1,12 @@
+/**
+ * Phase 2A/2B (ADR-073) — capability/resource registry.
+ *
+ * What Finagai can use, as data: id, type, scope, access, operations, permissions, health, empirical
+ * reliability/latency/cost, risk, freshness, authority. The catalog below declares WHAT exists; health and
+ * evidence are DISCOVERED from live signals (Mac heartbeat probes, configured integrations, delivery records,
+ * model-call records, task/step outcomes). Runtime components query the table — not prompt prose.
+ */
+import { normalizeCapabilities } from "../mac/capabilities.js";
 /** Declared catalog. Adding a capability = adding a line here (or registering one at runtime via upsertCapability). */
 export const CATALOG = [
     // ---- Finagai state (Postgres; Finagai's own records) ----
@@ -69,10 +78,10 @@ export async function discover(pool, env = ENV) {
     const rt = (await pool.query(`SELECT last_heartbeat_at, capabilities FROM mac_runtime WHERE id = 'primary'`)).rows[0];
     const ageS = rt?.last_heartbeat_at ? (Date.now() - new Date(rt.last_heartbeat_at).getTime()) / 1000 : Infinity;
     const online = ageS < 45;
-    const caps = rt?.capabilities ?? {};
-    // Live fix: the helper reports probes as booleans (accessibility=true) while older builds sent "PASS".
-    const passed = (v) => v === "PASS" || v === true || v === "true" || v === "granted";
-    const failed = (v) => v != null && v !== "unknown" && !passed(v);
+    const caps = normalizeCapabilities(rt?.capabilities);
+    // Phase 0A: one canonical payload (src/mac/capabilities.ts); legacy helper keys are normalized there.
+    const passed = (v) => v === "PASS";
+    const failed = (v) => v === "FAIL";
     const probe = (k) => (!online ? "down" : passed(caps[k]) ? "healthy" : failed(caps[k]) ? "down" : "unknown");
     const macMap = { "mac.filesystem": "filesystem", "mac.screen": "screenCapture", "mac.accessibility": "accessibility", "mac.app_scripting": "accessibility",
         "mac.keyboard_mouse": "accessibility", "mac.browser": "browser", "mac.context": "activeWindow" };

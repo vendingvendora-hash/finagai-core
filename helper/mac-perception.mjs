@@ -73,19 +73,70 @@ export async function captureScreen(run, outPath) {
   } catch (e) { return { ok: false, error: String(e?.message ?? e).slice(0, 160) }; }
 }
 
-/** The frontmost Chrome/Safari tab's URL + title (structured, no screen needed). */
-export async function browserActiveTab(run) {
-  for (const [appName, script] of [
-    ["Google Chrome", ['tell application "Google Chrome"', 'if (count of windows) = 0 then return ""', 'set t to active tab of front window', 'return (URL of t) & "\\t" & (title of t)', 'end tell']],
-    ["Safari", ['tell application "Safari"', 'if (count of documents) = 0 then return ""', 'return (URL of front document) & "\\t" & (name of front document)', 'end tell']],
-  ]) {
+/** Browsers Finagai knows. `scriptable` = exposes the active tab URL/title through AppleScript. */
+export const BROWSER_APPS = Object.freeze([
+  { name: "Google Chrome", match: /^google chrome$/i, scriptable: "chromium" },
+  { name: "Arc", match: /^arc$/i, scriptable: "chromium" },
+  { name: "Microsoft Edge", match: /^microsoft edge$/i, scriptable: "chromium" },
+  { name: "Brave Browser", match: /^brave browser$/i, scriptable: "chromium" },
+  { name: "Safari", match: /^safari$/i, scriptable: "safari" },
+  { name: "Firefox", match: /^firefox$/i, scriptable: null },   // no AppleScript tab dictionary
+]);
+export function browserFor(appName) { return BROWSER_APPS.find((b) => b.match.test(String(appName ?? "").trim())) ?? null; }
+
+/** Firefox window titles end in " — Mozilla Firefox" (or "- Mozilla Firefox"); the page title is the rest. */
+export function firefoxPageTitle(windowTitle) {
+  const t = String(windowTitle ?? "").replace(/\s+[—–-]\s+Mozilla Firefox(?: Private Browsing)?\s*$/i, "").trim();
+  return t || null;
+}
+
+/**
+ * The FRONTMOST browser's active tab (Phase 0B). Live defect 2026-10-09: this returned the first *running*
+ * browser (background Chrome) while Firefox was frontmost, and Core resolved "this page" to it with high
+ * confidence. Rules now:
+ *  - frontmost app is a scriptable browser  -> its active tab {url,title}, frontmost:true
+ *  - frontmost app is Firefox                -> title from the window, url:null, introspection:"title_only"
+ *  - frontmost app is not a browser          -> the most likely background tab, frontmost:false (never "this page")
+ */
+export async function browserActiveTab(run, frontmostApp, frontmostWindow) {
+  let front = frontmostApp;
+  let frontWindow = frontmostWindow ?? null;
+  if (front === undefined) {
+    const fm = await getFrontmost(run);
+    front = fm.ok ? fm.app : null; frontWindow = fm.ok ? fm.window : null;
+  }
+  const fb = browserFor(front);
+  const readScriptable = async (b) => {
+    const script = b.scriptable === "safari"
+      ? ['tell application "Safari"', 'if (count of documents) = 0 then return ""', 'return (URL of front document) & "\\t" & (name of front document)', 'end tell']
+      : [`tell application "${b.name}"`, 'if (count of windows) = 0 then return ""', 'set t to active tab of front window', 'return (URL of t) & "\\t" & (title of t)', 'end tell'];
+    const out = await osa(run, script);
+    if (!out) return null;
+    const [url, title] = out.split("\t");
+    return { url: url || null, title: title || null };
+  };
+  if (fb) {
+    if (!fb.scriptable) {
+      if (frontWindow === null && frontmostApp !== undefined) {
+        try { frontWindow = await osa(run, [`tell application "System Events" to get name of front window of (first process whose frontmost is true)`]); } catch { frontWindow = null; }
+      }
+      return { ok: true, app: fb.name, url: null, title: firefoxPageTitle(frontWindow), frontmost: true, introspection: "title_only" };
+    }
     try {
-      const running = await osa(run, [`tell application "System Events" to (name of processes) contains "${appName}"`]);
+      const r = await readScriptable(fb);
+      if (r) return { ok: true, app: fb.name, url: r.url, title: r.title, frontmost: true, introspection: "full" };
+      return { ok: false, app: fb.name, frontmost: true, error: `${fb.name} is frontmost but has no open tab` };
+    } catch (e) {
+      // Frontmost browser could not be introspected (Automation permission): uncertainty, never another browser.
+      return { ok: false, app: fb.name, frontmost: true, error: String(e?.message ?? e).slice(0, 120) };
+    }
+  }
+  for (const b of BROWSER_APPS.filter((x) => x.scriptable)) {
+    try {
+      const running = await osa(run, [`tell application "System Events" to (name of processes) contains "${b.name}"`]);
       if (running !== "true") continue;
-      const out = await osa(run, script);
-      if (!out) continue;
-      const [url, title] = out.split("\t");
-      return { ok: true, app: appName, url: url || null, title: title || null };
+      const r = await readScriptable(b);
+      if (r) return { ok: true, app: b.name, url: r.url, title: r.title, frontmost: false, introspection: "full" };
     } catch { /* try next */ }
   }
   return { ok: false, error: "no supported browser with an open tab" };
@@ -147,12 +198,33 @@ export async function getClipboard(run) {
 }
 
 /**
+ * Phase 0A: the capability key each doctor check reports, in Core's canonical vocabulary
+ * (src/mac/capabilities.ts MAC_CAPABILITY_KEYS). test/unit/capability-contract.test.ts fails on drift.
+ */
+export const DOCTOR_CHECK_KEYS = Object.freeze({
+  "Accessibility / window enumeration": "accessibility",
+  "Active window": "activeWindow",
+  "Screen Recording (capture)": "screenCapture",
+  "Filesystem search (Spotlight)": "filesystem",
+  "Browser active tab": "browser",
+  "Accessibility tree": "accessibilityTree",
+  "Clipboard": "clipboard",
+});
+
+/** Doctor report -> canonical capability payload { key: "PASS" | "FAIL" }. */
+export function capabilitiesFromDoctor(doc) {
+  const m = {};
+  for (const c of doc?.checks ?? []) if (c.key) m[c.key] = c.ok ? "PASS" : "FAIL";
+  return m;
+}
+
+/**
  * mac doctor: probe each capability and report PASS/FAIL with the specific remediation when blocked.
  * Returns a structured report; the helper prints it and can open the right System Settings pane.
  */
 export async function macDoctor(run, tmpPath) {
   const checks = [];
-  const add = (name, res, settingsHint) => checks.push({ name, ok: !!res.ok, detail: res.ok ? "ok" : (res.error || "blocked"), settingsHint: res.ok ? undefined : settingsHint });
+  const add = (name, res, settingsHint) => checks.push({ name, key: DOCTOR_CHECK_KEYS[name], ok: !!res.ok, detail: res.ok ? "ok" : (res.error || "blocked"), settingsHint: res.ok ? undefined : settingsHint });
 
   add("Accessibility / window enumeration", await listApps(run), "Privacy & Security → Accessibility");
   add("Active window", await getFrontmost(run), "Privacy & Security → Accessibility");

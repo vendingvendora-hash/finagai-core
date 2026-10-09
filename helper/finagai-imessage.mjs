@@ -16,12 +16,12 @@ import { tmpdir } from "node:os";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { promisify } from "node:util";
-import { macDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTree, captureScreen, getSelectedFiles } from "./mac-perception.mjs";
+import { macDoctor, capabilitiesFromDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTree, captureScreen, getSelectedFiles } from "./mac-perception.mjs";
 import { activateApp, axClick, axSetValue, menuItem, observe as observeUi } from "./mac-actions.mjs";
 import { moveFileVerified, trashVerified } from "./fs-ops.mjs";
 
 const run = promisify(execFile);
-const HELPER_VERSION = "runtime-12";
+const HELPER_VERSION = "runtime-13";
 const WORKER_ID = "mac-helper-" + process.pid;
 const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null, reconnects: 0, coreDown: false, downSince: null };
 /** Real capability probe (mac doctor), cached; refreshed every 10 minutes so the matrix stays truthful. */
@@ -30,17 +30,7 @@ async function capabilityMatrix() {
   try {
     const tmp = join(OUT_ROOT, "hb-" + Date.now() + ".png"); mkdirSync(OUT_ROOT, { recursive: true });
     const doc = await macDoctor(run, tmp);
-    const m = {};
-    for (const c of doc.checks) {
-      const n = c.name.toLowerCase();
-      if (n.includes("screen")) m.screen = c.ok;
-      else if (n.includes("accessibility tree")) m.accessibilityTree = c.ok;
-      else if (n.includes("accessibility")) m.accessibility = c.ok;
-      else if (n.includes("active window")) m.activeWindow = c.ok;
-      else if (n.includes("filesystem") || n.includes("spotlight")) m.files = c.ok;
-      else if (n.includes("browser")) m.browser = c.ok;
-      else if (n.includes("clipboard")) m.clipboard = c.ok;
-    }
+    const m = capabilitiesFromDoctor(doc);   // Phase 0A: canonical keys, declared per check by the doctor
     RUNTIME.caps = m; RUNTIME.capsAt = Date.now();
   } catch (e) { log("capability probe failed", { error: String(e?.message ?? e).slice(0, 120) }); }
   return RUNTIME.caps;
@@ -59,8 +49,9 @@ async function gatherContext(fm) {
   ctx.documentPath = await frontDocumentPath(ctx.app).catch(() => null);
   const sel = await getSelectedFiles(run).catch(() => ({ ok: false }));
   ctx.selectedFiles = sel.ok && Array.isArray(sel.files) ? sel.files.slice(0, 10) : [];
-  const tab = await browserActiveTab(run).catch(() => ({ ok: false }));
-  ctx.browser = tab.ok && tab.url ? { app: tab.app || "browser", url: tab.url, title: tab.title || "" } : null;
+  const tab = await browserActiveTab(run, fm.ok ? fm.app : null, fm.ok ? fm.window : null).catch(() => ({ ok: false }));
+  // Phase 0B: carry WHICH browser and whether it is frontmost; Firefox gives a title but no URL.
+  ctx.browser = tab.ok && (tab.url || tab.title) ? { app: tab.app || "browser", url: tab.url ?? null, title: tab.title || "", frontmost: tab.frontmost === true, introspection: tab.introspection ?? "full" } : null;
   return ctx;
 }
 /** Phase 1E: structured diagnostic to Core (sanitized, bounded). Never throws. */
@@ -89,9 +80,13 @@ async function heartbeat(cfg) {
   // Never a per-process counter: those reset on restart and were hidden by GREATEST() (Phase 1 live test B).
   const reconnected = RUNTIME.coreDown ? { downSince: RUNTIME.downSince, downSeconds: Math.round((Date.now() - Date.parse(RUNTIME.downSince ?? new Date().toISOString())) / 1000) } : null;
   try {
-    await core(cfg, "/mac/heartbeat", { version: HELPER_VERSION, capabilities: caps,
+    const hb = await core(cfg, "/mac/heartbeat", { version: HELPER_VERSION, capabilities: caps,
       frontmostApp: fm.ok ? fm.app : null, frontmostWindow: fm.ok ? fm.window : null,
       currentTaskId: RUNTIME.currentTaskId, startedAt: RUNTIME.startedAt, reconnected, context });
+    // Phase 0C: Core hands over due human-wait reminders (bounded by policy); deliver them to Julian's own thread.
+    for (const r of (hb && hb.humanWaits && Array.isArray(hb.humanWaits.reminders) ? hb.humanWaits.reminders : []).slice(0, 3)) {
+      if (cfg.selfHandles?.[0] && typeof r.text === "string") await sendIMessage(cfg.selfHandles[0], r.text).catch((e) => diag("reminder_send_failed", e?.message ?? e));
+    }
     if (reconnected) { RUNTIME.coreDown = false; RUNTIME.downSince = null; RUNTIME.reconnects += 1; log("reconnected to Core", reconnected); }
   } catch (e) {
     if (!RUNTIME.coreDown) { log("Core unreachable (will keep retrying every tick)", { error: String(e?.message ?? e).slice(0, 120) }); RUNTIME.downSince = new Date().toISOString(); }
@@ -552,11 +547,11 @@ async function perception() {
   const clean = (x) => (x ? String(x).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " ").slice(0, 4000) : undefined);
   // Current context: frontmost app + active window (reliable JXA), plus browser URL when applicable.
   const fm = await getFrontmost(run).catch(() => ({ ok: false }));
-  const tab = await browserActiveTab(run).catch(() => ({ ok: false }));
+  const tab = await browserActiveTab(run, fm.ok ? fm.app : null, fm.ok ? fm.window : null).catch(() => ({ ok: false }));
   const context = {};
   if (fm.ok && fm.app) context.app = fm.app;
   if (fm.ok && fm.window) context.window = fm.window;
-  if (tab.ok && tab.url) context.url = tab.url;
+  if (tab.ok && tab.url && tab.frontmost) context.url = tab.url;   // Phase 0B: only the frontmost browser's URL is "the page"
   return { pageText: clean(chromeText), axTree: clean(chromeAx), context };
 }
 
@@ -968,12 +963,19 @@ async function tick(cfg, state) {
       continue;
     }
     if (cr && cr.status === "cancelled") continue;
+    // Phase 0C: a recognized command that changed nothing (already handled / unknown code / not resumable) gets a
+    // plain answer — it must never fall through and become a new task.
+    if (cr && ["already_handled", "not_found", "not_resumable"].includes(cr.status)) {
+      const msg = cr.status === "not_found" ? "I don't have a task or step with that number." : cr.status === "not_resumable" ? "That task isn't waiting or expired, so there's nothing to resume." : "That step was already handled.";
+      await sendIMessage(cfg.selfHandles[0], `ℹ️ ${msg}`).catch(() => {});
+      continue;
+    }
     const r = await core(cfg, "/concierge/decision", { text }).catch(() => null);  // 422 = ordinary note, not a command
     if (!r || r.status !== "send") {
       // Natural-language request from Julian's own thread (not a command, not a contact draft).
       // Route it so the self thread is never a dead end.
       const nreq = text.trim();
-      if (nreq.length >= 2 && !/^(ok|no|stop|edit)\b/i.test(nreq)) {
+      if (nreq.length >= 2 && !/^(ok|no|stop|edit|resume|continue)\b/i.test(nreq)) {
         const chartWord = /\b(chart|trend|graph|plot|gr[aá]fico|visuali[sz]e|analy[sz]e)\b/i.test(nreq);
         const sheetWord = /\b(excel|xlsx|workbook|spreadsheet|hoja|sheet|\.xls)\b/i.test(nreq);
         // Resolve a filename from: an explicit .xls name, a quoted name, an "analysis/case/report"-style

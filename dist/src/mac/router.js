@@ -1,11 +1,12 @@
+import { normalizeCapabilities } from "./capabilities.js";
 const RUNG_HEALTH = {
     connector_api: () => true,
-    local_parser: (h) => (h?.filesystem ?? "PASS") === "PASS",
-    app_scripting: (h) => (h?.accessibility ?? "PASS") === "PASS", // System Events needs Accessibility
-    browser_dom: (h) => (h?.browser ?? "PASS") === "PASS",
-    accessibility: (h) => (h?.accessibility ?? "PASS") === "PASS",
-    screen_perception: (h) => (h?.screenCapture ?? "PASS") === "PASS",
-    visual_mouse: (h) => (h?.accessibility ?? "PASS") === "PASS" && (h?.screenCapture ?? "PASS") === "PASS",
+    local_parser: (h) => h.filesystem !== "FAIL",
+    app_scripting: (h) => h.accessibility !== "FAIL", // System Events needs Accessibility
+    browser_dom: (h) => h.browser !== "FAIL",
+    accessibility: (h) => h.accessibility !== "FAIL",
+    screen_perception: (h) => h.screenCapture !== "FAIL",
+    visual_mouse: (h) => h.accessibility !== "FAIL" && h.screenCapture !== "FAIL",
 };
 export function classify(request) {
     const r = request.toLowerCase();
@@ -27,8 +28,10 @@ export function classify(request) {
 /** Route a request against the live health matrix: skip rungs whose capability probe failed. */
 export function route(request, health) {
     const c = classify(request);
-    const unavailable = c.ladder.filter((p) => !RUNG_HEALTH[p](health));
-    const ladder = c.ladder.filter((p) => RUNG_HEALTH[p](health));
+    // An unprobed capability is assumed available (the action itself reports failure); only an explicit FAIL skips a rung.
+    const h = normalizeCapabilities(health);
+    const unavailable = c.ladder.filter((p) => !RUNG_HEALTH[p](h));
+    const ladder = c.ladder.filter((p) => RUNG_HEALTH[p](h));
     const primary = ladder[0] ?? "visual_mouse";
     const reason = unavailable.length ? `${c.reason}; skipping ${unavailable.join(", ")} (capability probe failed)` : c.reason;
     return { domain: c.domain, primary, ladder, reason, unavailable };

@@ -25,6 +25,26 @@ const deps = (m: Script): ControlDeps => ({ pool: pool!, model: m, modelId: "cla
 describe.skipIf(!pool)("J6 control lifecycle", () => {
   afterAll(async () => { await pool?.end(); });
 
+  it("Phase 0F: grader unavailable after a write → completes as NEEDS_REVIEW, never as verified", async () => {
+    const task = await createTask(pool!, "Phase0F open the notes app and tidy the list", "chat");
+    const model = new Script([
+      { kind: "open_url", params: { url: "https://example.com" }, risk: "write", summary: "Open the page" },
+      { kind: "done", summary: "Tidied" },
+      "", "",                                                   // grader returns nothing twice -> unavailable
+    ]);
+    const d = deps(model);
+    const r1 = await planNext(d, task.id, "s1");
+    expect(r1.status).toBe("run_approved");
+    await recordRun(pool!, r1.step!.id, true, "opened");
+    const r2 = await planNext(d, task.id, "s2");
+    expect(r2.status).toBe("done");
+    expect(r2.message).toMatch(/^NEEDS YOUR REVIEW/);
+    const t = (await pool!.query(`SELECT status, verification_status FROM control_task WHERE id = $1`, [task.id])).rows[0];
+    expect(t).toEqual({ status: "done", verification_status: "needs_review" });
+    const ix = (await pool!.query(`SELECT state, verification_status FROM interaction WHERE $1 = ANY(task_ids)`, [task.id])).rows[0];
+    expect(ix).toEqual({ state: "completed", verification_status: "needs_review" });
+  });
+
   it("navigation auto-runs; a send step still waits; approval one-shot; done closes the task", async () => {
     const task = await createTask(pool!, "Open Drive and send Santiago the file", "chat");
     const model = new Script([

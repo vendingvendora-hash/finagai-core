@@ -101,7 +101,8 @@ describe.skipIf(!url)("MCP tool layer end to end", () => {
     expect(item.provenance.sourceQuote).toBe(text);
     expect(item.events.map((e: { action: string }) => e.action)).toContain("create");
     const found = json(await client.callTool({ name: "search_state", arguments: { query: "Harbor Lights delivery" } }));
-    expect(found.map((r: { id: string }) => r.id)).toContain(id);
+    const list = Array.isArray(found) ? found : found.results;   // finished work may be surfaced alongside (WO2)
+    expect(list.map((r: { id: string }) => r.id)).toContain(id);
     const overview = json(await client.callTool({ name: "get_state_overview", arguments: {} }));
     expect(overview.queues).toHaveProperty("deferred_captures");
     expect(overview.budget).toMatchObject({ targetUsd: 30, ceilingUsd: 36 });

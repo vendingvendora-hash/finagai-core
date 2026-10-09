@@ -1,5 +1,7 @@
 import { getRuntime, macOnline, deriveLifecycle, macStatus } from "../mac/runtime.js";
 import { openInteraction, linkTask, undelivered, markDelivered } from "../concierge/interactions.js";
+import { sweepHumanWaits } from "../concierge/human-wait.js";
+import { observed, reportLifecycleError, recentLifecycleErrors } from "../ops/lifecycle-errors.js";
 import { getContext, resolveFromMac } from "../mac/context.js";
 import { route } from "../mac/router.js";
 import { listCapabilities, refreshRegistry } from "../resources/registry.js";
@@ -9,7 +11,7 @@ import { retrieve, traceRetrieval, effectiveAuthority } from "../resources/retri
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/server";
 import { appendEvent } from "../db/index.js";
-import { getTaskResult, latestTask } from "../pipelines/j6/control.js";
+import { getTaskResult, latestTask, createTask } from "../pipelines/j6/control.js";
 import { capResponse, filterByTier } from "../guards/output.js";
 import { runCapture } from "../pipelines/j2/capture.js";
 import { stageGovernanceRequest } from "../governance/stage.js";
@@ -46,9 +48,10 @@ export function buildMcpServer(deps) {
             if (tool !== "pending_results") {
                 const due = await undelivered(deps.pool, "chat").catch(() => []);
                 if (due.length) {
-                    payload = { ...data, finishedWhileYouWereAway: due.map((i) => ({ interactionId: i.id, state: i.state, result: i.resultSummary, hasImage: !!i.resultImageB64 })),
+                    // An array result keeps its shape under `results` (spreading an array into an object destroyed it).
+                    payload = { ...(Array.isArray(data) ? { results: data } : data), finishedWhileYouWereAway: due.map((i) => ({ interactionId: i.id, state: i.state, result: i.resultSummary, hasImage: !!i.resultImageB64 })),
                         instruction: "Before answering the current request, tell Julian these earlier requests finished and show their results (call pending_results to get any image)." };
-                    await markDelivered(deps.pool, due.filter((i) => !i.resultImageB64).map((i) => i.id)).catch(() => { });
+                    await markDelivered(deps.pool, due.filter((i) => !i.resultImageB64).map((i) => i.id)).catch(observed(deps.pool, "ok.markDelivered"));
                 }
             }
             const filtered = filterDeep(JSON.parse(JSON.stringify(payload)));
@@ -282,14 +285,12 @@ export function buildMcpServer(deps) {
             if (existing.rows[0] && existing.rows[0].status === "active")
                 return ok("control_mac", { taskCode: Number(existing.rows[0].code), interactionId: ix.interaction.id, reused: true, note: "This request is already in progress; continuing it (no duplicate task)." });
         }
-        const t = await deps.pool.query(`INSERT INTO control_task (request, origin) VALUES ($1, 'chat') RETURNING id, code`, [request.slice(0, 4000)]);
-        const row = t.rows[0];
-        await linkTask(deps.pool, ix.interaction.id, row.id);
+        // One creation path for every surface (Phase 0D): stores the acceptance contract and links the interaction.
+        const created = await createTask(deps.pool, request, "chat", undefined, ix.interaction.id);
+        const row = { id: created.id, code: String(created.code) };
         const routePlan = route(request, (await getRuntime(deps.pool))?.capabilities);
         await writeTrace(deps.pool, { interactionId: ix.interaction.id, taskId: row.id, request }, routeTraceRows(routePlan))
             .catch((e) => console.error("resource trace failed", e));
-        await appendEvent(deps.pool, { actor: "julian", action: "control_task_created", entityType: "control_task", entityId: row.id,
-            after: { code: Number(row.code), request: request.slice(0, 200), route: routePlan.primary }, client: deps.client });
         return ok("control_mac", { taskCode: Number(row.code),
             note: "Task queued. Finagai's Mac helper will carry it out and message Julian to approve any step that changes something." });
     });
@@ -352,7 +353,7 @@ export function buildMcpServer(deps) {
             const t0 = q.rows[0];
             if (t0 && (t0.status === "done" || t0.status === "failed")) {
                 await audit("make_mac_chart", "ok");
-                await markDelivered(deps.pool, [ix.interaction.id]).catch(() => { }); // result reached the chat now
+                await markDelivered(deps.pool, [ix.interaction.id]).catch(observed(deps.pool, "chart.markDelivered", { interactionId: ix.interaction.id })); // result reached the chat now
                 const content = [{ type: "text", text: JSON.stringify({ taskCode: Number(row.code), interactionId: ix.interaction.id, status: t0.status, summary: t0.result_summary, hasImage: Boolean(t0.result_image_b64) }) }];
                 if (t0.result_image_b64)
                     content.push({ type: "image", data: t0.result_image_b64, mimeType: "image/png" });
@@ -409,14 +410,18 @@ export function buildMcpServer(deps) {
         inputSchema: z.object({ days: z.number().int().min(1).max(90).optional(), recent: z.number().int().min(0).max(50).optional() }),
     }, async ({ days, recent }) => {
         const { metricsSummary, reconcileInteractions } = await import("../concierge/interactions.js");
-        await reconcileInteractions(deps.pool).catch(() => { });
+        // Expire stale human waits even when the Mac is offline, then reconcile; failures are recorded, not hidden.
+        const waits = await sweepHumanWaits(deps.pool, { deliver: false }).catch(async (e) => { await reportLifecycleError(deps.pool, "metrics.sweepHumanWaits", e); return null; });
+        const rec = await reconcileInteractions(deps.pool).catch(async (e) => { await reportLifecycleError(deps.pool, "metrics.reconcileInteractions", e); return null; });
         const daily = await metricsSummary(deps.pool, days ?? 7);
         const rows = (await deps.pool.query(`SELECT i.created_at, i.task_class, i.state, i.failure_class, i.terminal_reason, i.false_completion, i.recovery_attempts,
               i.verification_attempts, i.tool_calls, i.model_calls, i.cost_usd, i.user_interventions,
+              i.origin, i.verification_status, i.waiting_human_s,
               extract(epoch FROM (i.completed_at - i.created_at))::int AS completion_s,
               (SELECT array_agg(t.code ORDER BY t.code) FROM control_task t WHERE t.id = ANY(i.task_ids)) AS task_codes
          FROM interaction i ORDER BY i.created_at DESC LIMIT $1`, [recent ?? 15])).rows;
-        return helpers.ok("execution_metrics", { daily, recent: rows });
+        const lifecycleErrors = await recentLifecycleErrors(deps.pool, 24);
+        return helpers.ok("execution_metrics", { daily, recent: rows, lifecycle: { expiredNow: waits?.expired ?? null, reconcile: rec, errors24h: lifecycleErrors } });
     });
     server.registerTool("pending_results", {
         description: "Results of earlier Finagai requests that finished after their chat turn ended (charts, Mac task results). Returns each with its image and marks them delivered. Call when a tool response mentions finishedWhileYouWereAway, or when Julian asks what finished.",
@@ -473,14 +478,14 @@ export function buildMcpServer(deps) {
             return ok("control_result", { found: false, note: "No such task." });
         // WO2: mark delivered AFTER the wait loop — a task that finishes during the wait is shown now, so it must not
         // resurface later (live: V2/V3 kept reappearing in finishedWhileYouWereAway).
-        if ((r.status === "done" || r.status === "failed")) {
+        if ((r.status === "done" || r.status === "failed" || r.status === "expired" || r.status === "cancelled")) {
             // WO2: the result is being shown in the chat now — mark the owning interaction delivered so it stops resurfacing.
             await deps.pool.query(`UPDATE interaction SET final_response_status = 'delivered', delivered_at = now(), updated_at = now()
-        WHERE final_response_status = 'pending' AND id = (SELECT interaction_id FROM control_task WHERE code = $1)`, [r.code]).catch(() => { });
+        WHERE final_response_status = 'pending' AND id = (SELECT interaction_id FROM control_task WHERE code = $1)`, [r.code]).catch(observed(deps.pool, "control_result.markDelivered"));
         }
         // Truthful lifecycle (ADR-066): derive from worker heartbeat + claim + progress, never a bare row status.
         const rtNow = await getRuntime(deps.pool);
-        const lcRow = await deps.pool.query(`SELECT status, claimed_at, last_progress_at, progress_note FROM control_task WHERE code = $1`, [task_code ?? null]).catch(() => ({ rows: [] }));
+        const lcRow = await deps.pool.query(`SELECT status, claimed_at, last_progress_at, progress_note FROM control_task WHERE code = $1`, [r.code]);
         const lc = lcRow.rows[0] ? deriveLifecycle(lcRow.rows[0], rtNow) : null;
         if (lc && lc.lifecycle === "waiting_for_mac") {
             await audit("control_result", "mac_offline");
@@ -493,13 +498,17 @@ export function buildMcpServer(deps) {
             return ok("control_result", { found: true, status: r.status, lifecycle: "stalled", evidence: lc.evidence, done: false,
                 tellJulian: "The Mac worker stopped mid-task (no progress). Finagai will reclaim it; if it doesn't resume within a minute, restart the runtime: `launchctl kickstart -k gui/$(id -u)/com.finagai.imessage`." });
         }
-        const note = r.status === "done" ? "Task finished. Summary, detail, and (if present) the final image are included — show the image to Julian."
-            : r.status === "waiting_approval" ? "Finagai is waiting for Julian to approve a step in his Messages thread."
-                : r.status === "active" ? "Still running — call control_result with this task_code again now (same turn). Keep owning it until it is done or failed; never tell Julian to check again." : `Task is ${r.status}.`;
+        const note = r.status === "done" && r.verification === "needs_review" ? "Task finished but its outcome was NOT independently verified and something was changed — tell Julian plainly it needs his review; do not present it as done-and-verified."
+            : r.status === "done" && r.verification === "unverified" ? "Task finished; the result was NOT independently verified — say so when you report it."
+                : r.status === "done" ? "Task finished. Summary, detail, and (if present) the final image are included — show the image to Julian."
+                    : r.status === "expired" ? `This task expired while waiting for Julian (${r.awaitingReason ?? "approval"}). Nothing more ran. Julian can say "resume ${r.code}" in Messages to continue it.`
+                        : r.status === "waiting_approval" || r.status === "paused" ? `Finagai is waiting for Julian${r.awaitingReason ? `: ${r.awaitingReason}` : ""}${r.expiresAt ? ` (expires ${r.expiresAt})` : ""}. He answers in his Messages thread.`
+                            : r.status === "active" ? "Still running — call control_result with this task_code again now (same turn). Keep owning it until it is done or failed; never tell Julian to check again." : `Task is ${r.status}.`;
         await audit("control_result", "ok");
         const content = [{ type: "text",
                 text: JSON.stringify({ found: true, status: r.status, lifecycle: lc?.lifecycle ?? r.status, evidence: lc?.evidence ?? null, progress: lcRow.rows[0]?.progress_note ?? null,
-                    request: r.request, done: r.status === "done", summary: r.summary, detail: r.detail, hasImage: Boolean(r.imageB64), note }) }];
+                    request: r.request, done: r.status === "done", verification: r.verification, awaiting: r.awaitingReason ? { reason: r.awaitingReason, expiresAt: r.expiresAt } : null,
+                    summary: r.summary, detail: r.detail, hasImage: Boolean(r.imageB64), note }) }];
         if (r.imageB64)
             content.push({ type: "image", data: r.imageB64, mimeType: "image/png" });
         return { content };

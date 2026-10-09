@@ -1,3 +1,4 @@
+import { normalizeCapabilities } from "./capabilities.js";
 export const MAC_HEARTBEAT_FRESH_MS = 45_000; // helper ticks every ~15s; 3 missed ticks = offline
 export const TASK_PROGRESS_FRESH_MS = 90_000; // a healthy step reports progress well within this
 export const CLAIM_LEASE_MS = 120_000;
@@ -14,7 +15,7 @@ export async function recordHeartbeat(pool, hb) {
        current_task_id = EXCLUDED.current_task_id, started_at = COALESCE(EXCLUDED.started_at, mac_runtime.started_at),
        -- runtime-10+: a reconnect is an event (+1). Legacy helpers still report a per-process count (GREATEST).
        reconnect_count = CASE WHEN $8::boolean THEN mac_runtime.reconnect_count + 1 ELSE GREATEST(mac_runtime.reconnect_count, $7) END,
-       updated_at = now()`, [hb.helperVersion ?? null, JSON.stringify(hb.capabilities ?? {}), hb.frontmostApp ?? null, hb.frontmostWindow ?? null,
+       updated_at = now()`, [hb.helperVersion ?? null, JSON.stringify(hb.capabilities ? normalizeCapabilities(hb.capabilities) : {}), hb.frontmostApp ?? null, hb.frontmostWindow ?? null,
         hb.currentTaskId ?? null, hb.startedAt ?? null, hb.reconnects ?? 0, !!hb.reconnected]);
     if (hb.reconnected) {
         await pool.query(`INSERT INTO event (actor, action, entity_type, after) VALUES ('system', 'mac_reconnected', 'mac_runtime', $1::jsonb)`, [JSON.stringify({ downSince: hb.reconnected.downSince ?? null, downSeconds: hb.reconnected.downSeconds ?? null })]);
@@ -99,13 +100,13 @@ export async function macStatus(pool) {
         ? await pool.query(`SELECT code, request, status, claimed_at, last_progress_at, progress_note FROM control_task WHERE id = $1`, [rt.currentTaskId])
         : null;
     const t = cur?.rows[0];
-    const caps = (rt?.capabilities ?? {});
-    const pass = (k) => caps[k] === true ? "PASS" : caps[k] === false ? "FAIL" : "unknown";
+    const caps = normalizeCapabilities(rt?.capabilities);
+    const pass = (k) => caps[k] ?? "unknown";
     return {
         connected: online,
         lastHeartbeatSecondsAgo: rt ? Math.round((now - rt.lastHeartbeatAt.getTime()) / 1000) : null,
         helperVersion: rt?.helperVersion ?? null,
-        screenCapture: pass("screen"), accessibility: pass("accessibility"), filesystem: pass("files"),
+        screenCapture: pass("screenCapture"), accessibility: pass("accessibility"), filesystem: pass("filesystem"),
         browser: pass("browser"), clipboard: pass("clipboard"), activeWindow: pass("activeWindow"),
         currentApp: rt?.frontmostApp ?? null, currentWindow: rt?.frontmostWindow ?? null,
         reconnectCount: rt?.reconnectCount ?? 0, restartCount: rt?.restartCount ?? 0,
@@ -133,11 +134,12 @@ export async function sweepStaleTasks(pool) {
     const b = await pool.query(`UPDATE control_task SET status = 'failed', failure_class = 'stalled', updated_at = now(),
        result_summary = 'Stalled: the Mac worker stopped reporting progress and the lease was not reclaimed within 10 minutes.'
      WHERE status = 'active' AND claimed_at IS NOT NULL AND lease_until < now() AND last_progress_at < now() - interval '10 minutes' RETURNING id`);
-    const { completeForTask } = await import("../concierge/interactions.js");
+    const { completeForTask, reconcileInteractions } = await import("../concierge/interactions.js");
+    const { observed } = await import("../ops/lifecycle-errors.js");
     for (const r of [...a.rows, ...b.rows])
-        await completeForTask(pool, r.id, { ok: false, summary: "task did not complete on the Mac" }).catch(() => { });
-    const { reconcileInteractions } = await import("../concierge/interactions.js");
-    await reconcileInteractions(pool).catch(() => { });
-    return { abandoned: a.rowCount ?? 0, stalled: b.rowCount ?? 0 };
+        await completeForTask(pool, r.id, { ok: false, summary: "task did not complete on the Mac" }).catch(observed(pool, "sweep.complete", { taskId: r.id }));
+    // Phase 0E: a failing reconciliation is recorded (event 'lifecycle_error'), never silent.
+    const rec = await reconcileInteractions(pool).catch(async (e) => { await observed(pool, "sweep.reconcileInteractions")(e); return null; });
+    return { abandoned: a.rowCount ?? 0, stalled: b.rowCount ?? 0, reconcileErrors: rec ? rec.errors : 1 };
 }
 //# sourceMappingURL=runtime.js.map

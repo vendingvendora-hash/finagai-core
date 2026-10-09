@@ -11,8 +11,8 @@ async function taskContext(deps, taskId, request) {
         return hit;
     const plan = await planResources(deps.pool, request);
     const results = plan.intent === "trivial" ? [] : await retrieve(deps.pool, plan, deps.google ? { google: deps.google } : {});
-    await writeTrace(deps.pool, { taskId, request }, planTraceRows(plan)).catch(() => { });
-    await traceRetrieval(deps.pool, { taskId, request }, results).catch(() => { });
+    await writeTrace(deps.pool, { taskId, request }, planTraceRows(plan)).catch(observed(deps.pool, "j6.writeTrace", { taskId }));
+    await traceRetrieval(deps.pool, { taskId, request }, results).catch(observed(deps.pool, "j6.traceRetrieval", { taskId }));
     const ctx = { plan, block: [planPromptBlock(plan), retrievedBlock(results)].filter(Boolean).join("\n\n"), askGuarded: false };
     if (TASK_CONTEXT.size > 200)
         TASK_CONTEXT.clear();
@@ -23,6 +23,9 @@ import { deriveContract, verifyCompletion, recoveryDecision, REJECTION_MARKER } 
 import { appendEvent, withTransaction } from "../../db/index.js";
 import { BudgetBlockedError } from "../../llm/types.js";
 import { skillsFor } from "./skills.js";
+import { enterAwaitingHuman, leaveAwaitingHuman, resumeTask } from "../../concierge/human-wait.js";
+import { observed } from "../../ops/lifecycle-errors.js";
+import { openInteraction, linkTask, completeForTask } from "../../concierge/interactions.js";
 export const J6_PROMPT_VERSION = "j6-control-v3";
 export const MAX_STEPS_PER_TASK = 80;
 /** Actions that only observe. Everything else is a WRITE and needs Julian's approval. */
@@ -198,14 +201,25 @@ export function parseStep(text) {
         step.expect = raw.expect.slice(0, 300);
     return step;
 }
-export async function createTask(pool, request, origin, requester) {
+/**
+ * Create a J6 task. Phase 0D (ADR-076): EVERY surface gets the same first-class interaction record — chat tasks
+ * pass the interaction they already opened; iMessage/contact tasks open one here (conversation 'self' or the
+ * contact's label), in the same transaction, so no accepted request can bypass telemetry.
+ */
+export async function createTask(pool, request, origin, requester, interactionId) {
     return withTransaction(pool, async (tx) => {
         const r = await tx.query(`INSERT INTO control_task (request, origin, requester, acceptance) VALUES ($1, $2, $3, $4::jsonb) RETURNING id, code`, [request.slice(0, 4000), origin, requester ?? null, JSON.stringify(deriveContract(request))]);
         const row = r.rows[0];
+        let ixId = interactionId;
+        if (!ixId) {
+            const ix = await openInteraction(tx, { conversation: origin === "contact" ? (requester ?? "contact") : origin === "imessage" ? "self" : "chat", message: request, origin });
+            ixId = ix.interaction.id;
+        }
+        await linkTask(tx, ixId, row.id);
         // The requester (a contact) can ASK; the task is still Julian's and only he approves steps.
         await appendEvent(tx, { actor: requester ? "j6" : "julian", action: "control_task_created", entityType: "control_task", entityId: row.id,
             after: { code: Number(row.code), request: request.slice(0, 200), requester: requester ?? null }, client: origin });
-        return { id: row.id, code: Number(row.code), status: "active" };
+        return { id: row.id, code: Number(row.code), status: "active", interactionId: ixId };
     });
 }
 /**
@@ -223,7 +237,7 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
         return { status: "cancelled" };
     const prior = (await pool.query(`SELECT seq, kind, summary, status, result FROM control_step WHERE task_id = $1 ORDER BY seq`, [taskId])).rows;
     if (prior.length >= MAX_STEPS_PER_TASK) {
-        await setTaskStatus(pool, taskId, "paused");
+        await enterAwaitingHuman(pool, taskId, "step_limit", `step limit (${MAX_STEPS_PER_TASK}) reached; continue?`, "paused");
         return { status: "await_approval", message: "step limit reached; ask Julian to continue" };
     }
     const history = prior.map((s) => `${s.seq}. [${s.status}] ${s.summary}${s.result ? ` -> ${s.result.slice(0, 200)}` : ""}`).join("\n");
@@ -264,7 +278,7 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
         pipeline: "j6", step: "plan", purpose: "concierge", promptVersion: J6_PROMPT_VERSION, requestId: taskId, // cost attribution (ADR-075)
         system: systemPrompt(now.toTimeString().slice(9), today, task.request), messages: [{ role: "user", content }], maxTokens: 3000,
     };
-    await pool.query(`UPDATE control_task SET model_calls = model_calls + 1 WHERE id = $1`, [taskId]).catch(() => { });
+    await pool.query(`UPDATE control_task SET model_calls = model_calls + 1 WHERE id = $1`, [taskId]).catch(observed(pool, "j6.modelCalls", { taskId }));
     let step;
     try {
         let r;
@@ -287,20 +301,19 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
             const repair = await deps.model.complete({ ...basePlan, model: deps.modelId, maxTokens: 800,
                 messages: [{ role: "user", content }, { role: "assistant", content: String(r.text).slice(0, 4000) },
                     { role: "user", content: "Your reply was not ONE valid JSON step (it may have been cut off). Reply again with ONE short JSON object only, every field ≤ 300 characters; do not list read results." }] });
-            await pool.query(`UPDATE control_task SET model_calls = model_calls + 1 WHERE id = $1`, [taskId]).catch(() => { });
+            await pool.query(`UPDATE control_task SET model_calls = model_calls + 1 WHERE id = $1`, [taskId]).catch(observed(pool, "j6.modelCalls", { taskId }));
             step = parseStep(repair.text);
             if (!step) {
                 await pool.query(`UPDATE control_task SET status = 'failed', failure_class = 'model_parse', terminal_reason = 'model_parse',
           result_summary = 'The planner returned an unreadable reply twice; nothing was done after the last completed step.', updated_at = now() WHERE id = $1`, [taskId]);
-                const { completeForTask } = await import("../../concierge/interactions.js");
-                await completeForTask(pool, taskId, { ok: false, summary: "Stopped: the planner's reply could not be read (twice)." }).catch(() => { });
+                await completeForTask(pool, taskId, { ok: false, summary: "Stopped: the planner's reply could not be read (twice)." }).catch(observed(pool, "j6.complete.model_parse", { taskId }));
                 return { status: "failed", message: "planner reply unreadable twice" };
             }
         }
     }
     catch (err) {
         if (err instanceof BudgetBlockedError) {
-            await setTaskStatus(pool, taskId, "paused");
+            await enterAwaitingHuman(pool, taskId, "budget", "monthly model budget reached; raise it or wait", "paused");
             return { status: "failed", message: "budget reached" };
         }
         deps.log?.("planner failed", { error: String(err?.message ?? err).slice(0, 160) });
@@ -319,13 +332,17 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
         const trace = prior.map((x) => ({ kind: x.kind, summary: x.summary, result: x.result ?? null }));
         const verdict = await verifyCompletion({ model: deps.model, graderModel: deps.graderModel ?? deps.plannerModel ?? deps.modelId, taskId }, contract, trace, step.summary, screenshotB64);
         await pool.query(`UPDATE control_task SET verification = $2::jsonb, verify_attempts = verify_attempts + 1, last_claim_summary = $3, updated_at = now() WHERE id = $1`, [taskId, JSON.stringify({ ...verdict, at: new Date().toISOString() }), step.summary.slice(0, 500)]);
+        let epistemic = "verified";
         if (!verdict.pass && verdict.unavailable) {
             // The verifier could not produce a verdict: this is NOT evidence of failure, and NOT evidence of success.
-            // Complete, but say exactly that — never present it as verified.
-            step = { ...step, summary: `Done, but NOT independently verified (${verdict.reason}). Planner's report: ${step.summary}`.slice(0, 600) };
-            await pool.query(`UPDATE control_task SET terminal_reason = 'verifier_unavailable' WHERE id = $1`, [taskId]).catch(() => { });
+            // Phase 0F: it completes as UNVERIFIED (read-only work) or NEEDS_REVIEW (anything was changed, or the
+            // contract had explicit criteria) — a distinct, queryable outcome, never a normal verified success.
+            const wrote = prior.some((x) => x.status === "done" && !READ_KINDS.has(x.kind));
+            epistemic = wrote || contract.verificationStrategy !== "model_graded" ? "needs_review" : "unverified";
+            step = { ...step, summary: `${epistemic === "needs_review" ? "NEEDS YOUR REVIEW" : "Done, but NOT independently verified"} (${verdict.reason}). Planner's report: ${step.summary}`.slice(0, 600) };
+            await pool.query(`UPDATE control_task SET terminal_reason = 'verifier_unavailable', verification_status = $2 WHERE id = $1`, [taskId, epistemic]).catch(observed(pool, "j6.verifierUnavailable", { taskId }));
         }
-        else if (!verdict.pass) {
+        if (!verdict.pass && !verdict.unavailable) {
             // A rejected claim = false_completion (never shown to Julian as success). Then BOUNDED RECOVERY, not failure.
             const rejections = Number(taskRow.rows[0]?.verification_rejections ?? 0) + 1;
             const decision = recoveryDecision({ rejectionsIncludingThis: rejections, trace, claimSummary: step.summary,
@@ -333,11 +350,10 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
             await appendEvent(pool, { actor: "j6", action: "false_completion", entityType: "control_task", entityId: taskId,
                 after: { reason: verdict.reason, strategy: verdict.strategy, rejection: rejections, decision: decision.action, terminalReason: decision.action === "terminal" ? decision.terminalReason : null, strategyChanged: decision.strategyChanged } });
             await pool.query(`UPDATE control_task SET verification_rejections = $2, recovery_strategy_changed = recovery_strategy_changed OR $3 WHERE id = $1`, [taskId, rejections, decision.strategyChanged]);
-            await pool.query(`UPDATE interaction SET false_completion = true, verification_attempts = verification_attempts + 1 WHERE $1 = ANY(task_ids)`, [taskId]).catch(() => { });
+            await pool.query(`UPDATE interaction SET false_completion = true, verification_attempts = verification_attempts + 1 WHERE $1 = ANY(task_ids)`, [taskId]).catch(observed(pool, "j6.falseCompletion", { taskId }));
             if (decision.action === "terminal") {
                 await pool.query(`UPDATE control_task SET status = 'failed', failure_class = 'false_completion', terminal_reason = $3, result_summary = $2, updated_at = now() WHERE id = $1`, [taskId, `Not completed — the result could not be verified (${decision.terminalReason}): ${verdict.reason}`.slice(0, 1000), decision.terminalReason]);
-                const { completeForTask } = await import("../../concierge/interactions.js");
-                await completeForTask(pool, taskId, { ok: false, summary: `Not completed — could not verify the result (${decision.terminalReason.replace(/_/g, " ")}): ${verdict.reason}` }).catch(() => { });
+                await completeForTask(pool, taskId, { ok: false, summary: `Not completed — could not verify the result (${decision.terminalReason.replace(/_/g, " ")}): ${verdict.reason}` }).catch(observed(pool, "j6.complete.unverifiable", { taskId }));
                 return { status: "failed", message: `not verified: ${verdict.reason}` };
             }
             await pool.query(`UPDATE control_task SET recovery_attempts = recovery_attempts + 1 WHERE id = $1`, [taskId]);
@@ -346,14 +362,15 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
                 summary: `${REJECTION_MARKER} the claimed completion (${verdict.reason.slice(0, 160)}) — re-observe, diagnose why, and change approach if the last one did not work; claim done only when the expected outcome is observable` };
         }
         else {
-            await pool.query(`UPDATE control_task SET verification = verification || '{"accepted":true}'::jsonb WHERE id = $1`, [taskId]).catch(() => { });
+            // Verified (pass) OR verifier unavailable (Phase 0F: completes as unverified/needs_review, labelled above).
+            if (verdict.pass)
+                await pool.query(`UPDATE control_task SET verification = verification || '{"accepted":true}'::jsonb, verification_status = 'verified' WHERE id = $1`, [taskId]).catch(observed(pool, "j6.accepted", { taskId }));
             // Gather what the read steps found so the chat can read the answer (ADR-056).
             const detail = prior.filter((x) => x.result && x.result.trim()).map((x) => `- ${x.summary}: ${x.result.slice(0, 1200)}`).join("\n").slice(0, 20000);
-            const { completeForTask } = await import("../../concierge/interactions.js");
-            await completeForTask(pool, taskId, { ok: true, summary: step.summary, imageB64: screenshotB64 && screenshotB64.length < 8_000_000 ? screenshotB64 : null }).catch(() => { });
+            await completeForTask(pool, taskId, { ok: true, verification: epistemic, summary: step.summary, imageB64: screenshotB64 && screenshotB64.length < 8_000_000 ? screenshotB64 : null }).catch(observed(pool, "j6.complete.done", { taskId }));
             await pool.query(`UPDATE control_task SET status = 'done', terminal_reason = COALESCE(terminal_reason, 'verified'), result_summary = $2, result_detail = $3, result_image_b64 = COALESCE($4, result_image_b64), updated_at = now() WHERE id = $1`, [taskId, step.summary.slice(0, 1000), detail || null, screenshotB64 && screenshotB64.length < 8_000_000 ? screenshotB64 : null]);
             await appendEvent(pool, { actor: "j6", action: "control_task_done", entityType: "control_task", entityId: taskId, after: { summary: step.summary } });
-            await pool.query(`UPDATE mac_runtime SET last_success_at = now(), last_success_code = (SELECT code FROM control_task WHERE id = $1) WHERE id = 'primary'`, [taskId]).catch(() => { });
+            await pool.query(`UPDATE mac_runtime SET last_success_at = now(), last_success_code = (SELECT code FROM control_task WHERE id = $1) WHERE id = 'primary'`, [taskId]).catch(observed(pool, "j6.lastSuccess", { taskId }));
             return task.requester ? { status: "done", message: step.summary, requester: task.requester } : { status: "done", message: step.summary };
         }
     }
@@ -368,7 +385,7 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
         }
     }
     if (step.kind === "ask") {
-        await setTaskStatus(pool, taskId, "waiting_approval");
+        await enterAwaitingHuman(pool, taskId, "question", step.question ?? step.summary);
         return { status: "ask", message: step.question ?? step.summary };
     }
     // Loop guard: the same action repeating means the agent can't tell it made progress.
@@ -378,7 +395,7 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
     // Verifier-forced re-observations are bounded by recoveryDecision (budget + identical-claim guard);
     // the generic repeat guard must not turn them into a question for Julian (live #113).
     if (repeats >= 2 && !step.summary.startsWith(REJECTION_MARKER)) {
-        await setTaskStatus(pool, taskId, "waiting_approval");
+        await enterAwaitingHuman(pool, taskId, "loop", `repeating "${step.summary}" without progress — how should I proceed?`);
         deps.log?.("control loop detected", { kind: step.kind });
         return { status: "ask", message: `I keep trying the same step ("${step.summary}") without it working. Tell me how to proceed, or stop ${""}.` };
     }
@@ -391,7 +408,7 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
         await appendEvent(tx, { actor: "j6", action: "control_step_proposed", entityType: "control_step", entityId: r0.id,
             after: { code: Number(r0.code), kind: step.kind, risk: step.risk, summary: step.summary, approval, reflection: step.reflection ?? null, expect: step.expect ?? null } });
         if (approval)
-            await tx.query(`UPDATE control_task SET status = 'waiting_approval', updated_at = now() WHERE id = $1`, [taskId]);
+            await enterAwaitingHuman(tx, taskId, "approval", `step ${r0.code}: ${step.summary}`);
         return r0;
     });
     const out = { id: row.id, code: Number(row.code), kind: step.kind, params: step.params, summary: step.summary };
@@ -399,31 +416,55 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
         return { status: "await_approval", step: out };
     return { status: step.risk === "read" ? "run_read" : "run_approved", step: out };
 }
-async function setTaskStatus(pool, id, status) {
-    await pool.query(`UPDATE control_task SET status = $2, updated_at = now() WHERE id = $1`, [id, status]);
-}
 export function parseControlCommand(text) {
-    const m = /^\s*(ok|okay|si|sí|yes|no|stop|cancel)\s+#?(\d{1,9})\b/i.exec(text);
+    const m = /^\s*(ok|okay|si|sí|yes|no|stop|cancel|resume|continue|continúa|continua|sigue)\s+#?(\d{1,9})\b/i.exec(text);
     if (!m)
         return null;
     const w = m[1].toLowerCase();
     const code = Number(m[2]);
+    if (/^(resume|continue|continúa|continua|sigue)$/.test(w))
+        return { kind: "resume_task", code };
     if (w === "stop" || w === "cancel")
         return { kind: "cancel_task", code };
     if (w === "no")
         return { kind: "no_step", code };
     return { kind: "ok_step", code };
 }
+/**
+ * Julian's ok/no on a step. Phase 0C: a late "ok" on a step that EXPIRED resumes the same task (the stale step is
+ * not run — the planner re-observes first). The reply shape stays {status:"approved", taskId} without a stepId so
+ * helpers up to runtime-12 simply drive the task.
+ */
 export async function decideStep(pool, code, approve) {
+    const r = await decideStepTx(pool, code, approve);
+    if (r.status !== "expired_step")
+        return r;
+    if (!approve)
+        return { status: "already_handled" };
+    const t = (await pool.query(`SELECT code FROM control_task WHERE id = $1`, [r.taskId])).rows[0];
+    const res = t ? await resumeTask(pool, Number(t.code)) : { status: "not_found" };
+    return res.status === "resumed" ? { status: "approved", taskId: res.taskId, resumed: true } : { status: res.status === "not_found" ? "not_found" : "not_resumable" };
+}
+/** "resume <task code>" from Julian (iMessage or chat). */
+export async function resumeByCode(pool, code) {
+    const res = await resumeTask(pool, code);
+    return res.status === "resumed" ? { status: "approved", taskId: res.taskId, resumed: true } : { status: res.status };
+}
+async function decideStepTx(pool, code, approve) {
     return withTransaction(pool, async (tx) => {
         const s = (await tx.query(`SELECT id, task_id, status FROM control_step WHERE code = $1 FOR UPDATE`, [code])).rows[0];
         if (!s)
             return { status: "not_found" };
+        if (s.status === "expired")
+            return { status: "expired_step", taskId: s.task_id };
         if (s.status !== "proposed")
             return { status: "already_handled" };
         const next = approve ? "approved" : "rejected";
         await tx.query(`UPDATE control_step SET status = $2, decided_at = now() WHERE id = $1`, [s.id, next]);
         await tx.query(`UPDATE control_task SET status = $2, updated_at = now() WHERE id = $1`, [s.task_id, approve ? "active" : "paused"]);
+        await leaveAwaitingHuman(tx, s.task_id);
+        if (!approve)
+            await enterAwaitingHuman(tx, s.task_id, "rejected", "Julian declined the proposed step; waiting for direction (or stop)", "paused");
         await appendEvent(tx, { actor: "julian", action: approve ? "control_step_approved" : "control_step_rejected",
             entityType: "control_step", entityId: s.id, client: "imessage_helper" });
         return approve ? { status: "approved", stepId: s.id, taskId: s.task_id } : { status: "rejected", taskId: s.task_id };
@@ -437,6 +478,8 @@ export async function cancelTask(pool, code) {
         await tx.query(`UPDATE control_task SET status = 'cancelled', updated_at = now() WHERE id = $1`, [t.id]);
         await tx.query(`UPDATE control_step SET status = 'superseded' WHERE task_id = $1 AND status IN ('proposed','approved')`, [t.id]);
         await appendEvent(tx, { actor: "julian", action: "control_task_cancelled", entityType: "control_task", entityId: t.id, client: "imessage_helper" });
+        await leaveAwaitingHuman(tx, t.id, { intervention: true });
+        await completeForTask(tx, t.id, { ok: false, cancelled: true, summary: "Cancelled by Julian." });
         return { status: "cancelled" };
     });
 }
@@ -447,11 +490,12 @@ export async function getStep(pool, stepId) {
 }
 /** Read a task's current state and result, for the chat that started it (ADR-056). */
 export async function getTaskResult(pool, code) {
-    const r = await pool.query(`SELECT code, status, request, result_summary, result_detail, result_image_b64, updated_at FROM control_task WHERE code = $1`, [code]);
+    const r = await pool.query(`SELECT code, status, request, result_summary, result_detail, result_image_b64, updated_at, verification_status, awaiting_reason, expires_at FROM control_task WHERE code = $1`, [code]);
     const t = r.rows[0];
     if (!t)
         return null;
-    return { code: Number(t.code), status: t.status, request: t.request, summary: t.result_summary, detail: t.result_detail, imageB64: t.result_image_b64, updatedAt: t.updated_at.toISOString() };
+    return { code: Number(t.code), status: t.status, request: t.request, summary: t.result_summary, detail: t.result_detail, imageB64: t.result_image_b64, updatedAt: t.updated_at.toISOString(),
+        verification: t.verification_status, awaitingReason: t.awaiting_reason, expiresAt: t.expires_at ? new Date(t.expires_at).toISOString() : null };
 }
 /** The latest task, so the chat can check "the task I just started" without needing its code. */
 export async function latestTask(pool) {

@@ -6,6 +6,7 @@
  * evidence are DISCOVERED from live signals (Mac heartbeat probes, configured integrations, delivery records,
  * model-call records, task/step outcomes). Runtime components query the table — not prompt prose.
  */
+import { normalizeCapabilities, type CapabilityStatus, type MacCapabilityKey } from "../mac/capabilities.js";
 import type pg from "pg";
 
 export type CapType = "state" | "mac" | "external" | "agent" | "model";
@@ -89,12 +90,12 @@ export async function discover(pool: pg.Pool, env: DiscoveryEnv = ENV): Promise<
   const rt = (await pool.query(`SELECT last_heartbeat_at, capabilities FROM mac_runtime WHERE id = 'primary'`)).rows[0] as { last_heartbeat_at: Date | null; capabilities: Record<string, string> | null } | undefined;
   const ageS = rt?.last_heartbeat_at ? (Date.now() - new Date(rt.last_heartbeat_at).getTime()) / 1000 : Infinity;
   const online = ageS < 45;
-  const caps = rt?.capabilities ?? {};
-  // Live fix: the helper reports probes as booleans (accessibility=true) while older builds sent "PASS".
-  const passed = (v: unknown) => v === "PASS" || v === true || v === "true" || v === "granted";
-  const failed = (v: unknown) => v != null && v !== "unknown" && !passed(v);
+  const caps = normalizeCapabilities(rt?.capabilities as Record<string, unknown> | undefined) as Record<string, CapabilityStatus | undefined>;
+  // Phase 0A: one canonical payload (src/mac/capabilities.ts); legacy helper keys are normalized there.
+  const passed = (v: unknown) => v === "PASS";
+  const failed = (v: unknown) => v === "FAIL";
   const probe = (k: string): Health => (!online ? "down" : passed(caps[k]) ? "healthy" : failed(caps[k]) ? "down" : "unknown");
-  const macMap: Record<string, string> = { "mac.filesystem": "filesystem", "mac.screen": "screenCapture", "mac.accessibility": "accessibility", "mac.app_scripting": "accessibility",
+  const macMap: Record<string, MacCapabilityKey> = { "mac.filesystem": "filesystem", "mac.screen": "screenCapture", "mac.accessibility": "accessibility", "mac.app_scripting": "accessibility",
     "mac.keyboard_mouse": "accessibility", "mac.browser": "browser", "mac.context": "activeWindow" };
   for (const c of CATALOG.filter((x) => x.type === "mac")) {
     const key = macMap[c.id];

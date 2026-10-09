@@ -6,7 +6,7 @@
  *   POST /control/ran       {stepId, ok, result}
  */
 import { createHash, timingSafeEqual } from "node:crypto";
-import { cancelTask, createTask, decideStep, getStep, getTaskResult, parseControlCommand, planNext, recordRun, setResultImage } from "../pipelines/j6/control.js";
+import { cancelTask, createTask, decideStep, resumeByCode, getStep, getTaskResult, parseControlCommand, planNext, recordRun, setResultImage } from "../pipelines/j6/control.js";
 import { analyzeWorkbookToChart, rankCandidates } from "../mac/operator.js";
 import { registerArtifact, resolveRecentArtifact, markArtifactSent, claimInbound, finishInbound } from "./interaction.js";
 import { maybeRefresh } from "../resources/registry.js";
@@ -14,6 +14,13 @@ import { recordDiagnostic, recordHeartbeat, claimTask, taskProgress, macStatus, 
 import { completeForTask, setState as setInteractionState } from "./interactions.js";
 import { claimAction, reportAction } from "./actions.js";
 import { saveContext } from "../mac/context.js";
+import { sweepHumanWaits } from "./human-wait.js";
+import { observed, reportLifecycleError } from "../ops/lifecycle-errors.js";
+/** Helpers from runtime-13 deliver human-wait reminders from the heartbeat reply (Phase 0C). */
+export function helperDeliversReminders(version) {
+    const m = /^runtime-(\d+)/.exec(String(version ?? ""));
+    return !!m && Number(m[1]) >= 13;
+}
 const MAX_BODY = 24 * 1024 * 1024; // screenshots + perception
 function json(res, status, body) {
     res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", "x-content-type-options": "nosniff" });
@@ -104,7 +111,9 @@ export function createControlHandler(deps, token, log) {
                 const cmd = parseControlCommand(typeof body.text === "string" ? body.text : "");
                 if (!cmd)
                     return json(res, 422, { error: "not_a_command" });
-                const r = cmd.kind === "cancel_task" ? await cancelTask(deps.pool, cmd.code) : await decideStep(deps.pool, cmd.code, cmd.kind === "ok_step");
+                const r = cmd.kind === "cancel_task" ? await cancelTask(deps.pool, cmd.code)
+                    : cmd.kind === "resume_task" ? await resumeByCode(deps.pool, cmd.code)
+                        : await decideStep(deps.pool, cmd.code, cmd.kind === "ok_step");
                 return json(res, 200, r);
             }
             if (path === "/control/step") {
@@ -160,9 +169,11 @@ export function createControlHandler(deps, token, log) {
                     startedAt: typeof body.startedAt === "string" ? body.startedAt : null,
                 });
                 if (body.context && typeof body.context === "object")
-                    await saveContext(deps.pool, body.context).catch(() => { });
-                const swept = await sweepStaleTasks(deps.pool).catch(() => ({ abandoned: 0, stalled: 0 }));
-                return json(res, 200, { ok: true, swept });
+                    await saveContext(deps.pool, body.context).catch(observed(deps.pool, "heartbeat.saveContext"));
+                const swept = await sweepStaleTasks(deps.pool).catch(async (e) => { await reportLifecycleError(deps.pool, "heartbeat.sweepStaleTasks", e); return { abandoned: 0, stalled: 0, error: true }; });
+                const waits = await sweepHumanWaits(deps.pool, { deliver: helperDeliversReminders(body.version) })
+                    .catch(async (e) => { await reportLifecycleError(deps.pool, "heartbeat.sweepHumanWaits", e); return { reminders: [], expired: 0 }; });
+                return json(res, 200, { ok: true, swept, humanWaits: waits });
             }
             if (path === "/control/claim") {
                 if (typeof body.taskId !== "string")
@@ -176,7 +187,7 @@ export function createControlHandler(deps, token, log) {
                 await taskProgress(deps.pool, body.taskId, typeof body.note === "string" ? body.note : undefined);
                 const ixq = await deps.pool.query(`SELECT interaction_id FROM control_task WHERE id = $1`, [body.taskId]);
                 if (ixq.rows[0]?.interaction_id)
-                    await setInteractionState(deps.pool, ixq.rows[0].interaction_id, "executing", typeof body.note === "string" ? body.note : undefined).catch(() => { });
+                    await setInteractionState(deps.pool, ixq.rows[0].interaction_id, "executing", typeof body.note === "string" ? body.note : undefined).catch(observed(deps.pool, "progress.setInteractionState", { interactionId: ixq.rows[0].interaction_id }));
                 return json(res, 200, { ok: true });
             }
             if (path === "/control/result") {
@@ -246,21 +257,22 @@ export function createControlHandler(deps, token, log) {
                     // Non-image completion (e.g. mac_ping round-trip).
                     await deps.pool.query(`UPDATE control_task SET status = 'done', result_summary = $2, updated_at = now() WHERE id = $1 AND status = 'active'`, [body.taskId, String(body.summary ?? "done").slice(0, 1000)]);
                     await recordSuccess(deps.pool, body.taskId);
-                    await completeForTask(deps.pool, body.taskId, { ok: true, summary: String(body.summary ?? "done") }).catch(() => { });
+                    await completeForTask(deps.pool, body.taskId, { ok: true, verification: "not_applicable", summary: String(body.summary ?? "done") }).catch(observed(deps.pool, "chartDone.complete", { taskId: body.taskId }));
                     return json(res, 200, { ok: true });
                 }
                 if (typeof body.taskId === "string" && body.failed === true) {
                     // Terminal failure with a concrete reason (ADR-066): a task must never remain 'active' after the
                     // worker has given up on it.
                     await deps.pool.query(`UPDATE control_task SET status = 'failed', result_summary = $2, updated_at = now() WHERE id = $1 AND status = 'active'`, [body.taskId, String(body.summary ?? "failed on the Mac").slice(0, 1000)]);
-                    await completeForTask(deps.pool, body.taskId, { ok: false, summary: String(body.summary ?? "failed on the Mac") }).catch(() => { });
+                    await completeForTask(deps.pool, body.taskId, { ok: false, summary: String(body.summary ?? "failed on the Mac") }).catch(observed(deps.pool, "chartDone.fail", { taskId: body.taskId }));
                     return json(res, 200, { ok: true, failed: true });
                 }
                 if (typeof body.taskId === "string" && typeof body.imageB64 === "string") {
                     await setResultImage(deps.pool, body.taskId, body.imageB64);
                     await deps.pool.query(`UPDATE control_task SET status = 'done', result_summary = $2, updated_at = now() WHERE id = $1`, [body.taskId, String(body.summary ?? "chart ready").slice(0, 1000)]);
                     await recordSuccess(deps.pool, body.taskId);
-                    await completeForTask(deps.pool, body.taskId, { ok: true, summary: String(body.summary ?? "chart ready"), imageB64: body.imageB64 }).catch(() => { });
+                    // M01 posts an image only after its own acceptance checks pass on the Mac (artifact contract).
+                    await completeForTask(deps.pool, body.taskId, { ok: true, verification: "verified", summary: String(body.summary ?? "chart ready"), imageB64: body.imageB64 }).catch(observed(deps.pool, "chartDone.complete", { taskId: body.taskId }));
                 }
                 return json(res, 200, { ok: true });
             }
