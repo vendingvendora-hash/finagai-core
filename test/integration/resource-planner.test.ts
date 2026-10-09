@@ -197,7 +197,7 @@ describe.skipIf(!pool)("ADR-075 live regressions (Oct 5 run against Julian's rea
   });
   it("Mac helper booleans (accessibility=true) count as PASS, not down", async () => {
     await recordHeartbeat(p2, { helperVersion: "bool-probe", startedAt: new Date().toISOString(),
-      capabilities: { accessibility: true, browser: true, activeWindow: true } as unknown as Record<string, string> });
+      capabilities: { accessibility: true, browserDom: true, activeWindow: true } as unknown as Record<string, string> });
     await refreshRegistry(p2, env);
     const h = (await p2.query<{ id: string; health: string }>(`SELECT id, health FROM capability WHERE id IN ('mac.accessibility','mac.browser','mac.context')`)).rows;
     expect(h.every((x) => x.health === "healthy")).toBe(true);

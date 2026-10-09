@@ -5,7 +5,7 @@
 import { describe, it, expect } from "vitest";
 import { route, classify } from "../../src/mac/router.js";
 
-const healthy = { filesystem: "PASS", browser: "PASS", accessibility: "PASS", screenCapture: "PASS" };
+const healthy = { filesystem: "PASS", browser: "PASS", accessibility: "PASS", screenCapture: "PASS", browserDom: "PASS" };
 
 describe("capability router", () => {
   it("read/chart an Excel workbook → parser, never clicking", () => {
@@ -14,6 +14,10 @@ describe("capability router", () => {
   });
   it("fill a web form / open a URL → browser DOM first", () => {
     expect(route("open https://example.com and fill the contact form", healthy).primary).toBe("browser_dom");
+  });
+  it("Phase 1: no Operator extension connected → browser_dom is skipped, accessibility is first", () => {
+    const r = route("open https://example.com and fill the contact form", { ...healthy, browserDom: "FAIL" } as never);
+    expect(r.unavailable).toContain("browser_dom"); expect(r.primary).toBe("accessibility");
   });
   it("Gmail/Calendar data → connector first, browser as fallback", () => {
     const r = route("find the recruiter's email in my inbox", healthy);
@@ -27,8 +31,8 @@ describe("capability router", () => {
     const r = route("in Zorblax, press the Reconcile button", healthy);
     expect(r.domain).toBe("unknown-app"); expect(r.primary).toBe("accessibility"); expect(r.ladder).toEqual(["accessibility", "screen_perception", "visual_mouse"]);
   });
-  it("health-aware: browser integration down → DOM rung skipped, reason says so", () => {
-    const r = route("open https://example.com and fill the contact form", { ...healthy, browser: "FAIL" });
+  it("health-aware: browser extension down → DOM rung skipped, reason says so", () => {
+    const r = route("open https://example.com and fill the contact form", { ...healthy, browserDom: "FAIL" });
     expect(r.primary).toBe("accessibility"); expect(r.unavailable).toEqual(["browser_dom"]); expect(r.reason).toMatch(/probe failed/);
   });
   it("health-aware: no Accessibility → AX and mouse rungs unavailable; parser path survives", () => {

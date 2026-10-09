@@ -108,6 +108,7 @@ export async function macStatus(pool) {
         helperVersion: rt?.helperVersion ?? null,
         screenCapture: pass("screenCapture"), accessibility: pass("accessibility"), filesystem: pass("filesystem"),
         browser: pass("browser"), clipboard: pass("clipboard"), activeWindow: pass("activeWindow"),
+        browserDom: pass("browserDom"), // Phase 1: a Finagai Operator extension is connected (structured browser control)
         currentApp: rt?.frontmostApp ?? null, currentWindow: rt?.frontmostWindow ?? null,
         reconnectCount: rt?.reconnectCount ?? 0, restartCount: rt?.restartCount ?? 0,
         lastSuccess: rt?.lastSuccessAt ? { at: rt.lastSuccessAt.toISOString(), taskCode: rt.lastSuccessCode } : null,

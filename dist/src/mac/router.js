@@ -3,7 +3,7 @@ const RUNG_HEALTH = {
     connector_api: () => true,
     local_parser: (h) => h.filesystem !== "FAIL",
     app_scripting: (h) => h.accessibility !== "FAIL", // System Events needs Accessibility
-    browser_dom: (h) => h.browser !== "FAIL",
+    browser_dom: (h) => h.browserDom === "PASS", // Phase 1: only when an Operator extension is actually connected
     accessibility: (h) => h.accessibility !== "FAIL",
     screen_perception: (h) => h.screenCapture !== "FAIL",
     visual_mouse: (h) => h.accessibility !== "FAIL" && h.screenCapture !== "FAIL",

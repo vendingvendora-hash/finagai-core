@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Finagai Operator",
+  "version": "1.0.0",
+  "description": "Lets Finagai (Julian's own agent) read and operate pages in this browser through a local native channel. No cookies, no passwords.",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "nativeMessaging",
+    "downloads"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnDDwilghfNHLPNZ8eUdr9aMAF8dGG+ZBT0jPbOv+c6pdIBrwzrHe4WT/czWHwT/Ik1tr4X5V5O/1RCwy8+/xGwv5YKar9uH5Okv/XD0OoBMZxSYrmbX1w/ohc/4dwyRt/RhQr5g3T4/o23EZInMX8fTbtsZyvPuCk/3v/I3kauh3lxVJ3lcGgRaaQbHTtGuTEWAtt2P7n0AJdDV3IE6nq2HZr+L6oLl22oXnz2AOZEH8bAOp2lJeJN4fAjApC8N6j0JEw6oeU9K4yHIZ7H071h8hfCRQPNxnvYH8lZX0BYlDJZDrc+YjfnBNCHcvDB4T10/TUDg069hvUfMPvG+zlQIDAQAB",
+  "background": {
+    "service_worker": "background.js"
+  }
+}

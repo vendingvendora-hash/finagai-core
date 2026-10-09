@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Complex page (TEST FIXTURE)</title></head>
+<body>
+<header role="banner"><h1>Quarterly Pricing Review</h1><nav aria-label="Primary"><a href="#a">Summary</a> <a href="#b">Detail</a></nav></header>
+<main>
+  <h2 id="a">Summary</h2>
+  <p>Indirect rate for FY26 is <strong>42.7%</strong>; fringe <em>31.2%</em>.</p>
+  <table><caption>Rates</caption><tr><th>Pool</th><th>Rate</th></tr><tr><td>Fringe</td><td>31.2%</td></tr><tr><td>Overhead</td><td>42.7%</td></tr></table>
+  <h2 id="b">Detail</h2>
+  <div id="host"></div>
+  <iframe id="frame" src="/frame.html" style="width:500px;height:160px"></iframe>
+  <button aria-label="Export to CSV">⬇</button>
+  <div role="dialog" aria-modal="true" aria-labelledby="dlgt" id="dlg"><h3 id="dlgt">Cookie preferences</h3><button>Accept all</button><button>Reject</button></div>
+</main>
+<script>
+const host=document.getElementById('host'); const sr=host.attachShadow({mode:'open'});
+sr.innerHTML='<label>Search rates <input id="s" placeholder="e.g. fringe"></label><button>Go</button>';
+setTimeout(()=>{ const n=document.createElement('p'); n.id='late'; n.textContent='Late content loaded'; document.querySelector('main').appendChild(n); }, 1500);
+</script>
+</body></html>

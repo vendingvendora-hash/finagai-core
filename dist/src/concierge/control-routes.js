@@ -93,6 +93,8 @@ export function createControlHandler(deps, token, log) {
                 const perception = {};
                 if (typeof body.pageText === "string")
                     perception.pageText = body.pageText;
+                if (typeof body.browserPage === "string")
+                    perception.browserPage = body.browserPage.slice(0, 40_000);
                 if (typeof body.axTree === "string")
                     perception.axTree = body.axTree;
                 if (body.context && typeof body.context === "object") {

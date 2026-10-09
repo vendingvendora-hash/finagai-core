@@ -14,6 +14,7 @@
     "verify:migrations": "bash scripts/verify-migrations.sh",
     "migrate": "bash scripts/migrate.sh",
     "test:integration": "bash scripts/test-integration.sh",
+    "test:browser": "node browser-ext/build.mjs && vitest run test/browser",
     "eval:j2": "bash scripts/eval-j2.sh",
     "admin": "node dist/src/admin/cli.js",
     "eval:j3": "bash scripts/eval-j3.sh",

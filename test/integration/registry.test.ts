@@ -26,11 +26,11 @@ describe.skipIf(!pool)("capability registry (ADR-073)", () => {
 
   it("fresh heartbeat + helper probes → mac capabilities healthy; a failed probe → that capability down", async () => {
     await recordHeartbeat(pool!, { helperVersion: "runtime-test", startedAt: new Date().toISOString(),
-      capabilities: { filesystem: "PASS", screenCapture: "PASS", accessibility: "PASS", browser: "FAIL", activeWindow: "PASS" } });
+      capabilities: { filesystem: "PASS", screenCapture: "PASS", accessibility: "PASS", browserDom: "FAIL", activeWindow: "PASS" } });
     await refreshRegistry(pool!, env);
     const by = Object.fromEntries((await listCapabilities(pool!, { type: "mac" })).map((c) => [c.id, c]));
     expect(by["mac.filesystem"]!.health).toBe("healthy");
-    expect(by["mac.browser"]!.health).toBe("down"); expect(by["mac.browser"]!.health_reason).toMatch(/browser=FAIL/);
+    expect(by["mac.browser"]!.health).toBe("down"); expect(by["mac.browser"]!.health_reason).toMatch(/browserDom=FAIL/);   // Phase 1: the structured channel
   });
 
   it("empirical reliability is withheld below 5 samples and computed at >= 5 (no anecdote routing)", async () => {

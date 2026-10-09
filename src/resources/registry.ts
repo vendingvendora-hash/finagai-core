@@ -35,7 +35,7 @@ export const CATALOG: CapabilityDef[] = [
   { id: "mac.accessibility", type: "mac", scope: "AX tree, ax_click, ax_set_value, menus, verified UI actions", access: "read_write", operations: ["ax_click", "ax_set_value", "menu_item", "observe"], permissions: { approval: "consequential_only" }, risk: "medium" },
   { id: "mac.app_scripting", type: "mac", scope: "AppleScript/System Events app control", access: "read_write", operations: ["activate_app", "open_app"], risk: "medium" },
   { id: "mac.keyboard_mouse", type: "mac", scope: "coordinate clicks and keystrokes (last resort)", access: "write", operations: ["click", "type", "key", "scroll"], permissions: { approval: "consequential_only" }, risk: "high" },
-  { id: "mac.browser", type: "mac", scope: "active tab URL/title, page text, open URL (no DOM actions yet)", access: "read", operations: ["browser_read", "open_url"], freshness: "live" },
+  { id: "mac.browser", type: "mac", scope: "Julian's logged-in Chrome/Firefox through the Finagai Operator extension: tabs, semantic page read, find by label, verified fill/select/check/click/upload (no cookies/passwords)", access: "read_write", operations: ["browser_read", "browser_find", "browser_fill", "browser_select", "browser_check", "browser_click", "browser_upload", "browser_open_tab", "browser_switch_tab"], permissions: { approval: "per_write", commit: "julian_only" }, risk: "medium", authority: 70, freshness: "live" },
   { id: "mac.imessage", type: "mac", scope: "send/receive iMessages to Julian and allow-listed contacts", access: "read_write", operations: ["send_message", "send_artifact"], permissions: { approval: "per_send_to_contacts" }, risk: "high" },
   // ---- External services ----
   { id: "google.gmail", type: "external", scope: "Gmail search (read-only)", access: "read", operations: ["gmail_search"], authority: 75, freshness: "on-demand" },
@@ -96,7 +96,7 @@ export async function discover(pool: pg.Pool, env: DiscoveryEnv = ENV): Promise<
   const failed = (v: unknown) => v === "FAIL";
   const probe = (k: string): Health => (!online ? "down" : passed(caps[k]) ? "healthy" : failed(caps[k]) ? "down" : "unknown");
   const macMap: Record<string, MacCapabilityKey> = { "mac.filesystem": "filesystem", "mac.screen": "screenCapture", "mac.accessibility": "accessibility", "mac.app_scripting": "accessibility",
-    "mac.keyboard_mouse": "accessibility", "mac.browser": "browser", "mac.context": "activeWindow" };
+    "mac.keyboard_mouse": "accessibility", "mac.browser": "browserDom", "mac.context": "activeWindow" };
   for (const c of CATALOG.filter((x) => x.type === "mac")) {
     const key = macMap[c.id];
     const h: Health = key ? probe(key) : online ? "healthy" : "down";

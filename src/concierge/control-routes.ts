@@ -82,8 +82,9 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
         const taskId = await taskIdFrom(body);
         if (!taskId) return json(res, 404, { error: "task_not_found" });
         const shot = typeof body.screenshot === "string" ? body.screenshot : null;
-        const perception: { pageText?: string; axTree?: string; context?: { app?: string; window?: string; url?: string } } = {};
+        const perception: { pageText?: string; axTree?: string; browserPage?: string; context?: { app?: string; window?: string; url?: string } } = {};
         if (typeof body.pageText === "string") perception.pageText = body.pageText;
+        if (typeof body.browserPage === "string") perception.browserPage = body.browserPage.slice(0, 40_000);
         if (typeof body.axTree === "string") perception.axTree = body.axTree;
         if (body.context && typeof body.context === "object") {
           const c = body.context as Record<string, unknown>;

@@ -12,7 +12,9 @@
  *    consumer (registry, router, mac_status) reads one shape;
  *  - legacy helpers (runtime ≤12) are accepted through LEGACY_KEYS.
  */
-export const MAC_CAPABILITY_KEYS = ["screenCapture", "accessibility", "accessibilityTree", "activeWindow", "filesystem", "browser", "clipboard"] as const;
+export const MAC_CAPABILITY_KEYS = ["screenCapture", "accessibility", "accessibilityTree", "activeWindow", "filesystem", "browser", "clipboard", "browserDom"] as const;
+/** Keys reported from live helper state rather than a doctor check (Phase 1: browserDom = an Operator extension is connected). */
+export const LIVE_CAPABILITY_KEYS: readonly MacCapabilityKey[] = ["browserDom"];
 export type MacCapabilityKey = (typeof MAC_CAPABILITY_KEYS)[number];
 export type CapabilityStatus = "PASS" | "FAIL" | "unknown";
 export type MacCapabilities = Partial<Record<MacCapabilityKey, CapabilityStatus>>;

@@ -12,7 +12,9 @@
  *    consumer (registry, router, mac_status) reads one shape;
  *  - legacy helpers (runtime ≤12) are accepted through LEGACY_KEYS.
  */
-export const MAC_CAPABILITY_KEYS = ["screenCapture", "accessibility", "accessibilityTree", "activeWindow", "filesystem", "browser", "clipboard"];
+export const MAC_CAPABILITY_KEYS = ["screenCapture", "accessibility", "accessibilityTree", "activeWindow", "filesystem", "browser", "clipboard", "browserDom"];
+/** Keys reported from live helper state rather than a doctor check (Phase 1: browserDom = an Operator extension is connected). */
+export const LIVE_CAPABILITY_KEYS = ["browserDom"];
 /** Keys sent by helpers up to runtime-12. */
 export const LEGACY_KEYS = { screen: "screenCapture", files: "filesystem" };
 const isKey = (k) => MAC_CAPABILITY_KEYS.includes(k);

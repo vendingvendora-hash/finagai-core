@@ -16,24 +16,38 @@ import { tmpdir } from "node:os";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { promisify } from "node:util";
+import { createBrowserBridge, runBrowserStep, renderPage, familyFor } from "./browser-bridge.mjs";
 import { macDoctor, capabilitiesFromDoctor, getFrontmost, listWindows, browserActiveTab, accessibilityTree, captureScreen, getSelectedFiles } from "./mac-perception.mjs";
 import { activateApp, axClick, axSetValue, menuItem, observe as observeUi } from "./mac-actions.mjs";
 import { moveFileVerified, trashVerified } from "./fs-ops.mjs";
 
 const run = promisify(execFile);
-const HELPER_VERSION = "runtime-13";
+const HELPER_VERSION = "runtime-14";
 const WORKER_ID = "mac-helper-" + process.pid;
 const RUNTIME = { startedAt: new Date().toISOString(), caps: {}, capsAt: 0, currentTaskId: null, reconnects: 0, coreDown: false, downSince: null };
+/** Phase 1 (ADR-077): structured browser channel (extension ↔ native host ↔ this socket). */
+const BROWSER = createBrowserBridge({ sockPath: process.env.FINAGAI_BROWSER_SOCK || join(homedir(), ".finagai", "browser.sock"), log: (m, f) => log(m, f) });
+/** The extension serving the frontmost browser, or null (then the planner falls back to AX/vision/coordinates). */
+async function frontBrowserTarget() {
+  const fm = await getFrontmost(run).catch(() => ({ ok: false }));
+  const fam = fm.ok ? familyFor(fm.app) : null;
+  if (fam && BROWSER.pick(fam)) return fam;
+  // Not a browser in front: use the only connected browser, if exactly one (e.g. a task that opened a tab).
+  const live = BROWSER.connected();
+  return !fam && live.length === 1 ? { family: live[0].family, brand: live[0].brand } : fam;
+}
 /** Real capability probe (mac doctor), cached; refreshed every 10 minutes so the matrix stays truthful. */
 async function capabilityMatrix() {
-  if (Date.now() - RUNTIME.capsAt < 600_000 && Object.keys(RUNTIME.caps).length) return RUNTIME.caps;
-  try {
-    const tmp = join(OUT_ROOT, "hb-" + Date.now() + ".png"); mkdirSync(OUT_ROOT, { recursive: true });
-    const doc = await macDoctor(run, tmp);
-    const m = capabilitiesFromDoctor(doc);   // Phase 0A: canonical keys, declared per check by the doctor
-    RUNTIME.caps = m; RUNTIME.capsAt = Date.now();
-  } catch (e) { log("capability probe failed", { error: String(e?.message ?? e).slice(0, 120) }); }
-  return RUNTIME.caps;
+  if (!(Date.now() - RUNTIME.capsAt < 600_000 && Object.keys(RUNTIME.caps).length)) {
+    try {
+      const tmp = join(OUT_ROOT, "hb-" + Date.now() + ".png"); mkdirSync(OUT_ROOT, { recursive: true });
+      const doc = await macDoctor(run, tmp);
+      RUNTIME.caps = capabilitiesFromDoctor(doc);   // Phase 0A: canonical keys, declared per check by the doctor
+      RUNTIME.capsAt = Date.now();
+    } catch (e) { log("capability probe failed", { error: String(e?.message ?? e).slice(0, 120) }); }
+  }
+  // Phase 1: the DOM channel is live state, not a 10-minute probe — PASS while a browser extension is connected.
+  return { ...RUNTIME.caps, browserDom: BROWSER.connected().length ? "PASS" : "FAIL" };
 }
 /** Heartbeat to Core: liveness + capability matrix + current context + current task. Every tick. */
 /** Open document path of the frontmost app, when the app exposes it (Excel, Numbers, Preview, Pages, TextEdit). */
@@ -49,7 +63,13 @@ async function gatherContext(fm) {
   ctx.documentPath = await frontDocumentPath(ctx.app).catch(() => null);
   const sel = await getSelectedFiles(run).catch(() => ({ ok: false }));
   ctx.selectedFiles = sel.ok && Array.isArray(sel.files) ? sel.files.slice(0, 10) : [];
-  const tab = await browserActiveTab(run, fm.ok ? fm.app : null, fm.ok ? fm.window : null).catch(() => ({ ok: false }));
+  let tab = await browserActiveTab(run, fm.ok ? fm.app : null, fm.ok ? fm.window : null).catch(() => ({ ok: false }));
+  // Phase 1: when the frontmost browser runs the Operator extension, its active tab is exact (Firefox included).
+  const fam = fm.ok ? familyFor(fm.app) : null;
+  if (fam && BROWSER.pick(fam)) {
+    const t = await BROWSER.call(fam, "active_tab", {}, 3000).catch(() => null);
+    if (t && t.url) tab = { ok: true, app: fam.family === "firefox" ? "Firefox" : (fam.brand ?? "Google Chrome"), url: t.url, title: t.title, frontmost: true, introspection: "extension" };
+  }
   // Phase 0B: carry WHICH browser and whether it is frontmost; Firefox gives a title but no URL.
   ctx.browser = tab.ok && (tab.url || tab.title) ? { app: tab.app || "browser", url: tab.url ?? null, title: tab.title || "", frontmost: tab.frontmost === true, introspection: tab.introspection ?? "full" } : null;
   return ctx;
@@ -425,6 +445,7 @@ export function chartSvg(spec) {
 }
 
 const expandHome = (p) => p.replace(/^~(?=\/)/, homedir());
+const allowedUpload = (p) => { try { return p.startsWith(homedir() + "/") && !EXCLUDED_PATH.some((r) => r.test(p)) && existsSync(p) && statSync(p).isFile(); } catch { return false; } };
 const allowedLocal = (p) => p.startsWith(homedir() + "/") && !EXCLUDED_PATH.some((r) => r.test(p)) && existsSync(p) && statSync(p).isFile() && statSync(p).size <= MAX_ATTACHMENT_BYTES;
 
 /** Exact-size SVG rasterization via headless Chrome (the path already proven for web screenshots). */
@@ -531,6 +552,17 @@ const SHOT = join(tmpdir(), "finagai-shot.png");
 
 /** Best-effort page text + clickable elements of the frontmost window, so the planner reads, not guesses. */
 async function perception() {
+  // Phase 1: a structured DOM snapshot of the frontmost browser's page when its extension is connected.
+  try {
+    const tgt = await frontBrowserTarget();
+    if (tgt && BROWSER.pick(tgt)) {
+      const page = await BROWSER.call(tgt, "read_page", { maxControls: 150 }, 12_000);
+      const fm = await getFrontmost(run).catch(() => ({ ok: false }));
+      const context = {}; if (fm.ok && fm.app) context.app = fm.app; if (fm.ok && fm.window) context.window = fm.window;
+      if (page?.tab?.url) context.url = page.tab.url;
+      return { browserPage: renderPage(page, { maxControls: 150, textChars: 3000 }), context };
+    }
+  } catch (e) { log("browser perception failed (falling back)", { error: String(e?.message ?? e).slice(0, 160) }); }
   const osa = (lines) => run("/usr/bin/osascript", lines.flatMap((l) => ["-e", l]), { timeout: 12_000, maxBuffer: 8 * 1024 * 1024 }).then((r) => r.stdout.trim()).catch(() => "");
   // If Chrome is frontmost, pull the page's text and the tag/text/coords of links & buttons via JS.
   const chromeText = await osa([
@@ -566,8 +598,13 @@ async function screenshotB64() {
 const KEYCODE = { return: 36, enter: 36, tab: 48, esc: 53, escape: 53, space: 49, delete: 51, left: 123, right: 124, down: 125, up: 126 };
 
 /** Run one control action with AppleScript / CLIs. Returns a short result string. */
-export async function runControlStep(step) {
+export async function runControlStep(step, ctx = {}) {
   const p = step.params ?? {};
+  if (String(step.kind).startsWith("browser_")) {
+    const tgt = await frontBrowserTarget();
+    return runBrowserStep(BROWSER, tgt, { ...step, params: { ...p, path: p.path ? expandHome(String(p.path)) : p.path } },
+      { allowedPath: (f) => allowedUpload(f), julianApproved: ctx.julianApproved === true });
+  }
   const osa = (lines, args = []) => run("/usr/bin/osascript", [...lines.flatMap((l) => ["-e", l]), ...args], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
   // Text-returning variant for mac-actions.mjs (observe/ax_* parse stdout).
   const osaText = (lines, args = [], opts = {}) => run("/usr/bin/osascript", [...lines.flatMap((l) => ["-e", l]), ...args], { timeout: opts.timeout ?? 30_000, maxBuffer: 8 * 1024 * 1024 }).then((r) => r.stdout.trim());
@@ -622,7 +659,7 @@ export async function driveControl(cfg, taskId, onProgress = async () => {}) {
     let r;
     try {
       await onProgress("planning next step");
-      r = await core(cfg, "/control/next", { taskId, workerId: WORKER_ID, screenshot: shot, lastResult, pageText: per.pageText, axTree: per.axTree, context: per.context });
+      r = await core(cfg, "/control/next", { taskId, workerId: WORKER_ID, screenshot: shot, lastResult, pageText: per.pageText, axTree: per.axTree, browserPage: per.browserPage, context: per.context });
     } catch (e) {
       failures++;
       log("control next failed", { attempt: failures, error: String(e?.message ?? e).slice(0, 120) });
@@ -955,7 +992,7 @@ async function tick(cfg, state) {
       if (cr.status === "approved" && cr.stepId) {
         const step = await core(cfg, "/control/step", { stepId: cr.stepId }).catch(() => null);
         if (step && step.step) {
-          const res = await runControlStep(step.step).catch((e) => `error: ${String(e?.message ?? e).slice(0, 200)}`);
+          const res = await runControlStep(step.step, { julianApproved: true }).catch((e) => `error: ${String(e?.message ?? e).slice(0, 200)}`);
           await core(cfg, "/control/ran", { stepId: cr.stepId, ok: !String(res).startsWith("error") && !String(res).startsWith("refused"), result: res });
         }
       }
@@ -1034,6 +1071,7 @@ async function main() {
     return;
   }
   const state = loadState();
+  await BROWSER.listen().then(() => log("browser bridge listening")).catch((e) => log("browser bridge failed to start", { error: String(e?.message ?? e).slice(0, 160) }));
   log("finagai imessage helper started", { version: HELPER_VERSION, contacts: cfg.contacts.map((c) => c.label), handles: cfg.contacts.map((c) => c.handle), self: cfg.selfHandles });
   setInterval(() => log("alive", { lastRowId: state.lastRowId }), 600_000);
   let busy = false;

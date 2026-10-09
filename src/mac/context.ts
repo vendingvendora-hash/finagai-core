@@ -9,7 +9,7 @@ export type MacContext = {
   app?: string | null; window?: string | null; documentPath?: string | null;
   selectedFiles?: string[];
   /** frontmost/introspection from helper runtime-13+ (Phase 0B); older helpers omit them. url is null for Firefox (title only). */
-  browser?: { app: string; url: string | null; title: string; frontmost?: boolean; introspection?: "full" | "title_only" } | null;
+  browser?: { app: string; url: string | null; title: string; frontmost?: boolean; introspection?: "full" | "title_only" | "extension" } | null;
   display?: string | null; at?: string;
 };
 
