@@ -69,8 +69,11 @@ export async function traceProposal(pool, code, org) {
 // ---------------------------------------------------------------------------------------------------------------
 // Live stability job (async; progress persisted after every run).
 const STALE_MS = 20 * 60_000;
+const PROCESS_STARTED = new Date();
 export async function startStabilityJob(pool, google, runs = 10, traceOrgs = ["Immuta", "Transurban"]) {
-    const running = await pool.query(`SELECT code FROM diagnostic_job WHERE kind = 'career_stability' AND status = 'running' AND created_at > now() - interval '20 minutes' LIMIT 1`);
+    // A job started before this process existed died with the previous process (deploy/restart): close it honestly.
+    await pool.query(`UPDATE diagnostic_job SET status = 'failed', error = 'Core restarted while the job was running', finished_at = now() WHERE status = 'running' AND created_at < $1`, [PROCESS_STARTED]);
+    const running = await pool.query(`SELECT code FROM diagnostic_job WHERE kind = 'career_stability' AND status = 'running' LIMIT 1`);
     if (running.rows[0])
         return { jobCode: Number(running.rows[0].code), reused: true, note: "A stability job is already running." };
     const n = Math.min(Math.max(runs, 2), 20);

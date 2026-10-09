@@ -133,6 +133,7 @@ export interface BootstrapPayload {
   pipeline: { total: number; byStatus: Record<string, number>; shortlist: Array<{ org: string; title: string; score: number | null; eligibility: string | null }> };
   activeProjects: ActiveProjectProposal[];
   closed?: Array<{ org: string; status: string; lastEvidence: string | null; evidenceIds: string[] }>;
+  pipelineOnly?: string[];
   conflicts: string[];
   delta?: SnapshotDelta | null;
   opportunities: BootstrapOpportunity[] | SheetOpportunity[];
@@ -176,36 +177,52 @@ export async function acquireAndStoreCareer(pool: pg.Pool, google: CareerSources
   return { snapshot, digest, snapshotId, acquisitionId: String(acq.rows[0].id), prev, records, stats };
 }
 
+const normTitle = (t: string) => t.toLowerCase().replace(/&/g, " and ").replace(/\b(sr|senior)\b\.?/g, "senior").replace(/[^a-z0-9]+/g, " ").trim();
+const titleMatch = (a: string, b: string) => { const x = normTitle(a), y = normTitle(b); return !!x && !!y && (x === y || x.includes(y) || y.includes(x)); };
+/** Projects (with follow-ups) only for real engagement: interviewing/offer, or an application with evidence in the last
+ *  PROJECT_RECENT_DAYS. Older unanswered applications stay pipeline records — no project, no follow-up noise. */
+export const PROJECT_RECENT_DAYS = 14;
+
 /** Pure: interpretation → proposal payload (opportunities carry stable identity: canonical key + every alias). */
 export function buildCareerPayload(interp: CareerInterpretation, snapshot: CareerSnapshot, projects: string[]): Omit<BootstrapPayload, "provenance" | "delta" | "applicable"> {
   const sheet = snapshot.sheet.ok && snapshot.sheet.csv ? extractSheet(snapshot.sheet.csv) : { rows: [] as SheetOpportunity[], dropped: 0, duplicates: 0 };
-  const orgs = new Map<string, { status: string; aliases: string[]; ids: string[] }>();
-  for (const o of interp.traces.orgs) for (const a of o.aliases) orgs.set(a, { status: o.status, aliases: o.aliases, ids: o.records.map((r) => r.recordId) });
-  const covered = new Set<string>();
+  type OrgInfo = { status: string; aliases: string[]; ids: string[]; titles: string[]; org: string; orgKey: string };
+  const orgs = new Map<string, OrgInfo>();
+  const evTitles = (o: { orgKey: string }) => [...new Set(interp.traces.records.filter((t) => t.orgKey && interp.traces.orgs.find((x) => x.orgKey === o.orgKey)?.aliases.includes(t.orgKey) && t.title).map((t) => t.title!))].sort();
+  for (const o of interp.traces.orgs) { const info = { status: o.status, aliases: o.aliases, ids: o.records.map((r) => r.recordId), titles: evTitles(o), org: o.org, orgKey: o.orgKey }; for (const a of o.aliases) orgs.set(a, info); }
+  const applied = new Set<string>();   // orgKeys whose status landed on at least one sheet row
   const opportunities: BootstrapOpportunity[] = sheet.rows.map((r) => {
     const o = orgs.get(normOrg(r.org));
-    if (o) o.aliases.forEach((a) => covered.add(a));
-    return { ...r, status: o ? o.status : r.status, statusSource: o && o.ids.length ? "evidence" : "sheet", dedupe: dedupeKey(r.org, r.title, r.url), aliasKeys: [dedupeKey(r.org, r.title, r.url)], evidenceIds: o?.ids ?? [] };
+    const rowsOfOrg = o ? sheet.rows.filter((x) => orgs.get(normOrg(x.org)) === o).length : 0;
+    // Org-level evidence updates a sheet row only when it is the org's only row or the evidence names that role.
+    const hit = !!o && o.ids.length > 0 && (rowsOfOrg === 1 || o.titles.some((t) => titleMatch(t, r.title)));
+    if (hit) applied.add(o!.orgKey);
+    return { ...r, status: hit ? o!.status : r.status, statusSource: hit ? "evidence" : "sheet", dedupe: dedupeKey(r.org, r.title, r.url), aliasKeys: [dedupeKey(r.org, r.title, r.url)], evidenceIds: hit ? o!.ids : [] };
   });
-  for (const o of [...interp.active, ...interp.closed.map((c) => ({ ...c, titles: [] as string[], evidence: c.evidenceIds.map((id) => ({ recordId: id })) }))]) {
-    if (o.aliases.some((a) => covered.has(a))) continue;
-    opportunities.push({ sourceId: `evidence:${o.orgKey}`, org: o.org, title: o.titles[0] ?? "(role from email evidence)", url: null, location: null, workMode: null, salary: null, eligibility: null,
+  // Organizations whose evidence matched no sheet row get one evidence opportunity (stable key org:<canonical>, all aliases).
+  for (const o of interp.traces.orgs) {
+    if (applied.has(o.orgKey) || !o.records.length) continue;
+    const info = orgs.get(o.orgKey)!;
+    opportunities.push({ sourceId: `evidence:${o.orgKey}`, org: o.org, title: info.titles[0] ?? "(role from email evidence)", url: null, location: null, workMode: null, salary: null, eligibility: null,
       status: o.status, fitScore: null, fitNotes: null, resume: null, nextAction: null, nextActionAt: null, folder: null, updatedAt: null,
-      statusSource: "evidence", dedupe: `org:${o.orgKey}`, aliasKeys: o.aliases.map((a) => `org:${a}`).sort(), evidenceIds: o.evidence.map((e) => e.recordId) });
+      statusSource: "evidence", dedupe: `org:${o.orgKey}`, aliasKeys: o.aliases.map((a) => `org:${a}`).sort(), evidenceIds: info.ids });
   }
   const projKeys = new Map(projects.map((p) => [normOrg(p), p]));
-  const activeProjects: ActiveProjectProposal[] = interp.active.map((a) => ({
-    org: a.org, orgKey: a.orgKey, aliases: a.aliases, status: a.status, titles: a.titles,
-    evidence: a.evidence.map((e) => `${e.kind} ${e.at.slice(0, 10)}: ${e.subject}`), evidenceIds: a.evidence.map((e) => e.recordId),
+  const asOf = Date.parse(interp.asOf);
+  const engaged = interp.active.filter((a) => a.status !== "applied" || (a.lastEvidenceAt !== null && asOf - Date.parse(a.lastEvidenceAt.slice(0, 10)) <= PROJECT_RECENT_DAYS * 86_400_000));
+  const activeProjects: ActiveProjectProposal[] = engaged.map((a) => ({
+    org: a.org, orgKey: a.orgKey, aliases: a.aliases, status: a.status, titles: orgs.get(a.orgKey)?.titles.length ? orgs.get(a.orgKey)!.titles : a.titles.slice(0, 3),
+    evidence: a.evidence.slice(-6).map((e) => `${e.kind} ${e.at.slice(0, 10)}: ${e.subject}`), evidenceIds: a.evidence.map((e) => e.recordId),
     lastContact: a.lastEvidenceAt, contact: a.contact, proposedFollowup: a.followup, followupDue: a.followupDue,
     existingProject: a.aliases.map((k) => projKeys.get(k)).find(Boolean) ?? null }));
+  const pipelineOnly = interp.active.filter((a) => !engaged.includes(a)).map((a) => `${a.org} (applied, last evidence ${a.lastEvidenceAt?.slice(0, 10) ?? "?"})`);
   const byStatus: Record<string, number> = {};
   for (const o of opportunities) byStatus[o.status] = (byStatus[o.status] ?? 0) + 1;
   return {
     area: "Career", objective: { proposed: "Secure a strong Financial / Pricing Analyst role", needsConfirmation: true },
     source: { sheet: snapshot.sheet.name ?? null, sheetId: snapshot.sheet.id ?? null, account: snapshot.sheet.account ?? null, rows: sheet.rows.length, dropped: sheet.dropped, duplicates: sheet.duplicates },
     pipeline: { total: opportunities.length, byStatus, shortlist: interp.pipeline.shortlist },
-    activeProjects, closed: interp.closed.map((c) => ({ org: c.org, status: c.status, lastEvidence: c.lastEvidenceAt, evidenceIds: c.evidenceIds })),
+    activeProjects, pipelineOnly, closed: interp.closed.map((c) => ({ org: c.org, status: c.status, lastEvidence: c.lastEvidenceAt, evidenceIds: c.evidenceIds })),
     conflicts: interp.conflicts, opportunities,
   };
 }

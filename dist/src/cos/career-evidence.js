@@ -21,7 +21,7 @@
  */
 import { createHash } from "node:crypto";
 import { extractSheet, normOrg } from "./bootstrap.js";
-export const INTERPRETER_VERSION = "career-interpret-3";
+export const INTERPRETER_VERSION = "career-interpret-4";
 /** Fixed acquisition lower bound (NOT rolling with the clock, so a record can't age out between two runs). */
 export const CAREER_EPOCH = "2026/06/01";
 export const CALENDAR_AHEAD_DAYS = 120;
@@ -225,6 +225,9 @@ export function decodeEntities(s) {
     }).replace(/[͏​-‍⁠﻿]/g, "").replace(/\s+/g, " ").trim();
 }
 const ORG = String.raw `([A-Z0-9][\w&.,'’-]*(?:\s+(?:[A-Z0-9&][\w&.,'’-]*|of|and|for|the|de|y)){0,5})`;
+/** Case-insensitive literal phrase without making the whole regex /i (the ORG capture must stay case-sensitive). */
+const ci = (phrase) => phrase.replace(/[a-z]/gi, (c) => `[${c.toLowerCase()}${c.toUpperCase()}]`);
+const ROLE_TAIL = /\b(analyst|manager|associate|specialist|accountant|director|coordinator|consultant|controller|intern|strategist|estimator|officer|lead)$/i;
 const TITLE_WORDS = /^(senior|sr\.?|junior|jr\.?|lead|principal|staff|associate|assistant|financial|finance|pricing|accounting|business|data|cost|budget|program|analyst|manager|director|specialist|coordinator|consultant|fp&a|fp|structured|entry)\b/i;
 /** Strong outcome wording only — safe on bodies (bare "unfortunately" only counts in subject/snippet: confirmations say
  *  "unfortunately we can't reply to everyone"). Live examples: JHU, Cvent ("Thank You For Applying" — a rejection), Accenture. */
@@ -233,10 +236,10 @@ const OFFER = /\b(offer letter|pleased to (?:offer|extend)|extend(?:ing)? (?:you
 const NOT_ORG = /^(julian|your|you|the|a|an|us|me|our|linkedin|indeed|workable|lever|greenhouse)$/i;
 const ATS_OR_JOBS = /(jobs-noreply@linkedin|lever\.co|greenhouse|workablemail|workable|ashbyhq|smartrecruiters|icims|myworkday|jobvite|bamboohr|paylocity|ultipro|taleo|successfactors|jazzhr|breezy|recruitee|teamtailor|rippling|dayforce|paycom)/i;
 const JOB_CONTEXT = /\b(position|role|job|analyst|candidate|candidacy|hiring|recruit\w*|talent|resume|interview\w*|opening|requisition|employment)\b/i;
-const GENERIC_DOMAINS = /^(gmail|googlemail|outlook|hotmail|yahoo|ouryahoo|icloud|aol|protonmail|glassdoor|linkedin|lever|greenhouse|greenhouse-jobs|workable|workablemail|ashbyhq|smartrecruiters|icims|myworkday|workday|jobvite|bamboohr|indeed|ziprecruiter|otter|zoom|google|calendly|paylocity|adp|ultipro|taleo|successfactors|jazzhr|breezy|recruitee|teamtailor|rippling|dayforce|paycom|correounivalle)\.$/i;
+const GENERIC_DOMAINS = /^(gmail|googlemail|outlook|hotmail|yahoo|ouryahoo|icloud|aol|protonmail|glassdoor|linkedin|applytojob|hirebridge|myworkdayjobs|lever|greenhouse|greenhouse-jobs|workable|workablemail|ashbyhq|smartrecruiters|icims|myworkday|workday|jobvite|bamboohr|indeed|ziprecruiter|otter|zoom|google|calendly|paylocity|adp|ultipro|taleo|successfactors|jazzhr|breezy|recruitee|teamtailor|rippling|dayforce|paycom|correounivalle)\.$/i;
 const NOISE = [
-    { re: /newsletters?-noreply|messages-noreply|jobs-listings|jobalerts?|job-alerts|digest|notifications?-noreply/i, field: "from", why: "newsletter / job-alert sender, not an application record" },
-    { re: /\b(see hiring trends|jobs? (?:for you|alert)|new .*jobs? update|recommended jobs?|is hiring|top applicant|people also viewed|job recommendations?|apply now|apply to your saved jobs|view your application updates|hired roles near you)\b/i, field: "subject", why: "job-board marketing / digest, not an application record" },
+    { re: /newsletters?-noreply|messages-noreply|jobs-listings|jobalerts?|job-alerts|digest|notifications?-noreply|match\.indeed\.com|alert@indeed/i, field: "from", why: "newsletter / job-alert / job-match sender, not an application record" },
+    { re: /\b(see hiring trends|jobs? (?:for you|alert)|new .*jobs? update|recommended jobs?|is hiring|top applicant|people also viewed|job recommendations?|apply now|apply to your saved jobs|view your application updates|hired roles near you|application is incomplete|complete your application|finish your application)\b/i, field: "subject", why: "job-board marketing / digest / unfinished application, not an application record" },
 ];
 function cleanOrg(s) {
     let o = s.split(/[.,;:!?](?:\s|$)/)[0].replace(/[.,;:!'’-]+$/, "").trim();
@@ -246,7 +249,7 @@ function cleanOrg(s) {
     }
     return o;
 }
-const validOrg = (o) => !!o && o.length > 1 && !TITLE_WORDS.test(o) && !NOT_ORG.test(o);
+const validOrg = (o) => !!o && o.length > 1 && !TITLE_WORDS.test(o) && !NOT_ORG.test(o) && !ROLE_TAIL.test(o);
 /** Classify one record and extract its organization with the FIRST matching deterministic rule. */
 export function classifyRecord(r, knownOrgKeys) {
     const subject = decodeEntities(r.subject), snippet = decodeEntities(r.snippet);
@@ -272,6 +275,10 @@ export function classifyRecord(r, knownOrgKeys) {
         kind = "rejection";
         via = REJECT.test(head) || /\bunfortunately\b/i.test(head) ? "rejection wording (subject/snippet)" : "rejection wording (body)";
     }
+    else if (/\b(you(?:'|’)?ve withdrawn|withdrawn your|withdrew your|application (?:has been|was) withdrawn)\b/i.test(head)) {
+        kind = "withdrawal";
+        via = "withdrawal wording";
+    }
     else if (/\b(phone screen|screening call|screening interview)\b/i.test(subj))
         kind = "screen";
     else if (/\binterview\b/i.test(subj) && !/\b(how to|tips|prepare for your|ace your)\b/i.test(subj))
@@ -282,7 +289,7 @@ export function classifyRecord(r, knownOrgKeys) {
         kind = "application";
     if (!kind)
         return { ...base, stage: "unclassified", reason: "no application/interview/outcome signal" };
-    if (!ATS_OR_JOBS.test(r.from) && !JOB_CONTEXT.test(head) && r.source === "gmail")
+    if (!ATS_OR_JOBS.test(r.from) && !JOB_CONTEXT.test(head) && !/\b(?:thank(?:s| you) for applying|received your application)\b/i.test(head) && !/[Aa]pplication to [A-Z]/.test(head) && r.source === "gmail")
         return { ...base, stage: "unclassified", kind, reason: `${kind} wording but no job context (not an ATS/LinkedIn sender, no role/position/hiring words)` };
     // [name, pattern, org group, title group, where: s=subject n=snippet b=body]. Bodies are only searched by rules that
     // cannot be fooled by the job recommendations LinkedIn appends ("View similar jobs … at McKesson").
@@ -290,7 +297,8 @@ export function classifyRecord(r, knownOrgKeys) {
         ["linkedin:application_to_title_at_org", new RegExp(String.raw `[Aa]pplication (?:to|for) (.{3,120}?) at ${ORG}`), 2, 1, "sn"],
         ["notice:application_sent_viewed_received", new RegExp(String.raw `[Aa]pplication (?:for (.{3,120}?) )?(?:was )?(?:sent to|viewed by|received by|submitted to) ${ORG}`), 2, 1, "sn"],
         ["linkedin:update_from_org", new RegExp(String.raw `^Your update from ${ORG}`), 1, 0, "b"],
-        ["ats:thanks_for_applying_to_org", new RegExp(String.raw `(?:[Tt]hanks|[Tt]hank [Yy]ou) [Ff]or (?:[Aa]pplying|[Yy]our application|[Yy]our interest|[Yy]our applying|taking the time to apply)(?: [Tt]o| [Aa]t| [Ii]n| [Ww]ith| [Ff]or)(?: the)?(?: (.{3,80}?) (?:position|role|job|opening)(?: at| with))? ${ORG}`), 2, 1, "snb"],
+        ["ats:thanks_for_applying_to_org", new RegExp(String.raw `(?:${ci("thanks")}|${ci("thank you")}) ${ci("for")} (?:${ci("applying")}|${ci("your application")}|${ci("your interest")}|${ci("your applying")}|${ci("taking the time to apply")})(?: ${ci("to")}| ${ci("at")}| ${ci("in")}| ${ci("with")}| ${ci("for")})(?: ${ci("the")})?(?: (.{3,80}?) (?:${ci("position")}|${ci("role")}|${ci("job")}|${ci("opening")})(?: ${ci("at")}| ${ci("with")}))? ${ORG}`), 2, 1, "snb"],
+        ["subject:interest_in_org", new RegExp(String.raw `${ci("interest in")} ${ORG}\s*[!.]?$`), 1, 0, "s"],
         ["subject:title_at_sign_org", new RegExp(String.raw `(?:^|-\s)([^@-]{3,80}?)\s*@ ${ORG}\s*$`), 2, 1, "s"],
         ["subject:interview_or_screen_with_org", new RegExp(String.raw `(?:[Ii]nterview|[Pp]hone [Ss]creen|[Ss]creening(?: [Cc]all)?)(?: [Ii]nvitation)? (?:with|at|for) ${ORG}`), 1, 0, "s"],
     ];
@@ -336,7 +344,8 @@ export function resolveAliases(keys) {
     const roots = [];
     for (const k of sorted) {
         const t = k.split(" ");
-        const root = roots.find((r) => { const rt = r.split(" "); return rt[0].length >= 4 && rt.length < t.length && rt.every((w, i) => t[i] === w); });
+        // Same name with/without spaces ("aircommunities" / "air communities") or a token-prefix ("altarum" ⊂ "altarum institute").
+        const root = roots.find((r) => r.replace(/ /g, "") === k.replace(/ /g, "")) ?? roots.find((r) => { const rt = r.split(" "); return rt[0].length >= 3 && rt.length < t.length && rt.every((w, i) => t[i] === w); });
         if (root)
             canon.set(k, root);
         else {
@@ -361,6 +370,7 @@ function sheetInitial(rows) {
 function step(cur, k) {
     switch (k) {
         case "offer": return "offer";
+        case "withdrawal": return cur === "offer" ? "offer" : "withdrawn";
         case "rejection": return cur === "offer" ? "offer" : "rejected";
         case "interview":
         case "screen": return cur === "offer" ? "offer" : "interviewing";
@@ -402,6 +412,7 @@ export function interpretCareer(s, opts = {}) {
     const active = [];
     const closed = [];
     const conflicts = [];
+    const lag = []; // per-org detail lives in traces.orgs; the proposal gets one line
     for (const key of [...keys].sort(cmp)) {
         const evs = byOrg.get(key) ?? []; // already in total order (records were sorted)
         const rows = sheetByOrg.get(key) ?? [];
@@ -422,7 +433,7 @@ export function interpretCareer(s, opts = {}) {
         }
         const sheetStatus = rows.length ? [...new Set(rows.map((r) => r.status))].sort(cmp).join(",") : null;
         if (rows.length && evs.length && sheetInitial(rows) !== st)
-            conflicts.push(`${display}: Career Copilot sheet says "${sheetStatus}" but ${evs.length} email/calendar record(s) show "${st}" (records ${evs.map((e) => e.rec.id).join(", ")})`);
+            lag.push(`${display} (sheet "${sheetStatus}" → evidence "${st}")`);
         const last = evs.length ? evs[evs.length - 1].rec.at : null;
         const included = ACTIVE.includes(st);
         const aliases = aliasesOf(key);
@@ -441,6 +452,8 @@ export function interpretCareer(s, opts = {}) {
         else
             closed.push({ org: display, orgKey: key, aliases, status: st, lastEvidenceAt: last, evidenceIds: evs.map((e) => e.rec.id) });
     }
+    if (lag.length)
+        conflicts.push(`Career Copilot sheet lags the email evidence for ${lag.length} organization(s): ${lag.join("; ")}`);
     const byStatus = {};
     for (const r of sheet.rows)
         byStatus[r.status] = (byStatus[r.status] ?? 0) + 1;

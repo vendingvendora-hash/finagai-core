@@ -92,7 +92,7 @@ describe("interpretation of the real 2026-10-09 evidence", () => {
     expect(a.aliases).toEqual(["altarum", "altarum institute"]);
     expect(a.contact).toBe("Beth Young"); expect(a.sheetRows).toEqual(["mtdy30"]);
     expect(a.evidence.map((e) => e.kind)).toContain("screen");
-    expect(i.conflicts.join("\n")).toMatch(/Altarum: Career Copilot sheet says "analyzed" but .* show "interviewing"/);
+    expect(i.conflicts.join("\n")).toMatch(/Career Copilot sheet lags the email evidence for 1 organization\(s\): Altarum \(sheet "analyzed" → evidence "interviewing"\)/);
     expect(i.pipeline.shortlist.map((s) => s.org)).toEqual(["M.C. Dean, Inc."]);   // Altarum engaged, Northrop needs clearance
   });
   it("Immuta: the HTML-escaped rejection is recognised (root cause of 'Immuta active')", () => {
@@ -214,5 +214,58 @@ describe("acquisition failures are recorded, never silent", () => {
     const b = resolveAliases(["chimes", "vallum associates", "altarum", "altarum institute"]);
     expect([...a.entries()].sort()).toEqual([...b.entries()].sort());
     expect(a.get("altarum institute")).toBe("altarum");
+  });
+});
+
+describe("live run #22 (first complete snapshot, 231 records) — interpretation defects fixed in career-interpret-4", () => {
+  const rec = (id: string, iso: string, subject: string, from: string, snippet = "") => ({ id, threadId: id, internalDate: Date.parse(iso), subject, from, snippet, body: "", templates: [] as string[] });
+  const snap = (recs: GmailRecord[]) => acquireCareerSnapshot(sources(recs), "Career Copilot", NOW);
+  const LIN = "LinkedIn <jobs-noreply@linkedin.com>";
+  it("'AIR Communities' and sender domain 'aircommunities' are one organization; 'Thank You for Your Application to X' parses", async () => {
+    const i = interpretCareer(await snap([rec("x1", "2026-08-21T04:59:14Z", "Julian David, your application was sent to AIR Communities", LIN),
+      rec("x2", "2026-08-21T04:59:41Z", "Thank You for Your Application to AIR Communities!", "AIR Communities <careers@aircommunities.com>")]));
+    expect(i.traces.orgs.filter((o) => o.orgKey !== "altarum").map((o) => [o.org, o.records.length])).toEqual([["AIR Communities", 2]]);   // (fixture calendar holds Altarum)
+    expect(i.traces.records.find((t) => t.recordId === "x2")!.rule).toBe("ats:thanks_for_applying_to_org");
+  });
+  it("a job title is never an organization ('Corporate FP&A Analyst'); 'We Appreciate Your Interest in KBR' → KBR", async () => {
+    const i = interpretCareer(await snap([rec("k1", "2026-09-10T01:56:27Z", "We Appreciate Your Interest in KBR", "KBR <kbr@myworkday.com>", "Thank you for your interest in the Corporate FP&A Analyst position. We have received your application")]));
+    expect(i.traces.records[0]).toEqual(expect.objectContaining({ org: "KBR", rule: "subject:interest_in_org" }));
+  });
+  it("Indeed job-match mail ('… In person interview @ GoIntellects Inc.') is not an interview", async () => {
+    const r = classifyRecord(evidenceRecords({ gmail: [{ key: "interviews", account: ACCOUNT, records: [rec("g1", "2026-07-20T01:35:51Z", "2years Treasury Analyst - Hybrid - In person interview @ GoIntellects Inc.", "Indeed <donotreply@match.indeed.com>")] }], calendar: [], carryForward: [] } as never)[0]!, new Set());
+    expect(r.stage).toBe("excluded");
+  });
+  it("withdrawals and 'application is incomplete' nags: withdrawn, then a later application reopens", async () => {
+    const A = "Amazon.jobs <noreply@mail.amazon.jobs>";
+    const i = interpretCareer(await snap([rec("a1", "2026-08-14T10:00:00Z", "Thank you for Applying to Amazon!", A, "Thanks for applying to Amazon! We've received your application"),
+      rec("a2", "2026-08-15T10:00:00Z", "Your Amazon job application is incomplete!", A, "Finish your application"),
+      rec("a3", "2026-08-17T10:00:00Z", "You've withdrawn your Amazon job application!", A, "You've withdrawn your application for the position")]));
+    expect(i.traces.orgs.find((o) => o.orgKey === "amazon")!.records.map((r) => r.transition)).toEqual(["analyzed→applied", "applied→withdrawn"]);
+    expect(i.traces.records.find((t) => t.recordId === "a2")!.stage).toBe("excluded");
+  });
+  it("applyTojob (JazzHR) is an ATS domain, never an employer", async () => {
+    const i = interpretCareer(await snap([rec("j1", "2026-08-13T21:18:41Z", "Julián, we've received your application", "Hiring Team <noreply@applytojob.com>", "Thank you for applying for the Financial Analyst position")]));
+    expect(i.traces.records[0]!.org).toBeUndefined();
+  });
+});
+
+import { buildCareerPayload } from "../../src/cos/bootstrap.js";
+describe("proposal payload (what Phase 4 would write)", () => {
+  const LIN = "LinkedIn <jobs-noreply@linkedin.com>";
+  const rec = (id: string, iso: string, subject: string, from: string, snippet = "") => ({ id, threadId: id, internalDate: Date.parse(iso), subject, from, snippet, body: "", templates: [] as string[] });
+  it("org-level evidence never relabels unrelated sheet rows; old unanswered applications are pipeline-only (no project/follow-up)", async () => {
+    const csv = SHEET_CSV + "\n" + [
+      "am1,,,Amazon,\"Sr. Financial Analyst, Amazon Business Finance\",,,,,No Restriction Identified,,Analyzed,80,,,,,,,,",
+      "am2,,,Amazon,\"Finance Manager, Amazon Rapid Logistics\",,,,,No Restriction Identified,,Analyzed,80,,,,,,,,"].join("\n");
+    const recs = [...Object.values(REC), rec("air1", "2026-08-21T04:59:14Z", "Julian David, your application was sent to AIR Communities", LIN)];
+    const s = await acquireCareerSnapshot(sources(recs, { csv }), "Career Copilot", NOW);
+    const p = buildCareerPayload(interpretCareer(s), s, []);
+    const opp = (id: string) => (p.opportunities as Array<{ sourceId: string; status: string; statusSource: string }>).find((o) => o.sourceId === id)!;
+    expect([opp("am1").status, opp("am2").status]).toEqual(["analyzed", "analyzed"]);            // evidence names no Amazon role
+    expect(opp("evidence:amazon")).toEqual(expect.objectContaining({ status: "applied", statusSource: "evidence" }));
+    expect(opp("mtdy30")).toEqual(expect.objectContaining({ status: "interviewing", statusSource: "evidence" }));   // Altarum's only row
+    expect(p.activeProjects.map((a) => a.org)).not.toContain("AIR Communities");
+    expect(p.pipelineOnly).toEqual(["AIR Communities (applied, last evidence 2026-08-21)"]);
+    expect(p.activeProjects.map((a) => a.org).sort()).toEqual(["Altarum", "Amazon", "Chimes", "Resource Innovations", "Vallum Associates"]);
   });
 });
