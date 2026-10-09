@@ -249,3 +249,15 @@ describe("title edge cases from #43", () => {
     expect(one(REC.accentureRejected0903)).toEqual(expect.objectContaining({ reqId: "R00336590", title: "Pricing & Deal Structuring Specialist" }));
   });
 });
+
+describe("title edge cases from #44", () => {
+  const one = (x: GmailRecord) => classifyRecord(evidenceRecords({ gmail: [{ key: "a", account: ACCOUNT, records: [x] }], calendar: [], carryForward: [] } as never)[0]!, new Set());
+  const rec = (id: string, subject: string, from: string, snippet: string) => ({ id, threadId: id, internalDate: Date.parse("2026-08-28T02:00:58Z"), subject, from, snippet, body: "", templates: [] as string[] });
+  it("DLA Piper: requisition AND title from 'Application Received for R2026-2409 FP&A Analyst at DLA Piper LLP (US)'", () => {
+    expect(one(rec("1a0461954211eea1", "Application Received for R2026-2409 FP&A Analyst at DLA Piper LLP (US)", "DLA Piper <dlapiper@myworkday.com>", "Thank you for applying to DLA Piper LLP (US)."))).toEqual(expect.objectContaining({ reqId: "R2026-2409", title: "FP&A Analyst" }));
+  });
+  it("Spire: 'our FP&A - Senior Analyst' and 'FP&A - Senior Analyst' are the same job title", () => {
+    const t = one(rec("1a01ad0e6482628c", "Application Received | Spire", "Spire <no-reply@spire.com>", "Thank you for your interest in our FP&A - Senior Analyst position at Spire."));
+    expect(t.title).toBe("FP&A - Senior Analyst");
+  });
+});

@@ -81,7 +81,7 @@ describe.skipIf(!pool)("Career bootstrap (ADR-080): acquire → snapshot → int
     const before = await careerCounts();
     const p = await proposeCareerBootstrap(pool!, google(BEFORE) as never, T);
     expect(await careerCounts()).toEqual(before);                                  // read-only until approval
-    expect(p.summary.provenance).toEqual(expect.objectContaining({ complete: true, interpreterVersion: "career-interpret-6", previousSnapshot: null }));
+    expect(p.summary.provenance).toEqual(expect.objectContaining({ complete: true, interpreterVersion: "career-interpret-7", previousSnapshot: null }));
     expect(p.summary.activeProjects.map((a) => `${a.name}:${a.status}`)).toEqual(expect.arrayContaining(["Altarum — Pricing Analyst:interviewing", "Vallum Associates — Project Finance Analyst - SMR:applied",
       "Amazon — Senior Financial Analyst, R2L Sub Same Day - Delivery Finance (10471926):applied"]));
     expect(p.summary.closed!.map((c) => c.job)).toEqual(expect.arrayContaining(["Amazon — Sr. Financial Analyst, Amazon Business Finance (10460629)", "Transurban — Senior Financial Planning Analyst", "Vallum Associates — Structured Finance Analyst"]));

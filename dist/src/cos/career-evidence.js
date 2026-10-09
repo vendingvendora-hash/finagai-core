@@ -21,7 +21,7 @@
  */
 import { createHash } from "node:crypto";
 import { dedupeKey, extractSheet, normOrg } from "./bootstrap.js";
-export const INTERPRETER_VERSION = "career-interpret-6";
+export const INTERPRETER_VERSION = "career-interpret-7";
 /** Fixed acquisition lower bound (NOT rolling with the clock, so a record can't age out between two runs). */
 export const CAREER_EPOCH = "2026/06/01";
 export const CALENDAR_AHEAD_DAYS = 120;
@@ -387,7 +387,7 @@ function cleanTitle(raw, org) {
         return undefined;
     let t = raw.replace(/^\s*reference role:\s*/i, "").replace(/\s*\(ID:?\s*\d+\)\s*/gi, " ").replace(/^\s*(?:R\d{4}-\d{3,}|R\d{6,}|req(?:uisition)?\s*#?\s*\w+)\s+/i, "")
         .replace(/\s+(?:\||[\w&]+ (?:recruitment|recruiting|talent acquisition) team\b).*$/i, "")
-        .replace(/^(?:the|a|an)\s+/i, "").replace(/^position of\s+/i, "").replace(/\s+(?:position|role|job|opening)$/i, "").replace(/[\s.,;:!|-]+$/, "").replace(/\s+/g, " ").trim();
+        .replace(/^(?:the|a|an|our|your|this|that)\s+/i, "").replace(/^position of\s+/i, "").replace(/\s+(?:position|role|job|opening)$/i, "").replace(/[\s.,;:!|-]+$/, "").replace(/\s+/g, " ").trim();
     if (t.length < 3 || t.length > 140 || BAD_TITLE.test(t) || !ROLE_WORD.test(t))
         return undefined;
     if (org) {
@@ -427,7 +427,8 @@ export function jobIdentity(r, t) {
     }
     // Title, in order of reliability.
     const amz = /(?:position of|for the|interest in|application for(?: the)?(?: position of)?)\s+(.{3,160}?)\s*\(ID:?\s*\d{5,}\)/.exec(body) ?? /(?:position of|for the|interest in|application for(?: the)?(?: position of)?)\s+(.{3,160}?)\s*\(ID:?\s*\d{5,}\)/.exec(snippet);
-    const candidates = [[amz?.[1], "title before the requisition id"], [t.title, `title from ${t.rule}`]];
+    const subjTitle = /\bapplication (?:received |submitted |confirmation )?(?:for|to) (.{3,120}?) at [A-Z]/i.exec(subj)?.[1]; // "Application Received for R2026-2409 FP&A Analyst at DLA Piper"
+    const candidates = [[amz?.[1], "title before the requisition id"], [t.title, `title from ${t.rule}`], [subjTitle, "title in the application subject"]];
     // LinkedIn cards: "<title>\n<company>\n<location>\nView job:" — the line before the company line is the title.
     // Only LinkedIn's own card layout (first line "Your application was sent to / viewed by …"); elsewhere the line before
     // the company name is usually a signature ("Best regards", "Beth Young").
