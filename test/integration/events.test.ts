@@ -117,22 +117,24 @@ describe.skipIf(!admin || !migT || !appT)("event-driven proactivity (Phase 5, AD
     expect((await proactivityStatus(pool)).needsJulian).toEqual([]);
   });
 
-  it("quiet hours hold the digest; a reply from someone Julian waits on is recorded (no escalation)", async () => {
+  it("a reply from someone Julian waits on closes the wait (never a false \"no answer\"); an unanswered one is escalated, held overnight", async () => {
     await ensureArea(pool, "Health Admin");
     await addWaiting(pool, { counterparty: "Dana Smith", about: "insurance renewal quote", area: "Health Admin", due: "2026-10-17", now: new Date("2026-10-15T12:00:00Z") });
     mail = [...mail, fixtureRecord("1a12fff000000002", String(Date.parse("2026-10-15T20:00:00Z")), "Re: renewal quote", "Dana Smith <dana@broker.example>", "Here is the quote you asked for.")];
     const r = await tick(new Date("2026-10-16T03:00:00Z"));                                        // 23:00 ET
     const ev = r.events.find((e) => /renewal quote/.test(e.summary))!;
     expect(ev.routes.map((x) => x.workflow)).toEqual(["followup.reply"]);
-    expect(r.workflows.find((w) => w.name === "followup.reply")!.changes.join(" ")).toMatch(/Dana Smith replied/);
+    expect(r.workflows.find((w) => w.name === "followup.reply")!.changes.join(" ")).toMatch(/Dana Smith replied 2026-10-15.*wait closed/);
     expect(r.escalations.opened).toEqual([]);
-    // Its date passes unanswered by Julian's decision → escalated, but held overnight.
+    expect((await pool.query(`SELECT state FROM followup WHERE counterparty = 'Dana Smith'`)).rows[0].state).toBe("done");   // answered → never "no answer"
+    // A wait that DOES pass unanswered → escalated, but held overnight and sent in the morning.
+    await addWaiting(pool, { counterparty: "Sam Lee", about: "signed lease", area: "Health Admin", due: "2026-10-17", now: new Date("2026-10-15T12:00:00Z") });
     const late = await tick(new Date("2026-10-17T03:00:00Z"));
-    expect(late.escalations.opened).toEqual([expect.stringMatching(/No answer from Dana Smith/)]);
+    expect(late.escalations.opened).toEqual([expect.stringMatching(/No answer from Sam Lee/)]);
     expect(late.escalations.held).toMatch(/quiet hours/);
     expect(sent).toHaveLength(1);
     const morning = await tick(new Date("2026-10-17T12:00:00Z"));                                  // 08:00 ET
-    expect(morning.escalations.notified).toEqual([expect.stringMatching(/No answer from Dana Smith/)]);
+    expect(morning.escalations.notified).toEqual([expect.stringMatching(/No answer from Sam Lee/)]);
     expect(sent).toHaveLength(2);
   });
 
@@ -150,5 +152,14 @@ describe.skipIf(!admin || !migT || !appT)("event-driven proactivity (Phase 5, AD
     await holder.query(`SELECT pg_advisory_lock(84005)`);
     expect((await tick(new Date("2026-10-17T14:12:00Z"))).skipped).toMatch(/another tick/);
     await holder.query(`SELECT pg_advisory_unlock(84005)`); holder.release();
+  });
+  it("a reply from the contact of a job Julian is waiting on wakes Career AND closes his wait (both reactions)", async () => {
+    await addWaiting(pool, { counterparty: "Beth Young", about: "Altarum next round", area: "Career", due: "2026-10-30", now: new Date("2026-10-18T12:00:00Z") });
+    mail = [...mail, fixtureRecord("1a12fff000000004", String(Date.parse("2026-10-18T14:00:00Z")), "RE: Interview with Altarum / Julian David Perez Cardozo - Pricing Analyst", "Beth Young <Beth.Young@altarum.org>", "Hi Julian, thanks for your patience — the team would like to schedule a final round.")];
+    const r = await tick(new Date("2026-10-18T15:00:00Z"));
+    const ev = r.events.find((e) => /Beth Young/.test(e.summary))!;
+    expect(ev.routes.map((x) => x.workflow).sort()).toEqual(["career.sync", "followup.reply"]);
+    expect((await pool.query(`SELECT state, outcome FROM followup WHERE summary LIKE '%Altarum next round%'`)).rows[0]).toEqual({ state: "done", outcome: expect.stringMatching(/^Beth Young replied 2026-10-18/) });
+    expect(r.escalations.opened).toEqual([]);
   });
 });

@@ -87,7 +87,8 @@ export const deadlineWatcher = {
 };
 const emailOf = (from) => (/<([^>]+)>/.exec(from)?.[1] ?? from).toLowerCase().trim();
 const nameOf = (from) => (/^"?([^"<]+?)"?\s*</.exec(from)?.[1] ?? "").trim().toLowerCase();
-/** Open follow-ups (any Area, not tied to a job — jobs are read by their Area's evidence workflow) whose counterparty sent this mail. */
+/** Open waits Julian created (any Area, job-linked or not) whose counterparty sent this mail. Lifecycle waits are excluded:
+ *  the lifecycle recomputes them from the evidence the Area's own workflow records. */
 export async function waitedFollowupsFor(db, e) {
     if (e.kind !== "mail.received")
         return [];
@@ -97,7 +98,7 @@ export async function waitedFollowupsFor(db, e) {
     if (!email && !name)
         return [];
     const rows = (await db.query(`SELECT f.id, f.summary, f.counterparty, COALESCE(f.area_id, p.area_id) AS area_id FROM followup f LEFT JOIN project p ON p.id = f.project_id
-      WHERE f.state IN ('open','waiting','overdue') AND f.opportunity_id IS NULL AND f.counterparty IS NOT NULL AND length(f.counterparty) >= 3`)).rows;
+      WHERE f.state IN ('open','waiting','overdue') AND f.origin IN ('julian','bootstrap') AND f.counterparty IS NOT NULL AND length(f.counterparty) >= 3`)).rows;
     return rows.filter((f) => { const c = String(f.counterparty).toLowerCase(); return (!!name && (name === c || name.startsWith(`${c} `) || c.startsWith(`${name} `))) || (!!email && email.includes(c.replace(/\s+/g, "."))); });
 }
 export const genericModule = {
@@ -113,15 +114,16 @@ export const genericModule = {
     workflows: [
         { name: "followup.reply",
             async run(ctx, events) {
-                // Finagai-owned: the wait got its answer. Recorded on the follow-up (last action), shown as a change; reading
-                // the reply is Julian's only if it asks something of him — the follow-up's own due date still governs.
+                // Finagai-owned: the wait is over — the counterparty answered. The follow-up closes with the reply as its outcome
+                // (so it can never be escalated as "no answer"); the reply itself is in Julian's inbox and shown as a change.
                 const changes = [];
                 await inTx(ctx.pool, ctx.dryRun, async (tx) => {
                     for (const e of events)
                         for (const f of await waitedFollowupsFor(tx, e)) {
-                            await tx.query(`UPDATE followup SET last_action_at = $2, updated_at = now() WHERE id = $1`, [f.id, e.occurredAt]);
-                            await appendEvent(tx, { actor: "cos", action: "followup_reply_received", entityType: "followup", entityId: f.id, after: { from: e.payload.from, subject: e.payload.subject, inboundEvent: e.id } });
-                            changes.push(`${f.counterparty} replied (“${String(e.payload.subject ?? "").slice(0, 80)}”) — about: ${f.summary}`);
+                            const outcome = `${f.counterparty} replied ${e.occurredAt.slice(0, 10)}: “${String(e.payload.subject ?? "").slice(0, 120)}”`;
+                            await tx.query(`UPDATE followup SET state = 'done', outcome = $2, closed_at = now(), last_action_at = $3, updated_at = now() WHERE id = $1 AND state IN ('open','waiting','overdue')`, [f.id, outcome, e.occurredAt]);
+                            await appendEvent(tx, { actor: "cos", action: "followup_done", entityType: "followup", entityId: f.id, after: { outcome, by: "event:reply", inboundEvent: e.id } });
+                            changes.push(`${outcome} — wait closed: ${f.summary}`);
                         }
                 });
                 return { changes, escalations: [] };
