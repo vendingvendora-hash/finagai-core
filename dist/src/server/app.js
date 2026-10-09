@@ -2,6 +2,9 @@ import { Readable } from "node:stream";
 import { randomUUID } from "node:crypto";
 import { AuthError, extractBearer, verifyAccessToken } from "../auth/bearer.js";
 import { readCookie, SESSION_COOKIE, verifySession } from "../approval/session.js";
+import { existsSync, readFileSync } from "node:fs";
+const FIXTURES = { "apply.html": "text/html; charset=utf-8", "complex.html": "text/html; charset=utf-8",
+    "frame.html": "text/html; charset=utf-8", "Julian_Perez_Resume_TEST.pdf": "application/pdf" };
 const MAX_MCP_BODY_BYTES = 1_000_000;
 async function toWebRequest(req, url) {
     const chunks = [];
@@ -87,6 +90,27 @@ export function createHandler(cfg, info, log, deps) {
                 version: info.version,
                 uptimeSeconds: Math.round((Date.now() - info.startedAt.getTime()) / 1000),
             });
+        }
+        // Phase 1 live acceptance (ADR-077): harmless static test pages for the browser operator (B01–B13). The form
+        // never sends anything (client-side preventDefault); allow-listed names only; not indexed.
+        if (req.method === "GET" && path.startsWith("/fixtures/")) {
+            const name = path.slice("/fixtures/".length);
+            const type = FIXTURES[name];
+            if (!type)
+                return send(res, 404, { error: "not_found" });
+            try {
+                // src/server (tests) and dist/src/server (production) sit at different depths below the repo root.
+                const candidates = [`../../test/browser/fixtures/${name}`, `../../../test/browser/fixtures/${name}`].map((r) => new URL(r, import.meta.url));
+                const file = candidates.find((u) => existsSync(u));
+                if (!file)
+                    return send(res, 404, { error: "not_found" });
+                const body = readFileSync(file);
+                res.writeHead(200, { "content-type": type, "cache-control": "no-store", "x-robots-tag": "noindex, nofollow", "x-content-type-options": "nosniff" });
+                return res.end(body);
+            }
+            catch {
+                return send(res, 404, { error: "not_found" });
+            }
         }
         if (req.method === "GET" && (path === "/.well-known/oauth-protected-resource" ||
             path === `/.well-known/oauth-protected-resource${mcpPath}`)) {

@@ -62,6 +62,13 @@ async function token(o: TokenOpts = {}) {
 const mcp = (b: string, headers: Record<string, string> = {}) => fetch(`${b}/mcp`, { method: "POST", headers, body: "{}" });
 
 describe("public endpoints", () => {
+  it("serves allow-listed browser test fixtures only (Phase 1 live acceptance)", async () => {
+    const ok = await fetch(`${base}/fixtures/apply.html`);
+    expect(ok.status).toBe(200); expect(ok.headers.get("x-robots-tag")).toMatch(/noindex/);
+    expect(await ok.text()).toContain("Submit application");
+    expect((await fetch(`${base}/fixtures/../package.json`)).status).toBe(404);
+    expect((await fetch(`${base}/fixtures/secret.txt`)).status).toBe(404);
+  });
   it("serves /health without configuration or secrets", async () => {
     const res = await fetch(`${base}/health`);
     expect(res.status).toBe(200);
