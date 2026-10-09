@@ -14,7 +14,8 @@ import { createHash } from "node:crypto";
 import { appendEvent } from "../db/index.js";
 import { normOrg, dedupeKey } from "./bootstrap.js";
 import { cleanTitle, normTitle } from "./career-evidence.js";
-import { CAREER_POLICY, STATUS_RANK, isStatus, isTerminal, jobName, nextStepFor, transitionAllowed } from "./lifecycle.js";
+import { policyFor } from "../learning/apply.js";
+import { STATUS_RANK, isStatus, isTerminal, jobName, nextStepFor, transitionAllowed } from "./lifecycle.js";
 const DAY = 86_400_000;
 const sha = (s) => createHash("sha256").update(s).digest("hex").slice(0, 16);
 const clean = (s) => s.trim().replace(/\s+/g, " ");
@@ -55,11 +56,13 @@ async function objectiveOf(db, areaId) {
     const r = await db.query(`SELECT id FROM objective WHERE area_id = $1 AND status = 'open' ORDER BY created_at`, [areaId]);
     return r.rows.length === 1 ? String(r.rows[0].id) : null;
 }
-export async function reconcileJob(db, jobId, now, policy = CAREER_POLICY) {
+export async function reconcileJob(db, jobId, now, policyIn) {
     const j = (await db.query(`${JOB_SELECT} WHERE o.id = $1`, [jobId])).rows[0];
     if (!j)
         return { step: { kind: "none", rule: "missing", reason: "job not found" }, changes: [] };
     const name = jobName({ employer: employerOf(j), title: realTitle(j.title), reqId: j.requisition_id });
+    // Phase 6 (ADR-085): the Area's policy = code defaults + parameters Julian approved (never an unapproved inference).
+    const policy = policyIn ?? await policyFor(db, j.area_id);
     const step = nextStepFor(await factsOf(db, j), now, policy);
     const changes = [];
     const open = (await db.query(`SELECT id, summary, state, due_at, origin, rule FROM followup WHERE state IN ('open','waiting','overdue')
@@ -160,7 +163,7 @@ export async function lifecycleTick(db, now, opts = {}) {
 }
 async function view(db, j, now, withHistory = true) {
     const facts = await factsOf(db, j);
-    const step = nextStepFor(facts, now);
+    const step = nextStepFor(facts, now, await policyFor(db, j.area_id));
     const fu = (await db.query(`SELECT summary, due_at, origin FROM followup WHERE opportunity_id = $1 AND state IN ('open','waiting','overdue') ORDER BY due_at NULLS LAST LIMIT 1`, [j.id])).rows[0];
     const proj = j.project_id ? (await db.query(`SELECT name, status FROM project WHERE id = $1`, [j.project_id])).rows[0] : null;
     const hist = withHistory ? (await db.query(`SELECT at, kind, transition, summary, source FROM opportunity_event WHERE opportunity_id = $1 ORDER BY at, source_id LIMIT 30`, [j.id])).rows
@@ -228,12 +231,13 @@ export async function pipelineSummary(pool, areaName = "Career", now = new Date(
     ORDER BY o.last_evidence_at DESC NULLS LAST, o.id`, [a.id])).rows;
     // Live (sync chat 2026-10-09): an application started 60 days ago and never submitted was listed as "engaged", and the
     // chat told Julian "finish it or drop it". The lifecycle already closed it; it is dormant, not his task.
+    const policy = await policyFor(pool, a.id);
     const dormantRows = [];
     const engagedRows = [];
     for (const r of engagedAll)
-        (nextStepFor(await factsOf(pool, r), now).kind === "close" ? dormantRows : engagedRows).push(r);
+        (nextStepFor(await factsOf(pool, r), now, policy).kind === "close" ? dormantRows : engagedRows).push(r);
     const appliedRows = (await pool.query(`${JOB_SELECT} WHERE o.archived_at IS NULL AND o.area_id = $1 AND o.status = 'applied' ORDER BY o.last_evidence_at DESC NULLS LAST, o.id`, [a.id])).rows;
-    const live = (t) => !!t && now.getTime() - new Date(t).getTime() < CAREER_POLICY.responseDays * DAY;
+    const live = (t) => !!t && now.getTime() - new Date(t).getTime() < policy.responseDays * DAY;
     const fmt = async (r) => { const v = await view(pool, r, now, false); return `${v.job} — ${v.status}, last contact ${v.lastContact ?? "?"}${v.nextStep ? `; next: ${v.nextStep}` : ""}`; };
     const recent = (await pool.query(`SELECT ev.at, ev.kind, ev.transition, o.org, o.title, o.requisition_id, e.name AS emp FROM opportunity_event ev JOIN opportunity o ON o.id = ev.opportunity_id LEFT JOIN employer e ON e.id = o.employer_id
      WHERE o.area_id = $1 AND ev.at > $2::timestamptz - interval '7 days' ORDER BY ev.at DESC LIMIT 15`, [a.id, now])).rows
@@ -245,7 +249,7 @@ export async function pipelineSummary(pool, areaName = "Career", now = new Date(
     return {
         area: a.name, source: "Finagai job pipeline (one record per job/application; structured state, not an inbox search)",
         totals: { jobs: Object.values(by).reduce((s, n) => s + Number(n), 0), byStatus: by },
-        headline: `${engagedRows.filter((r) => r.status === "offer").length} offer(s), ${engagedRows.filter((r) => r.status === "interviewing").length} interviewing, ${engagedRows.filter((r) => r.status !== "offer" && r.status !== "interviewing").length} being prepared, ${awaiting.length} applications awaiting a response (< ${CAREER_POLICY.responseDays} days), ${silent.length} older applications with no response.`,
+        headline: `${engagedRows.filter((r) => r.status === "offer").length} offer(s), ${engagedRows.filter((r) => r.status === "interviewing").length} interviewing, ${engagedRows.filter((r) => r.status !== "offer" && r.status !== "interviewing").length} being prepared, ${awaiting.length} applications awaiting a response (< ${policy.responseDays} days), ${silent.length} older applications with no response.`,
         engaged: await Promise.all(engagedRows.map(fmt)),
         dormant: { jobs: await Promise.all(dormantRows.map(async (r) => (await view(pool, r, now, false)).job)),
             note: "started long ago and never submitted — Finagai closed these; nothing is needed from Julian unless he wants to resume one" },

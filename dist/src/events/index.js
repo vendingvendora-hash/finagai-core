@@ -1,8 +1,11 @@
 import { careerModule } from "./career.js";
 import { genericModule } from "./generic.js";
+import { learningModule } from "./learning.js";
 import { runTick } from "./engine.js";
 /** Generic watchers/reactions first, then each Area's plug-in. A new Area adds a module here — the engine is unchanged. */
-export const AREA_MODULES = [genericModule, careerModule];
+export const AREA_MODULES = [genericModule, learningModule, careerModule];
+/** Workflows a stated routing correction may send mail to: Area workflows only (never waits, deadlines or learning). */
+export const ROUTABLE_WORKFLOWS = AREA_MODULES.flatMap((m) => m.subscriptions.filter((s) => s.area !== "*").map((s) => s.workflow)).filter((w, i, a) => a.indexOf(w) === i);
 export const TICK_EVERY_MS = 5 * 60_000;
 export function startEventLoop(pool, google, notify, log) {
     const run = async () => {

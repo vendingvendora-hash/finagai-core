@@ -1,6 +1,6 @@
 {
- "count": 51,
- "digest": "1bcd83f245c7",
+ "count": 55,
+ "digest": "7c2728a0db92",
  "names": [
   "list_tools",
   "call_tool",
@@ -50,6 +50,10 @@
   "sync_career",
   "proactivity_status",
   "run_event_tick",
+  "lessons",
+  "run_learning",
+  "teach_finagai",
+  "forget_lesson",
   "executive_brief",
   "operating_review",
   "get_latest_review"

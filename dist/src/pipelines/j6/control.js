@@ -29,8 +29,9 @@ import { wrapUntrusted } from "../../browser/untrusted.js";
 import { authorize, classify as classifyAuthority, deriveEnvelope } from "../../governance/authority.js";
 import { openInteraction, linkTask, completeForTask } from "../../concierge/interactions.js";
 import { recordOnJob, trackOpportunity } from "../../cos/opportunities.js";
+import { guidanceFor } from "../../learning/apply.js";
 export const AUTHORITY_MARKER = "OUTSIDE DELEGATION — REFUSED:";
-export const J6_PROMPT_VERSION = "j6-control-v4";
+export const J6_PROMPT_VERSION = "j6-control-v5";
 export const MAX_STEPS_PER_TASK = 80;
 /** Actions that only observe. Everything else is a WRITE and needs Julian's approval. */
 export const READ_KINDS = new Set(["screenshot", "read_text", "list_apps", "list_files", "read_file", "wait", "done", "ask", "observe",
@@ -279,8 +280,21 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
     catch (e) {
         deps.log?.("resource planning failed", { error: String(e?.message ?? e).slice(0, 160) });
     }
+    // Phase 6 (ADR-085): what Finagai learned that bears on this task — ADVISORY text only. Step authority, approvals
+    // and verification are decided by code (governance/authority.ts), which learning cannot reach.
+    let learnedBlock = "";
+    try {
+        const g = await guidanceFor(pool, task.request, now);
+        learnedBlock = g.block;
+        if (g.keys.length && prior.length === 0)
+            await appendEvent(pool, { actor: "j6", action: "lesson_applied", entityType: "control_task", entityId: taskId, after: { keys: g.keys } });
+    }
+    catch (e) {
+        deps.log?.("learned guidance failed", { error: String(e?.message ?? e).slice(0, 160) });
+    }
     const percept = [
         resourceBlock,
+        learnedBlock,
         routeLine,
         ctxLine,
         // Phase 1F: page content is wrapped as UNTRUSTED data (never instructions) and scanned for injection.

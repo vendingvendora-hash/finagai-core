@@ -13,6 +13,7 @@ import type pg from "pg";
 import { appendEvent } from "../db/index.js";
 import { deliverOnce, type DeliveryStore, type EmailSender } from "../notify/delivery.js";
 import { RULE_NEEDS } from "../cos/lifecycle.js";
+import { routingOverride } from "../learning/apply.js";
 import type { AreaModule, EngineCtx, EscalationNeed, RawEvent, StoredEvent, Subscription, Workflow } from "./types.js";
 
 const LOCK_KEY = 84_005;   // pg advisory lock id for the event engine
@@ -98,13 +99,22 @@ async function tick(ctx: EngineCtx, deps: EngineDeps, result: TickResult) {
   const routesOf = new Map<string, Array<{ subscription: string; area: string; workflow: string; why: string }>>();
   for (const e of pending) {
     const routes: Array<{ subscription: string; area: string; workflow: string; why: string }> = [];
+    // Phase 6 (ADR-085): Julian's stated routing correction for this sender comes first. "ignore" silences the Areas'
+    // subscriptions only — waits and deadlines (area "*") still see the mail, so a reply still closes a wait.
+    const override = e.kind === "mail.received" ? await routingOverride(pool, e.payload).catch(() => null) : null;
+    if (override?.action === "route" && override.workflow && flows.has(override.workflow) && subs.some((s) => s.area !== "*" && s.workflow === override.workflow)) {
+      const area = subs.find((s) => s.workflow === override.workflow)!.area;
+      routes.push({ subscription: `lesson:${override.key}`, area, workflow: override.workflow, why: `Julian said mail from ${override.sender} belongs to ${override.workflow}` });
+      byFlow.set(override.workflow, [...(byFlow.get(override.workflow) ?? []), e]);
+    }
     for (const s of subs) {
+      if (override && s.area !== "*") continue;
       let why: string | null = null;
       try { why = await s.match(e, ctx); } catch (err) { why = null; ctx.log?.("subscription match failed", { sub: s.id, error: String((err as Error)?.message ?? err).slice(0, 160) }); }
       if (why) { routes.push({ subscription: s.id, area: s.area, workflow: s.workflow, why }); byFlow.set(s.workflow, [...(byFlow.get(s.workflow) ?? []), e]); }
     }
     routesOf.set(e.id, routes);
-    const reason = routes.length ? null : "no Area subscribes to this event";
+    const reason = routes.length ? null : override?.action === "ignore" ? `Julian said mail from ${override.sender} is not for any Area` : "no Area subscribes to this event";
     if (!ctx.dryRun) await pool.query(`UPDATE inbound_event SET status = $2, routes = $3::jsonb, reason = $4, handled_at = CASE WHEN $2 = 'ignored' THEN now() ELSE handled_at END WHERE id = $1`,
       [e.id, routes.length ? "routed" : "ignored", JSON.stringify(routes), reason]);
     result.events.push({ summary: e.summary, kind: e.kind, status: routes.length ? "routed" : "ignored", routes, reason });
@@ -150,6 +160,12 @@ export async function stateNeeds(db: Pick<pg.Pool, "query">, now: Date): Promise
       WHERE f.origin IN ('julian','bootstrap') AND f.state IN ('open','waiting','overdue') AND f.due_at IS NOT NULL AND f.due_at <= $1`, [now])).rows)
     out.push({ key: `overdue:${f.id}:${new Date(f.due_at).toISOString().slice(0, 10)}`, needs: "principal_reserved", areaId: f.area_id, followupId: f.id, dueAt: new Date(f.due_at).toISOString(),
       summary: `No answer from ${f.counterparty ?? "them"} by ${new Date(f.due_at).toISOString().slice(0, 10)} — approve a follow-up (Finagai drafts it; it goes out as you), give a new date, or close it`, detail: f.summary });
+  // c) Phase 6 (ADR-085): a behaviour change Finagai inferred applies only with Julian's authorization (passkey approval
+  //    of the proposal); until then it is only proposed. Resolved automatically once he decides (or it is withdrawn).
+  for (const l of (await db.query(`SELECT l.key, l.statement, l.area_id, p.id AS pid FROM lesson l JOIN proposal p ON p.id = l.proposal_id AND p.status = 'pending' WHERE l.status = 'proposed'`)).rows)
+    out.push({ key: `lesson:${l.key}:${l.pid}`, needs: "authorization", areaId: l.area_id,
+      summary: `Finagai learned something that would change how it works — approve applying it? ${String(l.statement).slice(0, 300)}`,
+      detail: `Learned-change proposal ${l.pid}: ask Finagai to show pending proposals; approving or rejecting uses request_proposal_decision (your passkey). Nothing changes until you approve.` });
   return out;
 }
 
@@ -159,7 +175,7 @@ async function reconcileEscalations(ctx: EngineCtx, needs: EscalationNeed[], res
   const open = (await pool.query(`SELECT e.id, e.key, e.summary, e.followup_id, f.state AS fstate FROM escalation e LEFT JOIN followup f ON f.id = e.followup_id WHERE e.status = 'open'`)).rows;
   // Resolve what no longer needs Julian (its follow-up closed / moved on, or a state-derived need disappeared).
   for (const o of open) {
-    const stateDerived = /^(followup|overdue):/.test(o.key);
+    const stateDerived = /^(followup|overdue|lesson):/.test(o.key);
     if ((o.followup_id && (o.fstate === "done" || o.fstate === "cancelled")) || (stateDerived && !want.has(o.key))) {
       result.escalations.resolved.push(o.summary);
       if (!ctx.dryRun) await pool.query(`UPDATE escalation SET status = 'resolved', resolved_at = now(), resolution = $2 WHERE id = $1`, [o.id, o.fstate === "done" || o.fstate === "cancelled" ? `follow-up ${o.fstate}` : "no longer needed"]);

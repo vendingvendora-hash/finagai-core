@@ -29,5 +29,6 @@
  "0028_gmail_message_content.sql": "004aac910b65fb0d5af840c1b41ab6e853ef08aa98d68398af896e970541e340",
  "0029_job_opportunity_identity.sql": "9ba0252c8a87e64fb6c697f7753f3bd2fb8a4e8ba6363a25abcf56416837e1a0",
  "0030_opportunity_lifecycle.sql": "5ef8320849d573fae08da7dd345f91b819e1ed69557595a21c76152afd5fd50c",
- "0031_event_engine.sql": "8bfc68d0887944fb8ee9c08ddc166dd5aab5d73a10fe33b339b98a276e942e6e"
+ "0031_event_engine.sql": "8bfc68d0887944fb8ee9c08ddc166dd5aab5d73a10fe33b339b98a276e942e6e",
+ "0032_learning.sql": "e5c6984b9fb7affa2a0978ef3d191eb8b2d70d4f7ce5bb70226f07016b9edbe5"
 }

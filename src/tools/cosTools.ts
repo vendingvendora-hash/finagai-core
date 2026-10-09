@@ -10,7 +10,9 @@ import { diagnosticResult, replayProposal, startStabilityJob, traceProposal } fr
 import type { GoogleSearch } from "../resources/retrieve.js";
 import { runCareerSync } from "../cos/career-sync.js";
 import { toolRef } from "./manifest.js";
-import { AREA_MODULES, proactivityStatus, runTick } from "../events/index.js";
+import { AREA_MODULES, ROUTABLE_WORKFLOWS, proactivityStatus, runTick } from "../events/index.js";
+import { listLessons, runLearning } from "../learning/index.js";
+import { forgetLesson, teachFinagai } from "../learning/teach.js";
 import { findOpportunity, inTx, pipelineSummary, recordOpportunityUpdate, trackOpportunity } from "../cos/opportunities.js";
 import { addWaiting, areaStatus, ensureArea, executiveBriefV2, placeUnderArea, resolveWaiting, setObjective, waitingOn } from "../cos/operating.js";
 
@@ -159,6 +161,39 @@ export function registerCosTools(server: McpServer, { ok, fail }: ToolHelpers, p
     description: "Run Finagai's event engine now instead of waiting for the next 5-minute tick: poll mail/calendar/deadlines, route new events to the Areas that care, run their workflows (Finagai-owned actions), and escalate only what needs Julian. preview:true computes the same tick and writes/sends nothing.",
     inputSchema: z.object({ preview: z.boolean().default(false) }),
   }, async ({ preview }) => ok("run_event_tick", await runTick(pool, { google, now: new Date(), dryRun: preview }, { modules: AREA_MODULES }, preview ? "preview" : "manual")));
+
+  // Phase 6 (ADR-085): learning — what Finagai learned (with basis, provenance, confidence, freshness), Julian's direct
+  // corrections, and forgetting. Learning never changes approvals, authority, verification or secrets handling.
+  server.registerTool("lessons", {
+    description: "\"What has Finagai learned?\" — lessons from outcomes, Julian's corrections and decisions, repeated procedures, tool/step reliability and failure recoveries. Each says its basis (observed fact from Finagai's own records / Julian said so / inference that applies only once Julian approves), confidence, freshness, provenance, and whether it is applied. Read-only.",
+    inputSchema: z.object({ status: z.enum(["active", "proposed", "approved", "rejected", "retired"]).optional(), limit: z.number().int().min(1).max(200).default(50) }),
+    annotations: { readOnlyHint: true },
+  }, async ({ status, limit }) => ok("lessons", await listLessons(pool, { ...(status ? { status } : {}), limit })));
+
+  server.registerTool("run_learning", {
+    description: "Run Finagai's learning pass now (it also runs daily on its own). preview:true computes what would be learned, proposed or retired and writes nothing. Inferred behaviour changes are only PROPOSED — they apply after Julian approves them (request_proposal_decision).",
+    inputSchema: z.object({ preview: z.boolean().default(true) }),
+  }, async ({ preview }) => ok("run_learning", await runLearning(pool, { dryRun: preview })));
+
+  server.registerTool("teach_finagai", {
+    description: `Record a correction or preference Julian STATES, applied at once: "mail from X isn't career-related" (ignore_sender), "mail from X is about my job search" (route_sender, workflow e.g. ${ROUTABLE_WORKFLOWS.join(" / ") || "an Area workflow"}), or a working preference for Mac tasks (hint). Only for Julian's own words — never infer. Cannot change approvals, verification, commitments or credentials (refused).`,
+    inputSchema: z.object({ kind: z.enum(["ignore_sender", "route_sender", "hint"]), sender: z.string().max(200).optional().describe("email address or domain"),
+      workflow: z.string().max(80).optional(), text: z.string().max(240).optional(), match: z.array(z.string().max(40)).max(6).optional().describe("words in a task request that make the hint relevant"),
+      said: z.string().max(400).optional().describe("Julian's words, verbatim") }),
+  }, async (a) => {
+    if ((a.kind === "ignore_sender" || a.kind === "route_sender") && !a.sender) return fail("teach_finagai", "sender is required");
+    if (a.kind === "route_sender" && !a.workflow) return fail("teach_finagai", `workflow is required (one of ${ROUTABLE_WORKFLOWS.join(", ")})`);
+    if (a.kind === "hint" && !a.text) return fail("teach_finagai", "text is required");
+    const t = a.kind === "ignore_sender" ? { kind: a.kind, sender: a.sender!, ...(a.said ? { said: a.said } : {}) }
+      : a.kind === "route_sender" ? { kind: a.kind, sender: a.sender!, workflow: a.workflow!, ...(a.said ? { said: a.said } : {}) }
+      : { kind: a.kind, text: a.text!, ...(a.match ? { match: a.match } : {}), ...(a.said ? { said: a.said } : {}) };
+    return out("teach_finagai", await teachFinagai(pool, t, { allowedWorkflows: ROUTABLE_WORKFLOWS, client: "claude_ai" }));
+  });
+
+  server.registerTool("forget_lesson", {
+    description: "Stop using something Finagai learned (by its key from lessons) — e.g. Julian says a lesson is wrong or no longer true. History is kept; a forgotten lesson is never revived automatically. Forgetting an approved change returns the Area to its default.",
+    inputSchema: z.object({ key: z.string().min(3).max(300), reason: z.string().min(2).max(200) }),
+  }, async ({ key, reason }) => out("forget_lesson", await forgetLesson(pool, key, reason)));
 
   server.registerTool("executive_brief", {
     description: "Julian's executive brief, management by exception: 1) decisions he must make, 2) blocked work, 3) important changes, 4) deadlines and risks, 5) what Finagai completed, 6) everything else compressed. Lead with the headline; do not pad.",

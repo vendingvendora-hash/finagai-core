@@ -14,7 +14,7 @@ export function transitionAllowed(cur, next) {
         return { ok: next === "withdrawn" }; // Julian may decline an offer; an automated rejection can't undo it
     return { ok: STATUS_RANK[next] > STATUS_RANK[cur] };
 }
-export const CAREER_POLICY = { responseDays: 14, interviewDecisionDays: 7, staleAppliedDays: 30, julianActionDays: 3 };
+export const CAREER_POLICY = { responseDays: 14, interviewDecisionDays: 7, staleAppliedDays: 30, julianActionDays: 3, nudgeWithContact: true };
 export const NEEDS_JULIAN = ["principal_reserved", "judgment", "authorization"];
 /** Lifecycle rules that put a step on Julian's plate, and why (stored follow-ups carry only the rule id). */
 export const RULE_NEEDS = {
@@ -54,15 +54,16 @@ export function nextStepFor(j, now, p = CAREER_POLICY) {
             const answerBy = day(lastContact) + p.responseDays * DAY;
             if (today < answerBy)
                 return { kind: "action", rule: "applied.awaiting_response", owner: "finagai", state: "waiting", summary: `Waiting on ${j.employer} to respond to the ${j.title ?? ""} application`.replace(/\s+/g, " "), counterparty: who,
-                    due: ymd(answerBy), reason: `last contact ${lastContact.slice(0, 10)}; no answer by ${ymd(answerBy)} ${j.contact ? `becomes your decision (nudge ${j.contact} or let it ride)` : "closes the project quietly (no named contact to nudge); the job stays in the pipeline"}` };
+                    due: ymd(answerBy), reason: `last contact ${lastContact.slice(0, 10)}; no answer by ${ymd(answerBy)} ${j.contact && p.nudgeWithContact !== false ? `becomes your decision (nudge ${j.contact} or let it ride)` : "closes the project quietly (no named contact to nudge); the job stays in the pipeline"}` };
             // Silence. A person to nudge makes it Julian's decision (until it goes stale); no person = nothing useful to do,
             // so the job quietly leaves the active list and stays in the pipeline (any new evidence brings it back).
-            if (j.contact && since < p.staleAppliedDays)
+            const nudgeable = !!j.contact && p.nudgeWithContact !== false;
+            if (nudgeable && j.contact && since < p.staleAppliedDays)
                 return { kind: "action", rule: "applied.nudge_or_let_go", owner: "julian", state: "open", summary: `Approve a follow-up to ${j.contact} about ${role} at ${j.employer}, or let it ride — no response for ${since} days (Finagai drafts it; sending as you is yours)`, counterparty: j.contact,
                     due: julianDue, reason: `${since} days without a response (≥ ${p.responseDays}); it leaves the active list after ${p.staleAppliedDays} days`,
                     needsJulian: { kind: "principal_reserved", because: "a message to the employer goes out as you" } };
             return { kind: "close", rule: "applied.no_response", outcome: `${jobName(j)}: no response ${since} days after the last contact${j.contact ? "" : " and no contact to nudge"} — kept in the pipeline as applied; new evidence reopens it`,
-                reason: j.contact ? `no response for ${since} days (≥ ${p.staleAppliedDays})` : `no response for ${since} days (≥ ${p.responseDays}) and no named contact to follow up with` };
+                reason: nudgeable ? `no response for ${since} days (≥ ${p.staleAppliedDays})` : j.contact ? `no response for ${since} days (≥ ${p.responseDays}); Julian approved not being asked about nudges` : `no response for ${since} days (≥ ${p.responseDays}) and no named contact to follow up with` };
         }
         case "preparing":
         case "ready_for_review":

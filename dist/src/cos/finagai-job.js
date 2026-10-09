@@ -5,6 +5,7 @@ import { findOpportunity, inTx, lifecycleTick, pipelineSummary } from "./opportu
 import { areaStatus, executiveBriefV2, waitingOn } from "./operating.js";
 import { TRAFFIC, liveManifest } from "../tools/manifest.js";
 import { AREA_MODULES, proactivityStatus, runTick } from "../events/index.js";
+import { listLessons, runLearning } from "../learning/index.js";
 export function parseFinagaiJob(request) {
     const m = /^\s*finagai-job:\s*(.*)$/is.exec(request);
     if (!m)
@@ -57,6 +58,10 @@ export function parseFinagaiJob(request) {
         return { kind: "events", limit: Math.min(int(rest[0], 25), 100) };
     if (c === "tick-preview")
         return { kind: "tick-preview" };
+    if (c === "lessons")
+        return { kind: "lessons", limit: Math.min(int(rest[0], 50), 200) };
+    if (c === "learning-preview")
+        return { kind: "learning-preview" };
     return { kind: "unknown", text: t.slice(0, 100) };
 }
 export async function runFinagaiJob(pool, google, job) {
@@ -98,6 +103,8 @@ export async function runFinagaiJob(pool, google, job) {
         case "area-status": return areaStatus(pool, job.area);
         case "waiting": return waitingOn(pool, null);
         case "events": return proactivityStatus(pool, job.limit);
+        case "lessons": return listLessons(pool, { limit: job.limit });
+        case "learning-preview": return runLearning(pool, { dryRun: true });
         case "tick-preview": return runTick(pool, { google, now: new Date(), dryRun: true }, { modules: AREA_MODULES }, "preview");
         case "mcp-manifest": {
             // ADR-083: what this live process registers vs what clients have fetched / tried to call.
@@ -107,7 +114,7 @@ export async function runFinagaiJob(pool, google, job) {
             const lastList = traffic.find((t) => t.action === "mcp_tools_listed");
             return { live: m, inProcess: TRAFFIC, lastToolsListServed: lastList ? { at: lastList.occurred_at, digest: lastList.after?.served, count: lastList.after?.count } : null, recentTraffic: traffic };
         }
-        case "unknown": return { error: `Unknown finagai-job "${job.text}". Allowed: stability [runs] [org,org], result <code>, trace <proposal> <org>, replay <proposal> [runs], jobs <proposal> <employer>, proposal <code>, reinterpret <code>, career-state, propose, acquisitions [n], pipeline [area], find <text>, sync-preview, lifecycle-preview, brief, area-status [area], waiting, mcp-manifest, events [n], tick-preview.` };
+        case "unknown": return { error: `Unknown finagai-job "${job.text}". Allowed: stability [runs] [org,org], result <code>, trace <proposal> <org>, replay <proposal> [runs], jobs <proposal> <employer>, proposal <code>, reinterpret <code>, career-state, propose, acquisitions [n], pipeline [area], find <text>, sync-preview, lifecycle-preview, brief, area-status [area], waiting, mcp-manifest, events [n], tick-preview, lessons [n], learning-preview.` };
     }
 }
 //# sourceMappingURL=finagai-job.js.map

@@ -76,7 +76,7 @@ describe.skipIf(!url)("MCP tool layer end to end", () => {
     const client = await connect(await token());
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
     expect(names).toEqual([
-      "apply_bootstrap", "area_status", "bootstrap_area", "bootstrap_replay", "bootstrap_stability", "bootstrap_trace", "call_tool", "capture", "control_mac", "control_result", "create_area",
+      "apply_bootstrap", "area_status", "bootstrap_area", "bootstrap_replay", "bootstrap_stability", "bootstrap_trace", "call_tool", "capture", "control_mac", "control_result", "create_area", "forget_lesson", "lessons", "run_learning", "teach_finagai",
       "diagnostic_result", "execution_metrics", "executive_brief", "find_opportunity", "get_approval_request", "get_charter", "get_item", "get_project", "get_state_overview", "list_capabilities", "list_tools",
       "list_open_conflicts", "list_pending_proposals", "mac_get_context", "mac_status", "make_mac_chart", "pending_results", "pipeline", "place_under_area", "plan_resources", "proactivity_status", "record_opportunity_update",
       "request_archival", "request_conflict_resolution", "request_proposal_decision", "request_seed_promotion", "resolve_reference", "resolve_waiting", "run_event_tick", "search_state", "seed_add_source", "seed_answer", "seed_questions",

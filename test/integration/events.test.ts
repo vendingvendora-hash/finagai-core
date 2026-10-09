@@ -11,13 +11,17 @@ import { applyBootstrap, proposeCareerBootstrap } from "../../src/cos/bootstrap.
 import { CAREER_QUERIES } from "../../src/cos/career-evidence.js";
 import { addWaiting, ensureArea, executiveBriefV2, resolveWaiting } from "../../src/cos/operating.js";
 import { PgDeliveryStore } from "../../src/db/index.js";
-import { AREA_MODULES, proactivityStatus, runTick } from "../../src/events/index.js";
+import { AREA_MODULES as ALL_MODULES, proactivityStatus, runTick } from "../../src/events/index.js";
+import { learningModule } from "../../src/events/learning.js";
 import type { EmailMessage, EmailSender } from "../../src/notify/delivery.js";
 import { ACCOUNT, REC, SHEET_CSV, fixtureRecord, linkedInRejection, LINKEDIN_SENDER, queryHits } from "../fixtures/career-2026-10-09.js";
 import type { GmailRecord } from "../../src/google/client.js";
 
 const admin = process.env.INTEGRATION_ADMIN_URL, migT = process.env.INTEGRATION_MIGRATOR_TEMPLATE, appT = process.env.INTEGRATION_APP_TEMPLATE;
 const T = new Date("2026-10-09T17:00:00Z");
+// Phase 6: the daily learning pass is an engine workflow too (covered in learning.test.ts); left out here so these
+// assertions stay about event routing and escalation (on this real evidence it would propose a response-window change).
+const AREA_MODULES = ALL_MODULES.filter((m) => m !== learningModule);
 const keyOf = (q: string) => Object.entries(CAREER_QUERIES).find(([, b]) => q.endsWith(b))?.[0];
 /** Fake Google: Career acquisition queries by key; the mail watcher's "after:<epoch s>" by date. */
 const google = (recs: () => GmailRecord[], cal: () => Array<{ id: string; start: string; summary: string }> = () => []) => ({

@@ -232,7 +232,7 @@ export async function executiveBriefV2(pool, now = new Date()) {
         decisions.push(`Mac task ${t.code}: ${t.awaiting_reason ?? t.awaiting_kind ?? "waiting for you"}${t.expires_at ? ` (expires ${new Date(t.expires_at).toISOString().slice(0, 16).replace("T", " ")} UTC)` : ""}`);
     for (const g of (await pool.query(`SELECT action, count(*)::int AS n FROM governance_request WHERE status = 'pending' AND expires_at > now() GROUP BY action`)).rows)
         decisions.push(`${g.n} pending approval(s): ${String(g.action).replace(/_/g, " ")}`);
-    for (const p of (await pool.query(`SELECT count(*)::int AS n FROM proposal WHERE status = 'pending'`).catch(() => ({ rows: [{ n: 0 }] }))).rows)
+    for (const p of (await pool.query(`SELECT count(*)::int AS n FROM proposal WHERE status = 'pending' AND target_type IS DISTINCT FROM 'lesson'`).catch(() => ({ rows: [{ n: 0 }] }))).rows)
         if (p.n)
             decisions.push(`${p.n} pending proposal(s) to review`);
     // Phase 5 (ADR-084): what genuinely needs Julian (judgment / authorization / principal-reserved), as escalated by the
@@ -273,6 +273,11 @@ export async function executiveBriefV2(pool, now = new Date()) {
       FROM inbound_event WHERE received_at > now() - interval '24 hours'`)).rows[0];
     if (handled && (handled.h || handled.f))
         changes.push(`Finagai handled ${handled.h} event(s) on its own in the last 24 h${handled.f ? `; ${handled.f} failed and will be retried` : ""} (${handled.i} unrelated ignored)`);
+    // Phase 6 (ADR-085): what Finagai learned in the last 48 h (observed facts and Julian's own words; inferences that
+    // need his approval are escalated as decisions instead).
+    const learnt = (await pool.query(`SELECT basis, statement FROM lesson WHERE status = 'active' AND basis IN ('observed','stated') AND created_at > now() - interval '48 hours' ORDER BY created_at DESC LIMIT 4`).catch(() => ({ rows: [] }))).rows;
+    if (learnt.length)
+        changes.push(`Finagai learned: ${learnt.map((l) => `${l.statement}${l.basis === "stated" ? " (you said so)" : ""}`).join(" · ").slice(0, 600)}`);
     const closedProjects = (await pool.query(`SELECT count(*)::int AS n FROM event WHERE action = 'project_completed' AND occurred_at > now() - interval '48 hours'`)).rows[0]?.n ?? 0;
     if (closedProjects)
         changes.push(`${closedProjects} job project(s) closed by the lifecycle (rejected, withdrawn, or no response and nobody to nudge — they stay in the pipeline)`);
