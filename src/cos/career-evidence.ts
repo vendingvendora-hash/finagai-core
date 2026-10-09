@@ -38,7 +38,7 @@ export const CAREER_QUERIES: Record<string, string> = {
 export const CALENDAR_QUERIES = ["interview", "screen"];
 export const GMAIL_MAX = 2000;
 
-export interface GmailAcquisition { key: string; query: string; account: string; ok: boolean; error?: string; pages: number; truncated: boolean; ids: number; vanished: string[]; records: GmailRecord[] }
+export interface GmailAcquisition { key: string; query: string; account: string; ok: boolean; error?: string; pages: number; truncated: boolean; ids: number; vanished: string[]; records: GmailRecord[]; fetched?: number; reused?: number }
 export interface CarryForward { account: string; fromSnapshot: string; requested: number; ok: boolean; error?: string; records: GmailRecord[]; missing: Array<{ id: string; reason: string }> }
 export interface CalendarAcquisition { query: string; account: string; ok: boolean; error?: string; pages: number; records: CalendarRecord[] }
 export interface CareerSnapshot {
@@ -52,11 +52,13 @@ export interface CareerSnapshot {
   completeness: { complete: boolean; problems: string[]; searchMisses: number };
 }
 
+/** Immutable message content already extracted (by account, then message id) and a sink for newly fetched content. */
+export interface ContentCache { known?: Map<string, Map<string, GmailRecord>>; onFetched?: (account: string, r: GmailRecord) => void }
 type SheetHit = { id?: string; name: string; csv: string; modified: string; account?: string; candidates?: Array<{ id: string; name: string; modified: string; account?: string }>; errors?: string[] };
 export interface CareerSources {
   sheetCsv?(title: string, preferId?: string): Promise<SheetHit | null>;
-  gmailEnumerate?(q: string, opts?: { maxMessages?: number }): Promise<Array<{ account: string; ok: boolean; error?: string; records: GmailRecord[]; pages: number; truncated: boolean; ids: number; vanished?: string[] }>>;
-  gmailMetadata?(account: string, ids: string[]): Promise<{ records: GmailRecord[]; missing: Array<{ id: string; reason: string }> }>;
+  gmailEnumerate?(q: string, opts?: { maxMessages?: number } & ContentCache): Promise<Array<{ account: string; ok: boolean; error?: string; records: GmailRecord[]; pages: number; truncated: boolean; ids: number; vanished?: string[]; fetched?: number; reused?: number }>>;
+  gmailMetadata?(account: string, ids: string[], opts?: ContentCache): Promise<{ records: GmailRecord[]; missing: Array<{ id: string; reason: string }> }>;
   calendarEnumerate?(q: string, timeMin: string, timeMax: string): Promise<Array<{ account: string; ok: boolean; error?: string; records: CalendarRecord[]; pages: number }>>;
 }
 
@@ -77,7 +79,7 @@ export function canonical(v: unknown): string {
  * previously seen Gmail record be RE-VERIFIED by id when a search does not return it: evidence can only leave the
  * snapshot if it was deleted/trashed at the source (recorded with the reason), never because of search behaviour.
  */
-export async function acquireCareerSnapshot(src: CareerSources, sheetTitle: string, now = new Date(), prev?: { digest: string; snapshot: CareerSnapshot } | null): Promise<CareerSnapshot> {
+export async function acquireCareerSnapshot(src: CareerSources, sheetTitle: string, now = new Date(), prev?: { digest: string; snapshot: CareerSnapshot } | null, cache: ContentCache = {}): Promise<CareerSnapshot> {
   const day = 86_400_000;
   const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const window = { gmailAfter: CAREER_EPOCH, calendarFrom: `${CAREER_EPOCH.replace(/\//g, "-")}T00:00:00.000Z`, calendarTo: new Date(today + CALENDAR_AHEAD_DAYS * day).toISOString() };
@@ -100,11 +102,12 @@ export async function acquireCareerSnapshot(src: CareerSources, sheetTitle: stri
     const q = `after:${window.gmailAfter} ${base}`;
     let per: Awaited<ReturnType<NonNullable<CareerSources["gmailEnumerate"]>>> = [];
     if (src.gmailEnumerate) {
-      try { per = await src.gmailEnumerate(q, { maxMessages: GMAIL_MAX }); }
+      try { per = await src.gmailEnumerate(q, { maxMessages: GMAIL_MAX, ...cache }); }
       catch (e) { problems.push(`gmail ${key}: ${errText(e)}`); }
     } else problems.push("gmail: no source");
     for (const p of per) {
-      gmail.push({ key, query: q, account: p.account, ok: p.ok, ...(p.error ? { error: p.error } : {}), pages: p.pages, truncated: p.truncated, ids: p.ids, vanished: [...(p.vanished ?? [])].sort(), records: p.records });
+      gmail.push({ key, query: q, account: p.account, ok: p.ok, ...(p.error ? { error: p.error } : {}), pages: p.pages, truncated: p.truncated, ids: p.ids, vanished: [...(p.vanished ?? [])].sort(), records: p.records,
+        ...(p.fetched !== undefined ? { fetched: p.fetched, reused: p.reused ?? 0 } : {}) });
       if (!p.ok) problems.push(`gmail ${key} @ ${p.account}: ${p.error}`);
       if (p.truncated) problems.push(`gmail ${key} @ ${p.account}: truncated at ${p.records.length} messages`);
     }
@@ -122,7 +125,7 @@ export async function acquireCareerSnapshot(src: CareerSources, sheetTitle: stri
       const ids = [...want.get(account)!].sort();
       searchMisses += ids.length;
       if (!src.gmailMetadata) { carryForward.push({ account, fromSnapshot: prev.digest, requested: ids.length, ok: false, error: "no re-verification source", records: [], missing: [] }); problems.push(`carry-forward @ ${account}: no re-verification source`); continue; }
-      try { const r = await src.gmailMetadata(account, ids); carryForward.push({ account, fromSnapshot: prev.digest, requested: ids.length, ok: true, records: r.records, missing: r.missing }); }
+      try { const r = await src.gmailMetadata(account, ids, cache); carryForward.push({ account, fromSnapshot: prev.digest, requested: ids.length, ok: true, records: r.records, missing: r.missing }); }
       catch (e) { carryForward.push({ account, fromSnapshot: prev.digest, requested: ids.length, ok: false, error: errText(e), records: [], missing: [] }); problems.push(`carry-forward @ ${account}: ${errText(e)}`); }
     }
   }

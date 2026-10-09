@@ -85,20 +85,22 @@ export class MultiGoogleClient {
         return { id: pick.id, name: pick.name, csv: pick.csv, modified: pick.modified, account: pick.account, candidates, errors };
     }
     /** Per-account enumeration with per-account outcome (success OR recorded error) — nothing is dropped silently. */
+    /** opts.known / onFetched are keyed by account: content cache shared across runs (ADR-080). */
     async gmailEnumerate(q, opts = {}) {
         return Promise.all(this.members.map(async (m) => {
             let account = m.label ?? "unverified account";
             try {
                 account = await this.strictLabel(m);
-                return { account, ok: true, ...(await m.client.gmailEnumerate(q, opts)) };
+                const acct = account;
+                return { account, ok: true, ...(await m.client.gmailEnumerate(q, { ...(opts.maxMessages ? { maxMessages: opts.maxMessages } : {}), ...(opts.known?.get(acct) ? { known: opts.known.get(acct) } : {}), onFetched: (r) => opts.onFetched?.(acct, r) })) };
             }
             catch (e) {
-                return { account, ok: false, error: String(e?.message ?? e).slice(0, 200), records: [], pages: 0, truncated: false, ids: 0, vanished: [] };
+                return { account, ok: false, error: String(e?.message ?? e).slice(0, 200), records: [], pages: 0, truncated: false, ids: 0, vanished: [], fetched: 0, reused: 0 };
             }
         }));
     }
     /** Re-verify specific message ids in one named account (carry-forward of previously seen evidence). */
-    async gmailMetadata(account, ids) {
+    async gmailMetadata(account, ids, opts = {}) {
         for (const m of this.members) {
             let label;
             try {
@@ -108,7 +110,7 @@ export class MultiGoogleClient {
                 continue;
             }
             if (label === account)
-                return m.client.gmailMetadata(ids);
+                return m.client.gmailMetadata(ids, { ...(opts.known?.get(account) ? { known: opts.known.get(account) } : {}), onFetched: (r) => opts.onFetched?.(account, r) });
         }
         throw new Error(`account ${account} is not connected (or its identity could not be verified)`);
     }

@@ -51,7 +51,7 @@ export function canonical(v) {
  * previously seen Gmail record be RE-VERIFIED by id when a search does not return it: evidence can only leave the
  * snapshot if it was deleted/trashed at the source (recorded with the reason), never because of search behaviour.
  */
-export async function acquireCareerSnapshot(src, sheetTitle, now = new Date(), prev) {
+export async function acquireCareerSnapshot(src, sheetTitle, now = new Date(), prev, cache = {}) {
     const day = 86_400_000;
     const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
     const window = { gmailAfter: CAREER_EPOCH, calendarFrom: `${CAREER_EPOCH.replace(/\//g, "-")}T00:00:00.000Z`, calendarTo: new Date(today + CALENDAR_AHEAD_DAYS * day).toISOString() };
@@ -80,7 +80,7 @@ export async function acquireCareerSnapshot(src, sheetTitle, now = new Date(), p
         let per = [];
         if (src.gmailEnumerate) {
             try {
-                per = await src.gmailEnumerate(q, { maxMessages: GMAIL_MAX });
+                per = await src.gmailEnumerate(q, { maxMessages: GMAIL_MAX, ...cache });
             }
             catch (e) {
                 problems.push(`gmail ${key}: ${errText(e)}`);
@@ -89,7 +89,8 @@ export async function acquireCareerSnapshot(src, sheetTitle, now = new Date(), p
         else
             problems.push("gmail: no source");
         for (const p of per) {
-            gmail.push({ key, query: q, account: p.account, ok: p.ok, ...(p.error ? { error: p.error } : {}), pages: p.pages, truncated: p.truncated, ids: p.ids, vanished: [...(p.vanished ?? [])].sort(), records: p.records });
+            gmail.push({ key, query: q, account: p.account, ok: p.ok, ...(p.error ? { error: p.error } : {}), pages: p.pages, truncated: p.truncated, ids: p.ids, vanished: [...(p.vanished ?? [])].sort(), records: p.records,
+                ...(p.fetched !== undefined ? { fetched: p.fetched, reused: p.reused ?? 0 } : {}) });
             if (!p.ok)
                 problems.push(`gmail ${key} @ ${p.account}: ${p.error}`);
             if (p.truncated)
@@ -115,7 +116,7 @@ export async function acquireCareerSnapshot(src, sheetTitle, now = new Date(), p
                 continue;
             }
             try {
-                const r = await src.gmailMetadata(account, ids);
+                const r = await src.gmailMetadata(account, ids, cache);
                 carryForward.push({ account, fromSnapshot: prev.digest, requested: ids.length, ok: true, records: r.records, missing: r.missing });
             }
             catch (e) {

@@ -98,7 +98,7 @@ export class GoogleClient {
    * failures are retried and otherwise THROWN — never silently dropped (the old ranked top-8 + catch→[] path let new
    * mail displace old evidence and hid 429s). Output is sorted by (internalDate, id), so order never depends on the API.
    */
-  async gmailEnumerate(q: string, opts: { maxMessages?: number; pageSize?: number } = {}): Promise<{ records: GmailRecord[]; pages: number; truncated: boolean; ids: number; vanished: string[] }> {
+  async gmailEnumerate(q: string, opts: { maxMessages?: number; pageSize?: number } & ContentOpts = {}): Promise<{ records: GmailRecord[]; pages: number; truncated: boolean; ids: number; vanished: string[]; fetched: number; reused: number }> {
     const max = opts.maxMessages ?? 2000, size = Math.min(opts.pageSize ?? 100, 500);
     const ids: Array<{ id: string; threadId?: string }> = [];
     let pageToken: string | undefined; let pages = 0; let truncated = false;
@@ -113,8 +113,9 @@ export class GoogleClient {
     const take = ids.slice(0, max);
     // De-duplicate ids defensively (a message can surface on two pages if the mailbox changes mid-pagination).
     const uniq = [...new Map(ids.slice(0, max).map((m) => [m.id, m])).values()];
-    const { records, missing } = await this.gmailMetadata(uniq.map((m) => m.id));
-    return { records, pages, truncated, ids: ids.length, vanished: missing.map((m) => m.id) };
+    // A listed id is present and not in trash/spam (search excludes them), so known immutable content is reused as is.
+    const { records, missing, fetched, reused } = await this.gmailMetadata(uniq.map((m) => m.id), { ...opts, listed: true });
+    return { records, pages, truncated, ids: ids.length, vanished: missing.map((m) => m.id), fetched, reused };
   }
 
   /**
@@ -122,27 +123,38 @@ export class GoogleClient {
    * not return). A message deleted/trashed/spammed since is reported as missing with the reason; anything else
    * that fails is thrown. Output sorted by (internalDate, id).
    */
-  async gmailMetadata(ids: string[]): Promise<{ records: GmailRecord[]; missing: Array<{ id: string; reason: string }> }> {
+  async gmailMetadata(ids: string[], opts: ContentOpts & { listed?: boolean } = {}): Promise<{ records: GmailRecord[]; missing: Array<{ id: string; reason: string }>; fetched: number; reused: number }> {
     const slots: Array<GmailRecord | { missing: string } | undefined> = new Array(ids.length);
-    let next = 0;
+    let next = 0, fetched = 0, reused = 0, failure: unknown = null;
+    const gone = (e: unknown) => /HTTP (404|410)\b/.test(String((e as Error).message));
     const worker = async () => {
-      while (next < ids.length) {
+      while (next < ids.length && !failure) {
         const i = next++; const id = ids[i]!;
-        let msg: GmailMessage & { threadId?: string; labelIds?: string[] };
-        try { msg = await this.jsonRetry(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`); }
-        catch (e) { if (/HTTP (404|410)\b/.test(String((e as Error).message))) { slots[i] = { missing: "deleted at source" }; continue; } throw e; }
-        if (msg.labelIds?.some((l) => l === "TRASH" || l === "SPAM")) { slots[i] = { missing: `moved to ${msg.labelIds.includes("TRASH") ? "trash" : "spam"}` }; continue; }
-        const h = (n: string) => msg.payload?.headers?.find((x) => x.name.toLowerCase() === n)?.value ?? "";
-        const mt = messageText(msg.payload);
-        slots[i] = { id, threadId: msg.threadId ?? id, internalDate: Number(msg.internalDate), subject: h("subject"), from: h("from"), snippet: (msg.snippet ?? "").slice(0, 400), body: mt.text, templates: mt.templates };
+        const cached = opts.known?.get(id);
+        try {
+          if (cached) {
+            // Content is immutable; only presence/labels can change. Listed ids are present by definition; others are checked cheaply.
+            if (!opts.listed) {
+              const m = await this.jsonRetry<{ labelIds?: string[] }>(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=minimal`);
+              if (m.labelIds?.some((l) => l === "TRASH" || l === "SPAM")) { slots[i] = { missing: `moved to ${m.labelIds.includes("TRASH") ? "trash" : "spam"}` }; continue; }
+            }
+            slots[i] = cached; reused++; continue;
+          }
+          const msg = await this.jsonRetry<GmailMessage & { threadId?: string; labelIds?: string[] }>(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`);
+          if (msg.labelIds?.some((l) => l === "TRASH" || l === "SPAM")) { slots[i] = { missing: `moved to ${msg.labelIds.includes("TRASH") ? "trash" : "spam"}` }; continue; }
+          const h = (n: string) => msg.payload?.headers?.find((x) => x.name.toLowerCase() === n)?.value ?? "";
+          const mt = messageText(msg.payload);
+          const rec: GmailRecord = { id, threadId: msg.threadId ?? id, internalDate: Number(msg.internalDate), subject: h("subject"), from: h("from"), snippet: (msg.snippet ?? "").slice(0, 400), body: mt.text, templates: mt.templates };
+          slots[i] = rec; fetched++; opts.onFetched?.(rec);   // persisted by the caller even if a later message fails
+        } catch (e) { if (gone(e)) { slots[i] = { missing: "deleted at source" }; continue; } failure = e; }
       }
     };
-    // 5 workers: messages.get costs 5 quota units; Gmail allows 250 units/user/second.
-    await Promise.all(Array.from({ length: Math.min(5, ids.length) }, worker));
+    await Promise.all(Array.from({ length: Math.min(3, ids.length) }, worker));
+    if (failure) throw failure;
     const records: GmailRecord[] = []; const missing: Array<{ id: string; reason: string }> = [];
     slots.forEach((s, i) => { if (!s) return; if ("missing" in s) missing.push({ id: ids[i]!, reason: s.missing }); else records.push(s); });
     records.sort((a, b) => a.internalDate - b.internalDate || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    return { records, missing: missing.sort((a, b) => a.id.localeCompare(b.id)) };
+    return { records, missing: missing.sort((a, b) => a.id.localeCompare(b.id)), fetched, reused };
   }
 
   /** Calendar events matching `q` in [timeMin, timeMax), paginated, sorted by (start, id). Same no-silent-drop rule. */
@@ -178,6 +190,13 @@ export class GoogleClient {
       last = new Error(`google ${new URL(url).hostname} HTTP ${r.status}${reason ? ` ${reason}` : ""}`);
       const retryable = r.status === 429 || r.status >= 500 || (r.status === 403 && /rate|quota|concurren|backend/i.test(reason + body.slice(0, 300)));
       if (!retryable) throw last;                                                                                // permanent: surface now
+      // Gmail puts the lift time in the message: "User-rate limit exceeded.  Retry after 2026-10-09T19:15:31.123Z".
+      const until = /Retry after (\d{4}-\d{2}-\d{2}T[\d:.]+Z)/.exec(body)?.[1];
+      if (until) {
+        const wait = Date.parse(until) - Date.now();
+        if (wait > 60_000) throw new Error(`google ${new URL(url).hostname} HTTP ${r.status} ${reason || "rate limited"} until ${until}`);
+        await sleep(Math.max(wait, 500)); continue;
+      }
       const ra = Number(r.headers.get("retry-after"));
       await sleep(Number.isFinite(ra) && ra > 0 ? Math.min(ra * 1000, 30_000) : 500 * 2 ** i);
     }
@@ -187,7 +206,7 @@ export class GoogleClient {
   /** Minimum spacing between paced API calls from this client (≈20 req/s ⇒ ≤100 Gmail quota units/s). */
   private nextSlot = 0;
   private async pace(): Promise<void> {
-    const now = Date.now(); const at = Math.max(now, this.nextSlot); this.nextSlot = at + 50;
+    const now = Date.now(); const at = Math.max(now, this.nextSlot); this.nextSlot = at + 120;   // ≈8 req/s ⇒ ≤40 Gmail units/s
     if (at > now) await sleep(at - now);
   }
 
@@ -258,6 +277,10 @@ interface GmailMessage { internalDate: string; snippet?: string; payload?: Gmail
 /** body: deterministic plain text of the message (URLs removed, ≤2000 chars; HTML text appended when the text part is
  *  a stub). templates: notification template ids found in the raw parts (LinkedIn "jobs_application_rejected_01" — the
  *  only place a LinkedIn rejection is machine-readable: its subject reads like an application confirmation). */
+/** Body extraction version: cached message content is only reused when it was derived by the same extractor. */
+export const GMAIL_EXTRACTOR = "body-1";
+/** Message content is immutable, so content fetched once (in any run, even a failed one) is reused by id. */
+export interface ContentOpts { known?: Map<string, GmailRecord>; onFetched?: (r: GmailRecord) => void }
 export interface GmailRecord { id: string; threadId: string; internalDate: number; subject: string; from: string; snippet: string; body?: string; templates?: string[] }
 export interface CalendarRecord { id: string; start: string; summary: string }
 export interface GmailMeta { id: string; threadId?: string; subject: string; from: string; date: string; internalDate: number; bulk: boolean; snippet: string }

@@ -6,7 +6,7 @@
  * (one revoked token never hides the others' data).
  */
 import type { FileExcerpt } from "../pipelines/j5/concierge.js";
-import { GoogleClient, type GoogleConfig } from "./client.js";
+import { GoogleClient, type GoogleConfig, type GmailRecord } from "./client.js";
 
 type Fetch = typeof fetch;
 interface Member { client: GoogleClient; label: string | null }
@@ -87,19 +87,22 @@ export class MultiGoogleClient {
   }
 
   /** Per-account enumeration with per-account outcome (success OR recorded error) — nothing is dropped silently. */
-  async gmailEnumerate(q: string, opts: { maxMessages?: number } = {}) {
+  /** opts.known / onFetched are keyed by account: content cache shared across runs (ADR-080). */
+  async gmailEnumerate(q: string, opts: { maxMessages?: number; known?: Map<string, Map<string, GmailRecord>>; onFetched?: (account: string, r: GmailRecord) => void } = {}) {
     return Promise.all(this.members.map(async (m) => {
       let account = m.label ?? "unverified account";
-      try { account = await this.strictLabel(m); return { account, ok: true as const, ...(await m.client.gmailEnumerate(q, opts)) }; }
-      catch (e) { return { account, ok: false as const, error: String((e as Error)?.message ?? e).slice(0, 200), records: [], pages: 0, truncated: false, ids: 0, vanished: [] as string[] }; }
+      try {
+        account = await this.strictLabel(m); const acct = account;
+        return { account, ok: true as const, ...(await m.client.gmailEnumerate(q, { ...(opts.maxMessages ? { maxMessages: opts.maxMessages } : {}), ...(opts.known?.get(acct) ? { known: opts.known.get(acct)! } : {}), onFetched: (r) => opts.onFetched?.(acct, r) })) };
+      } catch (e) { return { account, ok: false as const, error: String((e as Error)?.message ?? e).slice(0, 200), records: [], pages: 0, truncated: false, ids: 0, vanished: [] as string[], fetched: 0, reused: 0 }; }
     }));
   }
   /** Re-verify specific message ids in one named account (carry-forward of previously seen evidence). */
-  async gmailMetadata(account: string, ids: string[]) {
+  async gmailMetadata(account: string, ids: string[], opts: { known?: Map<string, Map<string, GmailRecord>>; onFetched?: (account: string, r: GmailRecord) => void } = {}) {
     for (const m of this.members) {
       let label: string;
       try { label = await this.strictLabel(m); } catch { continue; }
-      if (label === account) return m.client.gmailMetadata(ids);
+      if (label === account) return m.client.gmailMetadata(ids, { ...(opts.known?.get(account) ? { known: opts.known.get(account)! } : {}), onFetched: (r) => opts.onFetched?.(account, r) });
     }
     throw new Error(`account ${account} is not connected (or its identity could not be verified)`);
   }

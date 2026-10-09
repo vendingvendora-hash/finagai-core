@@ -99,3 +99,37 @@ describe("Gmail 403 handling (live 2026-10-09: exhaustive acquisition hit the pe
     await expect(client(f).gmailEnumerate("q")).rejects.toThrow(/HTTP 403 insufficientPermissions/);
   });
 });
+
+describe("immutable content reuse (ADR-080 live: re-fetching every body each run hit the Gmail rate limit)", () => {
+  it("listed ids with known content are not fetched; new ones are fetched and handed to onFetched", async () => {
+    const { f, calls } = mailbox();
+    const c = client(f);
+    const first = await c.gmailEnumerate("q");
+    const known = new Map(first.records.slice(0, 5).map((r) => [r.id, r]));
+    const stored: string[] = [];
+    calls.length = 0;
+    const second = await c.gmailEnumerate("q", { known, onFetched: (r) => stored.push(r.id) });
+    expect(second).toEqual(expect.objectContaining({ fetched: 2, reused: 5 }));
+    expect(second.records).toEqual(first.records);                                    // identical content either way
+    expect(calls.filter((u) => /messages\/m\d/.test(u)).length).toBe(2);
+    expect(stored.sort()).toEqual(first.records.slice(5).map((r) => r.id).sort());
+  });
+  it("carry-forward of known content still verifies presence (format=minimal) and reports trash", async () => {
+    const { f, calls } = mailbox({ trashed: ["m1"] });
+    const c = client(f);
+    const base = (await client(mailbox().f).gmailMetadata(["m0", "m1"])).records;
+    calls.length = 0;
+    const r = await c.gmailMetadata(["m0", "m1"], { known: new Map(base.map((x) => [x.id, x])) });
+    expect(r.records.map((x) => x.id)).toEqual(["m0"]); expect(r.missing).toEqual([{ id: "m1", reason: "moved to trash" }]);
+    expect(calls.filter((u) => u.includes("format=minimal")).length).toBe(2);
+    expect(calls.some((u) => u.includes("format=full"))).toBe(false);
+  });
+  it("content fetched before a failure is still handed over (acquisition converges across failed runs)", async () => {
+    const { f } = mailbox({ gone: [] });
+    let n = 0;
+    const failing = (async (input: RequestInfo | URL, init?: RequestInit) => { if (/messages\/m[56]/.test(String(input))) { n++; return new Response(JSON.stringify({ error: { errors: [{ reason: "forbidden" }] } }), { status: 403 }); } return f(input, init); }) as typeof fetch;
+    const stored: string[] = [];
+    await expect(client(failing).gmailEnumerate("q", { onFetched: (r) => stored.push(r.id) })).rejects.toThrow(/HTTP 403 forbidden/);
+    expect(stored.length).toBeGreaterThanOrEqual(1); expect(n).toBeGreaterThan(0);
+  });
+});

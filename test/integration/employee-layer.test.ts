@@ -66,7 +66,10 @@ describe.skipIf(!pool)("Career bootstrap (ADR-080): acquire → snapshot → int
   const keyOf = (q: string) => Object.entries(CAREER_QUERIES).find(([, b]) => q.endsWith(b))![0];
   const google = (recs: GmailRecord[], omit = new Set<string>()) => ({
     sheetCsv: async () => ({ id: "sheet-1", name: "Vendora Career Copilot - Job History", modified: "2026-10-09T16:29:38Z", account: "vending.vendora@gmail.com", csv: SHEET_CSV }),
-    gmailEnumerate: async (q: string) => { const h = queryHits(keyOf(q), recs).filter((x) => !omit.has(x.id)); return [{ account: ACCOUNT, ok: true, records: h, pages: 1, truncated: false, ids: h.length, vanished: [] }]; },
+    gmailEnumerate: async (q: string, o: { known?: Map<string, Map<string, GmailRecord>>; onFetched?: (a: string, r: GmailRecord) => void } = {}) => {
+      const h = queryHits(keyOf(q), recs).filter((x) => !omit.has(x.id)); let fetched = 0, reused = 0;
+      const out = h.map((x) => { const k = o.known?.get(ACCOUNT)?.get(x.id); if (k) { reused++; return k; } fetched++; o.onFetched?.(ACCOUNT, x); return x; });
+      return [{ account: ACCOUNT, ok: true, records: out, pages: 1, truncated: false, ids: h.length, vanished: [], fetched, reused }]; },
     gmailMetadata: async (_a: string, ids: string[]) => ({ records: recs.filter((x) => ids.includes(x.id)), missing: ids.filter((id) => !recs.some((x) => x.id === id)).map((id) => ({ id, reason: "deleted at source" })) }),
     calendarEnumerate: async (q: string) => [{ account: ACCOUNT, ok: true, pages: 1, records: q === "interview" ? [{ id: "cal-1", start: "2026-09-28T15:00:00-04:00", summary: "Interview with Altarum / Julian David Perez Cardozo - Pricing Analyst" }] : [] }],
   });
@@ -85,6 +88,9 @@ describe.skipIf(!pool)("Career bootstrap (ADR-080): acquire → snapshot → int
   });
   it("same sources again → same snapshot row, same digests; a search that drops Transurban is healed by carry-forward", async () => {
     const a = await proposeCareerBootstrap(pool!, google(BEFORE) as never, new Date(T.getTime() + 60_000));
+    const st = (await pool!.query(`SELECT stats FROM evidence_acquisition ORDER BY acquired_at DESC LIMIT 1`)).rows[0].stats;
+    expect(st.gmail.every((g: { fetched: number }) => g.fetched === 0)).toBe(true);           // all content reused from run 1
+    expect((await pool!.query(`SELECT count(*)::int AS n FROM gmail_message_content`)).rows[0].n).toBe(st.contentCache.known);
     const b = await proposeCareerBootstrap(pool!, google(BEFORE, new Set([REC.transSent1002.id, REC.transViewed1002.id, REC.transSenior1002.id])) as never, new Date(T.getTime() + 120_000));
     expect(b.summary.provenance!.snapshotDigest).toBe(a.summary.provenance!.snapshotDigest);
     expect(b.summary.provenance!.opportunitySetDigest).toBe(a.summary.provenance!.opportunitySetDigest);

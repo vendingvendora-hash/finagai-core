@@ -11,6 +11,7 @@
 import type pg from "pg";
 import { appendEvent, withTransaction } from "../db/index.js";
 import type { GoogleSearch } from "../resources/retrieve.js";
+import { GMAIL_EXTRACTOR, type GmailRecord } from "../google/client.js";
 import { ensureArea } from "./operating.js";
 import { acquireCareerSnapshot, evidenceRecords, interpretCareer, interpretationDigest, opportunitySetDigest, snapshotDelta, snapshotDigest, INTERPRETER_VERSION,
   type CareerInterpretation, type CareerSnapshot, type CareerSources, type SnapshotDelta } from "./career-evidence.js";
@@ -147,13 +148,24 @@ export async function latestCareerSnapshot(pool: pg.Pool, area = "Career"): Prom
 /** ACQUIRE + store (content-addressed) + record the run. Never interprets. */
 export async function acquireAndStoreCareer(pool: pg.Pool, google: CareerSources, now = new Date()) {
   const prev = await latestCareerSnapshot(pool);
-  const snapshot = await acquireCareerSnapshot(google, CAREER_SHEET, now, prev ? { digest: prev.digest, snapshot: prev.snapshot } : null);
+  // Immutable message content from earlier runs (same extractor) is reused; new content is stored even if this run fails.
+  const known = new Map<string, Map<string, GmailRecord>>();
+  for (const r of (await pool.query(`SELECT account, message_id, record FROM gmail_message_content WHERE extractor_version = $1`, [GMAIL_EXTRACTOR])).rows)
+    (known.get(r.account) ?? known.set(r.account, new Map()).get(r.account)!).set(r.message_id, r.record as GmailRecord);
+  const fresh: Array<[string, GmailRecord]> = [];
+  let snapshot: CareerSnapshot;
+  try { snapshot = await acquireCareerSnapshot(google, CAREER_SHEET, now, prev ? { digest: prev.digest, snapshot: prev.snapshot } : null, { known, onFetched: (a, r) => fresh.push([a, r]) }); }
+  finally {
+    for (const [account, rec] of fresh)
+      await pool.query(`INSERT INTO gmail_message_content (account, message_id, extractor_version, record) VALUES ($1, $2, $3, $4::jsonb) ON CONFLICT DO NOTHING`, [account, rec.id, GMAIL_EXTRACTOR, JSON.stringify(rec)]);
+  }
   const digest = snapshotDigest(snapshot);
   const records = evidenceRecords(snapshot).length;
   const ins = await pool.query(`INSERT INTO evidence_snapshot (area, digest, interpreter_version, acquired_at, complete, record_count, payload) VALUES ('Career', $1, $2, $3, $4, $5, $6::jsonb)
     ON CONFLICT (area, digest) DO UPDATE SET area = EXCLUDED.area RETURNING id`, [digest, INTERPRETER_VERSION, snapshot.acquiredAt, snapshot.completeness.complete, records, JSON.stringify(snapshot)]);
   const snapshotId = String(ins.rows[0].id);
-  const stats = { gmail: snapshot.gmail.map((g) => ({ key: g.key, account: g.account, ok: g.ok, pages: g.pages, ids: g.ids, records: g.records.length, truncated: g.truncated, vanished: g.vanished.length })),
+  const stats = { gmail: snapshot.gmail.map((g) => ({ key: g.key, account: g.account, ok: g.ok, ...(g.error ? { error: g.error } : {}), pages: g.pages, ids: g.ids, records: g.records.length, truncated: g.truncated, vanished: g.vanished.length, fetched: g.fetched ?? null, reused: g.reused ?? null })),
+    contentCache: { known: [...known.values()].reduce((n, m) => n + m.size, 0), newlyStored: fresh.length },
     carryForward: snapshot.carryForward.map((c) => ({ account: c.account, requested: c.requested, recovered: c.records.length, missing: c.missing })),
     // Exact source record ids of THIS run (the stored snapshot is content-addressed and may come from an earlier run).
     ids: Object.fromEntries([...snapshot.gmail.map((g) => [`${g.key}@${g.account}`, g.records.map((r) => r.id).sort()]),
