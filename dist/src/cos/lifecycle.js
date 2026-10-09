@@ -58,6 +58,9 @@ export function nextStepFor(j, now, p = CAREER_POLICY) {
         }
         case "preparing":
         case "ready_for_review":
+            // An application started long ago and never submitted (live: Amazon 10461970, started 8/10) is not a live task.
+            if (since >= p.staleAppliedDays)
+                return { kind: "close", rule: "preparing.abandoned", outcome: `${jobName(j)}: started ${since} days ago and never submitted — kept in the pipeline`, reason: `no activity for ${since} days (≥ ${p.staleAppliedDays}) on an unsubmitted application` };
             return { kind: "action", rule: "preparing.submit", owner: "julian", state: "open", summary: `Finish and submit the ${j.employer} application for ${role} (submitting is yours)`, counterparty: "Julian",
                 due: julianDue, reason: "the application is being prepared; only you submit" };
         default:

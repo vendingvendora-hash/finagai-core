@@ -49,6 +49,7 @@ describe("one next step per job, with an owner and a date", () => {
     expect(nextStepFor(job({ status: "rejected", lastEvidenceAt: "2026-10-06T00:00:00Z" }), NOW)).toEqual(expect.objectContaining({ kind: "close", rule: "rejected.close" }));
     expect(nextStepFor(job({ status: "offer" }), NOW)).toEqual(expect.objectContaining({ rule: "offer.respond", owner: "julian", due: "2026-10-12" }));
     expect(nextStepFor(job({ status: "preparing" }), NOW)).toEqual(expect.objectContaining({ rule: "preparing.submit", owner: "julian" }));
+    expect(nextStepFor(job({ employer: "Amazon", reqId: "10461970", status: "preparing", lastEvidenceAt: "2026-08-10T12:00:00Z" }), NOW)).toEqual(expect.objectContaining({ kind: "close", rule: "preparing.abandoned" }));
     expect(nextStepFor(job({ status: "analyzed" }), NOW)).toEqual(expect.objectContaining({ kind: "none" }));
   });
   it("is deterministic", () => {
