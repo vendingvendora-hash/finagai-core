@@ -76,13 +76,34 @@ describe.skipIf(!url)("MCP tool layer end to end", () => {
     const client = await connect(await token());
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
     expect(names).toEqual([
-      "capture", "control_mac", "control_result", "execution_metrics", "get_approval_request", "get_charter", "get_item", "get_project", "get_state_overview", "list_capabilities", "list_open_conflicts",
-      "list_pending_proposals", "mac_get_context", "mac_status", "make_mac_chart", "pending_results", "plan_resources", "request_archival", "request_conflict_resolution", "request_proposal_decision",
-      "request_seed_promotion", "resolve_reference", "search_state", "seed_add_source", "seed_answer", "seed_questions",
-    ]);   // mac_status + pending_results (WO1/WO2) are read-only: health matrix and already-finished results
+      "apply_bootstrap", "area_status", "bootstrap_area", "capture", "control_mac", "control_result", "create_area", "execution_metrics", "executive_brief", "get_approval_request", "get_charter", "get_item", "get_project", "get_state_overview", "list_capabilities", "list_open_conflicts",
+      "list_pending_proposals", "mac_get_context", "mac_status", "make_mac_chart", "pending_results", "place_under_area", "plan_resources", "request_archival", "request_conflict_resolution", "request_proposal_decision",
+      "request_seed_promotion", "resolve_reference", "resolve_waiting", "search_state", "seed_add_source", "seed_answer", "seed_questions", "set_objective", "track_waiting", "waiting_on",
+    ]);   // Phase 3: employee-layer tools (ADR-079) — names only, no deletes   // mac_status + pending_results (WO1/WO2) are read-only: health matrix and already-finished results
     for (const forbidden of ["delete", "approve", "resolve_conflict", "decide_proposal", "send_email", "sql"]) {
       expect(names.some((n) => n.includes(forbidden) && !n.startsWith("request_") && n !== "list_open_conflicts")).toBe(false);
     }
+    await client.close();
+  });
+
+  it("Phase 3: the employee layer in Julian's words, end to end over MCP (no UUIDs anywhere)", async () => {
+    const client = await connect(await token());
+    const call = async (name: string, args: Record<string, unknown> = {}) => json(await client.callTool({ name, arguments: args }));
+    expect((await call("create_area", { name: "Career" })).name).toBe("Career");                                      // "Create Career as an Area."
+    expect((await call("set_objective", { objective: "Secure a strong finance role", area: "Career" })).created).toBe(true);
+    const placed = await call("place_under_area", { item: "Altarum", area: "Career" });                              // "Altarum belongs under Career."
+    expect(placed).toEqual(expect.objectContaining({ project: "Altarum", area: "Career", linkedToObjective: true }));
+    expect((await call("track_waiting", { counterparty: "Beth Young", about: "Altarum", due: "in 5 days" })).project).toBe("Altarum");  // "I'm waiting on Beth."
+    const w = await call("waiting_on");                                                                                 // "What am I waiting on?"
+    expect(w.source).toMatch(/structured state/);
+    expect(w.items.find((i: { waitingOn: string }) => i.waitingOn === "Beth Young")).toEqual(expect.objectContaining({ project: "Altarum", area: "Career", state: "waiting" }));
+    const s = await call("area_status", { area: "Career" });                                                           // "Why is Career yellow?"
+    expect(["green", "yellow", "red"]).toContain(s.color); expect(typeof s.why).toBe("string");
+    const brief = await call("executive_brief");                                                                       // "Give me my executive brief."
+    expect(brief).toEqual(expect.objectContaining({ headline: expect.any(String), decisions: expect.any(Array), blocked: expect.any(Array), risks: expect.any(Array) }));
+    const { finishedWhileYouWereAway: _f, instruction: _i, ...shown } = brief;                                           // transport metadata aside,
+    expect(JSON.stringify(shown)).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/);                                  // no UUIDs shown to Julian
+    expect((await call("resolve_waiting", { counterparty: "Beth", outcome: "Beth replied: next round scheduled" })).closed).toHaveLength(1);
     await client.close();
   });
 

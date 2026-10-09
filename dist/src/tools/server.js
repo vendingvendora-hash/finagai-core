@@ -1,6 +1,7 @@
 import { getRuntime, macOnline, deriveLifecycle, macStatus } from "../mac/runtime.js";
 import { openInteraction, linkTask, undelivered, markDelivered } from "../concierge/interactions.js";
 import { sweepHumanWaits } from "../concierge/human-wait.js";
+import { registerCosTools } from "./cosTools.js";
 import { observed, reportLifecycleError, recentLifecycleErrors } from "../ops/lifecycle-errors.js";
 import { getContext, resolveFromMac } from "../mac/context.js";
 import { route } from "../mac/router.js";
@@ -513,6 +514,7 @@ export function buildMcpServer(deps) {
             content.push({ type: "image", data: r.imageB64, mimeType: "image/png" });
         return { content };
     });
+    registerCosTools(server, helpers, deps.pool, deps.google); // Phase 3 (ADR-079): employee layer reachable in plain language
     deps.extend?.(server, helpers);
     return server;
 }

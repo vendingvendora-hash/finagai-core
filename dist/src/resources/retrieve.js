@@ -128,7 +128,7 @@ async function retrieveOne(pool, plan, id, deps) {
                 const r = await pool.query(`SELECT f.summary AS title, concat_ws(' · ', 'waiting on ' || f.counterparty, f.state, 'due ' || f.due_at::date) AS detail
              FROM followup f WHERE f.state NOT IN ('done','cancelled')
                AND (cardinality($2::text[]) = 0 OR concat_ws(' ', f.summary, f.counterparty) ILIKE ALL ($2::text[]))
-             ORDER BY f.due_at NULLS LAST LIMIT $1`, [MAX_ITEMS, deictic(plan.request) ? [] : likePatterns(t)]);
+             ORDER BY f.due_at NULLS LAST LIMIT $1`, [MAX_ITEMS, deictic(plan.request) || plan.authoritative.commitments ? [] : likePatterns(t)]);
                 out.push({ capabilityId: id, status: r.rowCount ? "ok" : "empty", items: r.rows.map((x) => ({ title: x.title, detail: clip(x.detail), source: "Finagai follow-ups" })) });
             }
             else if (id === "state.artifacts") {

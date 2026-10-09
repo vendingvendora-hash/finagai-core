@@ -58,6 +58,13 @@ export class MultiGoogleClient {
   calendar(terms: string[]): Promise<FileExcerpt[]> { return this.fan("calendar", terms); }
   drive(terms: string[]): Promise<FileExcerpt[]> { return this.fan("drive", terms); }
 
+  /** First account that has the sheet (newest wins across accounts). */
+  async sheetCsv(title: string): Promise<{ name: string; csv: string; modified: string; account: string } | null> {
+    const found = await Promise.allSettled(this.members.map(async (m) => { const s = await m.client.sheetCsv(title); return s ? { ...s, account: await this.label(m) } : null; }));
+    const hits = found.flatMap((x) => (x.status === "fulfilled" && x.value ? [x.value] : [])).sort((a, b) => b.modified.localeCompare(a.modified));
+    return hits[0] ?? null;
+  }
+
   async search(terms: string[]): Promise<FileExcerpt[]> {
     const clean = [...new Set(terms.map((t) => t.trim()).filter((t) => t.length > 1))].slice(0, 3);
     if (!clean.length) return [];

@@ -67,6 +67,18 @@ export class GoogleClient {
         }
         return out;
     }
+    /** Phase 3C: the full CSV export (first sheet) of the newest spreadsheet whose name contains `title`. Read-only. */
+    async sheetCsv(title) {
+        const q = `name contains '${title.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false`;
+        const list = await this.json(`https://www.googleapis.com/drive/v3/files?pageSize=3&orderBy=modifiedTime desc&supportsAllDrives=true&includeItemsFromAllDrives=true&fields=files(id,name,modifiedTime)&q=${encodeURIComponent(q)}`);
+        const f = list.files?.[0];
+        if (!f)
+            return null;
+        const r = await this.get(`https://www.googleapis.com/drive/v3/files/${f.id}/export?mimeType=text%2Fcsv`);
+        if (!r.ok)
+            return null;
+        return { name: f.name, csv: (await r.text()).slice(0, 5_000_000), modified: f.modifiedTime };
+    }
     /** Which Google account this client is connected to (registry probe: makes the wrong-account risk visible). */
     async account() {
         const p = await this.json("https://gmail.googleapis.com/gmail/v1/users/me/profile");

@@ -42,8 +42,8 @@ export async function executiveBrief(pool: pg.Pool): Promise<ExecutiveBrief> {
 
   // Needs Julian: pending governance requests + pending control-step approvals (reserved decisions).
   const needsJulian: ExecutiveBrief["needsJulian"] = [];
-  const gov = (await pool.query(`SELECT id, kind FROM governance_request WHERE status = 'pending' LIMIT 20`).catch(() => ({ rows: [] }))).rows;
-  for (const g of gov) needsJulian.push({ what: `Approve ${String(g.kind).replace(/_/g, " ")}`, ref: String(g.id) });
+  const gov = (await pool.query(`SELECT id, action FROM governance_request WHERE status = 'pending' LIMIT 20`)).rows;   // was "kind" (no such column), hidden by a catch
+  for (const g of gov) needsJulian.push({ what: `Approve ${String(g.action).replace(/_/g, " ")}`, ref: String(g.id) });
   const steps = (await pool.query(`SELECT code FROM control_step WHERE status = 'proposed' LIMIT 20`).catch(() => ({ rows: [] }))).rows;
   for (const s of steps) needsJulian.push({ what: `Approve Mac step ${s.code} (reply ok ${s.code})` });
 
