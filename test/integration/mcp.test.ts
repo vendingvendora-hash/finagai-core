@@ -78,8 +78,8 @@ describe.skipIf(!url)("MCP tool layer end to end", () => {
     expect(names).toEqual([
       "apply_bootstrap", "area_status", "bootstrap_area", "bootstrap_replay", "bootstrap_stability", "bootstrap_trace", "call_tool", "capture", "control_mac", "control_result", "create_area",
       "diagnostic_result", "execution_metrics", "executive_brief", "find_opportunity", "get_approval_request", "get_charter", "get_item", "get_project", "get_state_overview", "list_capabilities", "list_tools",
-      "list_open_conflicts", "list_pending_proposals", "mac_get_context", "mac_status", "make_mac_chart", "pending_results", "pipeline", "place_under_area", "plan_resources", "record_opportunity_update",
-      "request_archival", "request_conflict_resolution", "request_proposal_decision", "request_seed_promotion", "resolve_reference", "resolve_waiting", "search_state", "seed_add_source", "seed_answer", "seed_questions",
+      "list_open_conflicts", "list_pending_proposals", "mac_get_context", "mac_status", "make_mac_chart", "pending_results", "pipeline", "place_under_area", "plan_resources", "proactivity_status", "record_opportunity_update",
+      "request_archival", "request_conflict_resolution", "request_proposal_decision", "request_seed_promotion", "resolve_reference", "resolve_waiting", "run_event_tick", "search_state", "seed_add_source", "seed_answer", "seed_questions",
       "set_objective", "sync_career", "track_opportunity", "track_waiting", "waiting_on",
     ].sort());   // Phase 4: opportunity lifecycle tools (ADR-082). Phase 3: employee-layer tools (ADR-079) — names only, no deletes   // mac_status + pending_results (WO1/WO2) are read-only: health matrix and already-finished results
     for (const forbidden of ["delete", "approve", "resolve_conflict", "decide_proposal", "send_email", "sql"]) {

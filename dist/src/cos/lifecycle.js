@@ -16,6 +16,10 @@ export function transitionAllowed(cur, next) {
 }
 export const CAREER_POLICY = { responseDays: 14, interviewDecisionDays: 7, staleAppliedDays: 30, julianActionDays: 3 };
 export const NEEDS_JULIAN = ["principal_reserved", "judgment", "authorization"];
+/** Lifecycle rules that put a step on Julian's plate, and why (stored follow-ups carry only the rule id). */
+export const RULE_NEEDS = {
+    "offer.respond": "judgment", "interviewing.nudge": "principal_reserved", "applied.nudge_or_let_go": "principal_reserved", "preparing.submit": "principal_reserved",
+};
 const DAY = 86_400_000;
 const day = (iso) => Date.parse(iso.slice(0, 10));
 const ymd = (ms) => new Date(ms).toISOString().slice(0, 10);

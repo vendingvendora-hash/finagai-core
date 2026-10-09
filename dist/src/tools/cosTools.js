@@ -6,6 +6,7 @@ import { applyBootstrap, compactProposal, proposeCareerBootstrap } from "../cos/
 import { diagnosticResult, replayProposal, startStabilityJob, traceProposal } from "../cos/career-diagnostics.js";
 import { runCareerSync } from "../cos/career-sync.js";
 import { toolRef } from "./manifest.js";
+import { AREA_MODULES, proactivityStatus, runTick } from "../events/index.js";
 import { findOpportunity, inTx, pipelineSummary, recordOpportunityUpdate, trackOpportunity } from "../cos/opportunities.js";
 import { addWaiting, areaStatus, ensureArea, executiveBriefV2, placeUnderArea, resolveWaiting, setObjective, waitingOn } from "../cos/operating.js";
 export function registerCosTools(server, { ok, fail }, pool, google) {
@@ -128,6 +129,16 @@ export function registerCosTools(server, { ok, fail }, pool, google) {
             return fail("sync_career", "Google is not connected, so the Career sources can't be read.");
         return out("sync_career", await runCareerSync(pool, google, preview));
     });
+    // ---- Phase 5 (ADR-084): event-driven proactivity — what Finagai noticed, handled, and what (only) needs Julian.
+    server.registerTool("proactivity_status", {
+        description: "\"What has Finagai noticed / handled on its own?\" and \"What needs me?\" — the event engine's heartbeat, recent events (new mail, calendar changes, deadlines) with the Area/workflow each was routed to (or why it was ignored), and the open escalations: ONLY things that need Julian's judgment, authorization or a principal-reserved action. Read-only.",
+        inputSchema: z.object({ limit: z.number().int().min(1).max(100).default(25) }),
+        annotations: { readOnlyHint: true },
+    }, async ({ limit }) => ok("proactivity_status", await proactivityStatus(pool, limit)));
+    server.registerTool("run_event_tick", {
+        description: "Run Finagai's event engine now instead of waiting for the next 5-minute tick: poll mail/calendar/deadlines, route new events to the Areas that care, run their workflows (Finagai-owned actions), and escalate only what needs Julian. preview:true computes the same tick and writes/sends nothing.",
+        inputSchema: z.object({ preview: z.boolean().default(false) }),
+    }, async ({ preview }) => ok("run_event_tick", await runTick(pool, { google, now: new Date(), dryRun: preview }, { modules: AREA_MODULES }, preview ? "preview" : "manual")));
     server.registerTool("executive_brief", {
         description: "Julian's executive brief, management by exception: 1) decisions he must make, 2) blocked work, 3) important changes, 4) deadlines and risks, 5) what Finagai completed, 6) everything else compressed. Lead with the headline; do not pad.",
         inputSchema: z.object({}),

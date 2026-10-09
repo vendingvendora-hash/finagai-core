@@ -50,6 +50,10 @@ export interface JobFacts {
  */
 export type NeedsJulian = "principal_reserved" | "judgment" | "authorization";
 export const NEEDS_JULIAN: readonly NeedsJulian[] = ["principal_reserved", "judgment", "authorization"];
+/** Lifecycle rules that put a step on Julian's plate, and why (stored follow-ups carry only the rule id). */
+export const RULE_NEEDS: Readonly<Record<string, NeedsJulian>> = {
+  "offer.respond": "judgment", "interviewing.nudge": "principal_reserved", "applied.nudge_or_let_go": "principal_reserved", "preparing.submit": "principal_reserved",
+};
 
 export type NextStep =
   | { kind: "action"; rule: string; owner: "julian" | "finagai"; state: "open" | "waiting"; summary: string; counterparty: string; due: string; reason: string;

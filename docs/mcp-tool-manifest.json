@@ -1,6 +1,6 @@
 {
- "count": 49,
- "digest": "414231f5d284",
+ "count": 51,
+ "digest": "1bcd83f245c7",
  "names": [
   "list_tools",
   "call_tool",
@@ -48,6 +48,8 @@
   "track_opportunity",
   "record_opportunity_update",
   "sync_career",
+  "proactivity_status",
+  "run_event_tick",
   "executive_brief",
   "operating_review",
   "get_latest_review"

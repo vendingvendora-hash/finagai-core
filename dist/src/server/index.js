@@ -6,7 +6,9 @@ import { remoteKeys } from "../auth/bearer.js";
 import { criticalFailures, preflight } from "../ops/preflight.js";
 import { createMcpHandler } from "@modelcontextprotocol/server";
 import { liveManifest } from "../tools/manifest.js";
-import { appendEvent, createPool, PgLlmCallRecorder } from "../db/index.js";
+import { appendEvent, createPool, PgDeliveryStore, PgLlmCallRecorder } from "../db/index.js";
+import { ResendSender } from "../notify/resend.js";
+import { startEventLoop } from "../events/index.js";
 import { AnthropicProvider } from "../llm/anthropic.js";
 import { MeteredModelClient } from "../llm/metered.js";
 import { buildMcpServer } from "../tools/server.js";
@@ -101,6 +103,12 @@ async function main() {
                 await appendEvent(pool, { actor: "system", action: "mcp_client_observed", after: { client_id: clientId }, client: "claude_ai" });
         } }));
     server.listen(port, () => log("finagai-core listening", { port, version: VERSION, env: cfg.NODE_ENV }));
+    // Phase 5 (ADR-084): event-driven proactivity — on in production unless FINAGAI_EVENT_LOOP=off.
+    if (cfg.NODE_ENV === "production" && process.env.FINAGAI_EVENT_LOOP !== "off") {
+        startEventLoop(pool, sharedGoogle, { store: new PgDeliveryStore(pool), timezone: cfg.FINAGAI_TIMEZONE,
+            sender: new ResendSender({ apiKey: cfg.RESEND_API_KEY, from: cfg.NOTIFY_FROM, to: cfg.NOTIFY_TO, replyTo: cfg.NOTIFY_REPLY_TO }) }, log);
+        log("event loop started", { everyMinutes: 5 });
+    }
     const shutdown = () => server.close(() => process.exit(0));
     process.on("SIGTERM", shutdown);
     process.on("SIGINT", shutdown);

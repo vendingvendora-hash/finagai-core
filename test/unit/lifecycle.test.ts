@@ -1,6 +1,6 @@
 /** Phase 4 (ADR-082): the lifecycle policy is pure and deterministic. Dates are the live state of 2026-10-09. */
 import { describe, expect, it } from "vitest";
-import { NEEDS_JULIAN, nextStepFor, transitionAllowed, type JobFacts } from "../../src/cos/lifecycle.js";
+import { NEEDS_JULIAN, RULE_NEEDS, nextStepFor, transitionAllowed, type JobFacts } from "../../src/cos/lifecycle.js";
 
 const NOW = new Date("2026-10-09T17:00:00Z");
 const job = (o: Partial<JobFacts>): JobFacts => ({ employer: "X", title: "Financial Analyst", reqId: null, status: "applied", contact: null, appliedAt: null, lastEvidenceAt: null, lastInterviewAt: null, createdAt: "2026-10-09T00:00:00Z", ...o });
@@ -68,7 +68,7 @@ describe("authority model: Finagai owns the next action unless Julian is genuine
     for (const c of cases) {
       const s = nextStepFor(c, NOW);
       if (s.kind !== "action") continue;
-      if (s.owner === "julian") expect(NEEDS_JULIAN).toContain(s.needsJulian?.kind);
+      if (s.owner === "julian") { expect(NEEDS_JULIAN).toContain(s.needsJulian?.kind); expect(RULE_NEEDS[s.rule]).toBe(s.needsJulian?.kind); }
       else { expect(s.owner).toBe("finagai"); expect(s.needsJulian).toBeUndefined(); expect(s.state).toBe("waiting"); }
     }
   });

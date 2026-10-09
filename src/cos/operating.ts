@@ -206,11 +206,10 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
   for (const g of (await pool.query(`SELECT action, count(*)::int AS n FROM governance_request WHERE status = 'pending' AND expires_at > now() GROUP BY action`)).rows)
     decisions.push(`${g.n} pending approval(s): ${String(g.action).replace(/_/g, " ")}`);
   for (const p of (await pool.query(`SELECT count(*)::int AS n FROM proposal WHERE status = 'pending'`).catch(() => ({ rows: [{ n: 0 }] }))).rows) if (p.n) decisions.push(`${p.n} pending proposal(s) to review`);
-  // Phase 4 (ADR-082): next steps the lifecycle assigned to Julian (decide on a nudge, answer an offer, finish an
-  // application) and anything the last Career sync could not decide on its own.
-  for (const f of (await pool.query(`SELECT summary, due_at FROM followup WHERE origin = 'lifecycle' AND state IN ('open','overdue')
-      AND rule IN ('applied.nudge_or_let_go','interviewing.nudge','offer.respond','preparing.submit') ORDER BY due_at LIMIT 8`)).rows)
-    decisions.push(`${f.summary} (by ${new Date(f.due_at).toISOString().slice(0, 10)})`);
+  // Phase 5 (ADR-084): what genuinely needs Julian (judgment / authorization / principal-reserved), as escalated by the
+  // event engine from state — the single list both the brief and the escalation digest use.
+  for (const e of (await pool.query(`SELECT e.summary, e.due_at, e.needs, a.name AS area FROM escalation e LEFT JOIN area a ON a.id = e.area_id WHERE e.status = 'open' ORDER BY e.due_at NULLS LAST, e.created_at LIMIT 10`)).rows)
+    decisions.push(`${e.area ? `[${e.area}] ` : ""}${e.summary}${e.due_at ? ` (by ${new Date(e.due_at).toISOString().slice(0, 10)})` : ""}`);
   const sync = (await pool.query(`SELECT after FROM event WHERE action = 'career_synced' AND occurred_at > now() - interval '48 hours' AND (after->>'dryRun')::boolean IS NOT TRUE ORDER BY occurred_at DESC LIMIT 1`)).rows[0]?.after as { decisions?: string[] } | undefined;
   for (const d of (sync?.decisions ?? []).slice(0, 5)) decisions.push(`Career: ${d}`);
 
@@ -235,12 +234,18 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
   for (const e of (await pool.query(`SELECT ev.before, ev.after, o.org, o.title, o.requisition_id FROM event ev JOIN opportunity o ON o.id = ev.entity_id
       WHERE ev.action = 'opportunity_status' AND ev.occurred_at > now() - interval '48 hours' ORDER BY ev.occurred_at DESC LIMIT 10`)).rows)
     changes.push(`${e.org} — ${e.title}${e.requisition_id ? ` (${e.requisition_id})` : ""}: ${e.before?.status ?? "?"} → ${e.after?.status ?? "?"}`);
+  const handled = (await pool.query(`SELECT count(*) FILTER (WHERE status = 'handled')::int AS h, count(*) FILTER (WHERE status = 'ignored')::int AS i, count(*) FILTER (WHERE status = 'failed')::int AS f
+      FROM inbound_event WHERE received_at > now() - interval '24 hours'`)).rows[0];
+  if (handled && (handled.h || handled.f)) changes.push(`Finagai handled ${handled.h} event(s) on its own in the last 24 h${handled.f ? `; ${handled.f} failed and will be retried` : ""} (${handled.i} unrelated ignored)`);
   const closedProjects = (await pool.query(`SELECT count(*)::int AS n FROM event WHERE action = 'project_completed' AND occurred_at > now() - interval '48 hours'`)).rows[0]?.n ?? 0;
   if (closedProjects) changes.push(`${closedProjects} job project(s) closed by the lifecycle (rejected, withdrawn, or no response and nobody to nudge — they stay in the pipeline)`);
 
   const risks: string[] = [];
   for (const f of (await pool.query(`SELECT counterparty, summary, due_at FROM followup WHERE state IN ('open','waiting') AND due_at < now() + interval '3 days' ORDER BY due_at LIMIT 8`)).rows)
     risks.push(`${f.summary} due ${new Date(f.due_at).toISOString().slice(0, 10)}`);
+  // Phase 5: a silent event loop means nothing is being noticed — that is itself a risk to surface.
+  const lastTick = (await pool.query(`SELECT max(started_at) AS at FROM event_tick WHERE status IN ('done','running')`)).rows[0]?.at as Date | null;
+  if (lastTick && now.getTime() - new Date(lastTick).getTime() > 20 * 60_000) risks.push(`Finagai's event loop has not run since ${new Date(lastTick).toISOString().slice(0, 16).replace("T", " ")} UTC — new mail and deadlines are not being noticed`);
   for (const s of health) if (s.color === "yellow") risks.push(`${s.area} is yellow: ${s.warnings.slice(0, 2).join("; ")}`);
 
   const completed = (await pool.query(`SELECT origin_message, verification_status FROM interaction WHERE state = 'completed' AND completed_at > now() - interval '24 hours' ORDER BY completed_at DESC LIMIT 6`)).rows
