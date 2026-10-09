@@ -141,7 +141,7 @@ export async function reconcileJob(db, jobId, now, policy = CAREER_POLICY) {
         const r = await db.query(`INSERT INTO followup (summary, counterparty, channel, state, due_at, last_action_at, area_id, project_id, opportunity_id, origin, rule)
       VALUES ($1, $2, NULL, $3, $4, COALESCE($5, now()), $6, $7, $8, 'lifecycle', $9) RETURNING id`, [step.summary.slice(0, 2000), step.counterparty, step.state, dueAt, j.last_evidence_at ?? j.applied_at, j.area_id, projectId, j.id, step.rule]);
         await appendEvent(db, { actor: "cos", action: "followup_created", entityType: "followup", entityId: r.rows[0].id, after: { summary: step.summary, due: step.due, rule: step.rule, by: "lifecycle" } });
-        changes.push({ job: name, change: step.owner === "julian" ? "decision for Julian" : "waiting", detail: `${step.summary} (due ${step.due}; ${step.reason})` });
+        changes.push({ job: name, change: step.owner === "julian" ? "needs Julian" : "Finagai watching", detail: `${step.summary} (due ${step.due}; ${step.reason}${step.needsJulian ? `; needs you because ${step.needsJulian.because}` : ""})` });
     }
     return { step, changes };
 }

@@ -43,8 +43,18 @@ export interface JobFacts {
   appliedAt: string | null; lastEvidenceAt: string | null; lastInterviewAt: string | null; createdAt: string;
 }
 
+/**
+ * Authority model (Julian, 2026-10-09): Finagai owns every next action it can execute or manage itself. A step goes on
+ * Julian's plate ONLY when his judgment, his authorization, or a principal-reserved action is genuinely required —
+ * and it says which.
+ */
+export type NeedsJulian = "principal_reserved" | "judgment" | "authorization";
+export const NEEDS_JULIAN: readonly NeedsJulian[] = ["principal_reserved", "judgment", "authorization"];
+
 export type NextStep =
-  | { kind: "action"; rule: string; owner: "julian" | "counterparty"; state: "open" | "waiting"; summary: string; counterparty: string; due: string; reason: string }
+  | { kind: "action"; rule: string; owner: "julian" | "finagai"; state: "open" | "waiting"; summary: string; counterparty: string; due: string; reason: string;
+      /** Only for Julian-owned steps: why it cannot be Finagai's (authority model, Julian 2026-10-09). */
+      needsJulian?: { kind: NeedsJulian; because: string } }
   | { kind: "close"; rule: string; outcome: string; reason: string }
   | { kind: "none"; rule: string; reason: string };
 
@@ -65,26 +75,29 @@ export function nextStepFor(j: JobFacts, now: Date, p: LifecyclePolicy = CAREER_
     case "rejected": case "withdrawn": case "closed":
       return { kind: "close", rule: `${j.status}.close`, outcome: `${jobName(j)}: ${j.status}${j.lastEvidenceAt ? ` (${j.lastEvidenceAt.slice(0, 10)})` : ""}`, reason: `the job is ${j.status}; nothing is waiting on it any more` };
     case "offer":
-      return { kind: "action", rule: "offer.respond", owner: "julian", state: "open", summary: `Respond to the ${j.employer} offer for ${role}`, counterparty: who, due: julianDue, reason: "an offer needs your answer" };
+      return { kind: "action", rule: "offer.respond", owner: "julian", state: "open", summary: `Respond to the ${j.employer} offer for ${role}`, counterparty: who, due: julianDue, reason: "an offer needs your answer",
+        needsJulian: { kind: "judgment", because: "accepting, negotiating or declining an offer is your decision" } };
     case "interviewing": {
       const last = j.lastInterviewAt && day(j.lastInterviewAt) > day(lastContact) ? j.lastInterviewAt : lastContact;
       const decideBy = day(last) + p.interviewDecisionDays * DAY;
       if (today < decideBy)
-        return { kind: "action", rule: "interviewing.awaiting_decision", owner: "counterparty", state: "waiting", summary: `Waiting on ${who} for the next step on ${role} at ${j.employer}`, counterparty: who,
+        return { kind: "action", rule: "interviewing.awaiting_decision", owner: "finagai", state: "waiting", summary: `Waiting on ${who} for the next step on ${role} at ${j.employer}`, counterparty: who,
           due: ymd(decideBy), reason: `last contact ${last.slice(0, 10)}; employers usually answer within ${p.interviewDecisionDays} days` };
-      return { kind: "action", rule: "interviewing.nudge", owner: "julian", state: "open", summary: `Follow up with ${who} on ${role} at ${j.employer} — no news since ${last.slice(0, 10)}`, counterparty: who,
-        due: julianDue, reason: `${Math.floor((today - day(last)) / DAY)} days without news after an interview; a short follow-up is yours to send (Finagai can draft it)` };
+      return { kind: "action", rule: "interviewing.nudge", owner: "julian", state: "open", summary: `Approve a follow-up to ${who} on ${role} at ${j.employer} — no news since ${last.slice(0, 10)} (Finagai drafts it; sending as you is yours)`, counterparty: who,
+        due: julianDue, reason: `${Math.floor((today - day(last)) / DAY)} days without news after an interview`,
+        needsJulian: { kind: "principal_reserved", because: "a message to the employer goes out as you" } };
     }
     case "applied": {
       const answerBy = day(lastContact) + p.responseDays * DAY;
       if (today < answerBy)
-        return { kind: "action", rule: "applied.awaiting_response", owner: "counterparty", state: "waiting", summary: `Waiting on ${j.employer} to respond to the ${j.title ?? ""} application`.replace(/\s+/g, " "), counterparty: who,
+        return { kind: "action", rule: "applied.awaiting_response", owner: "finagai", state: "waiting", summary: `Waiting on ${j.employer} to respond to the ${j.title ?? ""} application`.replace(/\s+/g, " "), counterparty: who,
           due: ymd(answerBy), reason: `last contact ${lastContact.slice(0, 10)}; no answer by ${ymd(answerBy)} ${j.contact ? `becomes your decision (nudge ${j.contact} or let it ride)` : "closes the project quietly (no named contact to nudge); the job stays in the pipeline"}` };
       // Silence. A person to nudge makes it Julian's decision (until it goes stale); no person = nothing useful to do,
       // so the job quietly leaves the active list and stays in the pipeline (any new evidence brings it back).
       if (j.contact && since < p.staleAppliedDays)
-        return { kind: "action", rule: "applied.nudge_or_let_go", owner: "julian", state: "open", summary: `Decide: nudge ${j.contact} about ${role} at ${j.employer}, or let it ride (no response for ${since} days)`, counterparty: j.contact,
-          due: julianDue, reason: `${since} days without a response (≥ ${p.responseDays}); it leaves the active list after ${p.staleAppliedDays} days` };
+        return { kind: "action", rule: "applied.nudge_or_let_go", owner: "julian", state: "open", summary: `Approve a follow-up to ${j.contact} about ${role} at ${j.employer}, or let it ride — no response for ${since} days (Finagai drafts it; sending as you is yours)`, counterparty: j.contact,
+          due: julianDue, reason: `${since} days without a response (≥ ${p.responseDays}); it leaves the active list after ${p.staleAppliedDays} days`,
+          needsJulian: { kind: "principal_reserved", because: "a message to the employer goes out as you" } };
       return { kind: "close", rule: "applied.no_response", outcome: `${jobName(j)}: no response ${since} days after the last contact${j.contact ? "" : " and no contact to nudge"} — kept in the pipeline as applied; new evidence reopens it`,
         reason: j.contact ? `no response for ${since} days (≥ ${p.staleAppliedDays})` : `no response for ${since} days (≥ ${p.responseDays}) and no named contact to follow up with` };
     }
@@ -92,8 +105,9 @@ export function nextStepFor(j: JobFacts, now: Date, p: LifecyclePolicy = CAREER_
       // An application started long ago and never submitted (live: Amazon 10461970, started 8/10) is not a live task.
       if (since >= p.staleAppliedDays)
         return { kind: "close", rule: "preparing.abandoned", outcome: `${jobName(j)}: started ${since} days ago and never submitted — kept in the pipeline`, reason: `no activity for ${since} days (≥ ${p.staleAppliedDays}) on an unsubmitted application` };
-      return { kind: "action", rule: "preparing.submit", owner: "julian", state: "open", summary: `Finish and submit the ${j.employer} application for ${role} (submitting is yours)`, counterparty: "Julian",
-        due: julianDue, reason: "the application is being prepared; only you submit" };
+      return { kind: "action", rule: "preparing.submit", owner: "julian", state: "open", summary: `Submit the ${j.employer} application for ${role} (Finagai prepares and fills it; submitting is yours)`, counterparty: "Julian",
+        due: julianDue, reason: "the application is being prepared; only you submit",
+        needsJulian: { kind: "principal_reserved", because: "submitting an application is reserved to you" } };
     default:
       return { kind: "none", rule: `${j.status}.pipeline`, reason: "pipeline record only (not engaged): no project, no next action" };
   }
