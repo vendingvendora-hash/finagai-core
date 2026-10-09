@@ -156,7 +156,7 @@ export async function resolveWaiting(pool, counterparty, outcome) {
     return { closed: rows.map((r) => r.summary) };
 }
 /** What Julian is waiting on — structured state only. */
-export async function waitingOn(pool, areaName, now = new Date()) {
+export async function waitingOn(pool, areaName, now = new Date(), tz = "America/New_York") {
     await sweepOverdue(pool, now);
     let areaId = null;
     if (areaName) {
@@ -179,6 +179,10 @@ export async function waitingOn(pool, areaName, now = new Date()) {
             watchedBy: "Finagai",
             sinceDays: Math.floor((now.getTime() - new Date(r.last_action_at ?? r.created_at).getTime()) / day),
             due: r.due_at ? new Date(r.due_at).toISOString().slice(0, 10) : null,
+            // The exact moment the wait becomes overdue (and may escalate), in UTC and in Julian's time zone — a bare date hides
+            // that "2026-10-14" can mean 8 pm the evening before in New York.
+            dueAt: r.due_at ? new Date(r.due_at).toISOString() : null,
+            dueLocal: r.due_at ? new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(r.due_at)) : null,
             overdueDays: r.state === "overdue" && r.due_at ? Math.floor((now.getTime() - new Date(r.due_at).getTime()) / day) : 0,
         })),
         note: rows.length ? null : "Nothing is tracked as waiting. Tell me who you're waiting on (\"I'm waiting on Beth about Altarum\") and I'll track it.",
