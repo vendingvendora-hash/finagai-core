@@ -1031,7 +1031,7 @@ async function tick(cfg, state) {
           if (!filename && answeringWhich) filename = nreq;   // the reply IS the name
           if (filename) {
             await sendIMessage(cfg.selfHandles[0], `On it — charting “${filename}”.`);
-            const t = await core(cfg, "/control/start", { request: `mac_chart:${filename}` }).catch(() => null);
+            const t = await core(cfg, "/control/start", { request: `mac_chart:${filename}`, origin: "imessage" }).catch(() => null);
             if (!t) await sendIMessage(cfg.selfHandles[0], "Couldn't start that just now — try again in a moment.");
           } else {
             await sendIMessage(cfg.selfHandles[0], "Which spreadsheet? Tell me the file name, or open it so it's the front window.");
@@ -1040,7 +1040,7 @@ async function tick(cfg, state) {
         }
         // Non-chart natural request → general Mac task (J6).
         await sendIMessage(cfg.selfHandles[0], "On it.");
-        const t = await core(cfg, "/control/start", { request: nreq }).catch(() => null);
+        const t = await core(cfg, "/control/start", { request: nreq, origin: "imessage" }).catch(() => null);
         if (!t) await sendIMessage(cfg.selfHandles[0], "Couldn't start that just now — try again in a moment.");
         continue;
       }

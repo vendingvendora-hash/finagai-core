@@ -73,7 +73,7 @@ OBJECTIVE: ${contract.objective}
 EXPECTED OUTCOME: ${contract.expectedOutcome}
 CLAIMED SUMMARY (untrusted): ${claimedSummary}
 NOTE: every step result below is attached verbatim to the final report Julian receives — information found by a read step counts as reported even if the summary only references it. Judge whether the evidence achieves the objective.
-STEP TRACE (most recent last):
+${trace.length > 12 ? `EARLIER STEP OUTCOMES (oldest first; evidence still counts — live #123 lost its step-1 fills from a 12-step window):\n${trace.slice(0, -12).filter((t) => /^(verified|unverified|refused|error):/i.test(t.result ?? "")).slice(-40).map((t) => `- [${t.kind}] ${(t.result ?? "").slice(0, 220)}`).join("\n")}\n` : ""}STEP TRACE (most recent last):
 ${trace.slice(-12).map((t) => `- [${t.kind}] ${t.summary}: ${(t.result ?? "").slice(0, READ_RESULT.test(t.kind) ? 2500 : 300)}`).join("\n")}
 Reply with exactly one line: PASS: <why the evidence shows it> or FAIL: <what is missing or contradicted>.` }];
     if (finalScreenshotB64)

@@ -13,6 +13,9 @@ rm -rf "$DEST/browser-ext/chrome" "$DEST/browser-ext/firefox"
 cp -R "$ROOT/browser-ext/build/chrome" "$ROOT/browser-ext/build/firefox" "$DEST/browser-ext/"
 cp "$ROOT/helper/browser-host.mjs" "$ROOT/helper/browser-bridge.mjs" "$DEST/"
 ( cd "$DEST/browser-ext/firefox" && rm -f ../finagai-operator-firefox.zip && zip -qr ../finagai-operator-firefox.zip . )
+# Harmless upload fixture for live acceptance tests (outside protected paths like ~/.finagai and the repo).
+mkdir -p "$HOME/Documents/Finagai Test"
+cp "$ROOT/test/browser/fixtures/Julian_Perez_Resume_TEST.pdf" "$HOME/Documents/Finagai Test/Julian_Perez_Resume_TEST.pdf"
 cat > "$DEST/browser-host.sh" <<HOST
 #!/bin/bash
 exec "$NODE" "$DEST/browser-host.mjs" "\$@"

@@ -90,7 +90,8 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
         if (due.length) {
           // An array result keeps its shape under `results` (spreading an array into an object destroyed it).
           payload = { ...(Array.isArray(data) ? { results: data } : (data as object)), finishedWhileYouWereAway: due.map((i) => ({ interactionId: i.id, state: i.state, result: i.resultSummary, hasImage: !!i.resultImageB64 })),
-            instruction: "Before answering the current request, tell Julian these earlier requests finished and show their results (call pending_results to get any image)." };
+            // Never overwrite the tool's own instruction (live: plan_resources lost its answering instruction).
+            finishedInstruction: "Also tell Julian these earlier requests finished and show their results (call pending_results to get any image)." };
           await markDelivered(deps.pool, due.filter((i) => !i.resultImageB64).map((i) => i.id)).catch(observed(deps.pool, "ok.markDelivered"));
         }
       }

@@ -62,7 +62,9 @@ export function createControlHandler(deps: ControlDeps, token: string | undefine
       const body = await readJson(req);
       if (path === "/control/start") {
         if (typeof body.request !== "string" || !body.request.trim()) return json(res, 422, { error: "request_required" });
-        const origin = body.origin === "imessage" ? "imessage" : "chat";
+        // Only the Mac helper calls this, for requests Julian typed in his own Messages thread (live #122 was
+        // mislabelled "chat" because the helper sends no origin). Chat requests never come through here.
+        const origin = body.origin === "chat" ? "chat" : "imessage";
         const t = await createTask(deps.pool, body.request, origin);
         return json(res, 200, { taskId: t.id, taskCode: t.code });
       }
