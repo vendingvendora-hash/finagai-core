@@ -25,6 +25,40 @@ const deps = (m: Script): ControlDeps => ({ pool: pool!, model: m, modelId: "cla
 describe.skipIf(!pool)("J6 control lifecycle", () => {
   afterAll(async () => { await pool?.end(); });
 
+  it("Phase 2 acceptance: one delegation fills, attaches and navigates with NO per-step approval; Submit is held back; one review packet", async () => {
+    const task = await createTask(pool!, "Fill this harmless test application completely but do not submit it.", "chat");
+    const model = new Script([
+      { kind: "browser_fill_form", params: { fields: [{ label: "First name", value: "Julian" }, { label: "Last name", value: "Perez" }] }, risk: "write", summary: "Fill name fields" },
+      { kind: "browser_click", params: { label: "Next", role: "button" }, risk: "write", summary: "Go to step 2" },
+      { kind: "browser_upload", params: { label: "Attach resume", path: "~/Documents/Julian_Perez_Resume_TEST.pdf" }, risk: "write", summary: "Attach the resume" },
+      { kind: "browser_click", params: { label: "Submit application" }, risk: "write", summary: "Submit the application" },
+      { kind: "done", summary: "Application filled and ready for review", needsJulian: ["Desired salary (exact number required)", "Final Submit"] },
+      "PASS: fields verified and resume attached; not submitted",
+    ]);
+    const d = deps(model);
+    const statuses: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      const r = await planNext(d, task.id, `s${i}`);
+      statuses.push(r.status);
+      if (r.status === "done") { expect(r.message).toContain("Needs you: Desired salary"); break; }
+      expect(r.status).not.toBe("await_approval");
+      await recordRun(pool!, r.step!.id, true, r.step!.kind.startsWith("browser_") ? "verified: ok" : "observed: {}");
+    }
+    expect(statuses).toEqual(["run_approved", "run_approved", "run_approved", "run_read", "done"]);
+    const steps = (await pool!.query(`SELECT kind, status, authority_class, authority_decision, summary FROM control_step WHERE task_id = $1 ORDER BY seq`, [task.id])).rows;
+    expect(steps.filter((s) => s.status === "proposed")).toHaveLength(0);                       // zero approvals asked
+    expect(steps.slice(0, 3).map((s) => s.authority_class)).toEqual(["PREPARATORY", "PREPARATORY", "PREPARATORY"]);
+    expect(steps[3].summary).toMatch(/^OUTSIDE DELEGATION — REFUSED: "Submit the application" \(Julian said not to submit/);
+    const t = (await pool!.query(`SELECT status, result_detail, envelope FROM control_task WHERE id = $1`, [task.id])).rows[0];
+    expect(t.status).toBe("done");
+    expect(t.envelope.forbidden).toContain("submit");
+    expect(t.result_detail).toMatch(/^REVIEW PACKET/);
+    expect(t.result_detail).toMatch(/Held back by your rules: .*Submit the application/);
+    expect(t.result_detail).toMatch(/Needs you: 1\. Desired salary/);
+    const ix = (await pool!.query(`SELECT user_interventions FROM interaction WHERE $1 = ANY(task_ids)`, [task.id])).rows[0];
+    expect(ix.user_interventions).toBe(0);                                                    // julian_interventions before the review boundary
+  });
+
   it("Phase 1F: a browser page reaches the planner only inside an UNTRUSTED block, with an injection warning", async () => {
     const task = await createTask(pool!, "Phase1F read the job page", "chat");
     const seen: string[] = [];
