@@ -1,4 +1,4 @@
-# Mac Runtime — current state (audit 2026-10-09)
+# Verification — current state (audit 2026-10-09)
 
 Source of truth: `docs/FINAGAI_CURRENT_STATE_2026-10-09.md`. Code at `94087a7` (live). Rewritten from code and live evidence; supersedes earlier versions of this file.
 
@@ -13,21 +13,17 @@ Source of truth: `docs/FINAGAI_CURRENT_STATE_2026-10-09.md`. Code at `94087a7` (
 | **BROKEN** | Exists and produces a wrong result, with evidence |
 
 
-## 5. Mac capability audit
+## 10. Outcome verification per action class
 
-| Capability | Status | Evidence |
+| Class | Verification | Status |
 |---|---|---|
-| Runtime liveness (LaunchAgent, KeepAlive, 15 s heartbeat) | LIVE VERIFIED | heartbeat 5 s old; restart PASS (1 s), soak 20/20, reconnect +1 (Phase 1) |
-| Screen capture | LIVE VERIFIED | #117/#118 screenshots |
-| Active app/window | LIVE VERIFIED, but the window title is often null | context `window:null` for Firefox |
-| Selected Finder files | LIVE VERIFIED | `sixsigma_cert.png` |
-| Open document path | PARTIAL (Excel/Numbers/Preview/Pages/TextEdit/Keynote/Word/PowerPoint only) | `frontDocumentPath` |
-| Accessibility actions (activate_app, menu_item, ax_click, ax_set_value) | LIVE VERIFIED, 21/30 verified steps (0.70) | registry |
-| Coordinate click/type/key/hotkey/drag/scroll | BUILT / LIVE VERIFIED in earlier native-app tasks; outcome verification is weaker | metrics: 2 false completions (native-app) on Oct 5 |
-| File ops (move_file, trash_file) with deterministic verification | LIVE VERIFIED (#116, sha256) | |
-| Shell `run` | LIVE VERIFIED; read-only commands are auto-classified as read | `isReadOnlyCommand` |
-| **Registry health for mac.filesystem / mac.screen** | **BROKEN** | the helper sends keys `files` and `screen`; `registry.ts:97` reads `filesystem` and `screenCapture`, so both always show "unknown" |
-| Clipboard | BUILT (probe only; deliberately excluded from context) | |
+| File move/trash | deterministic (exists/absent + sha256) | LIVE VERIFIED |
+| AX actions | before/after delta, "verified/unverified" | LIVE VERIFIED (0.70) |
+| Coordinate actions | screenshot + model grader | PARTIAL (false completions observed) |
+| Read-only answers | model grader | PARTIAL |
+| Chart | M01 acceptance checks (layout, series) | LIVE VERIFIED, 0.42 reliability |
+| Outbound messages/email | idempotency key (`outbound_action`) | BUILT; no autonomous sends by design |
+| Web form progress | none beyond the screenshot | ABSENT |
 
 
 ## 6. J6 deep-dive

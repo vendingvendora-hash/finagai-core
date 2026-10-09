@@ -1,39 +1,75 @@
-# Finagai — Conversational / MCP surface (as of commit 45e80d0)
+# Tools — current state (audit 2026-10-09)
 
-Source: `src/tools/server.ts` (+ `src/tools/j3Tools.ts`). Transport: MCP over HTTPS at `https://finagai-core.onrender.com/mcp`, OAuth (WorkOS) bearer; every tool response passes through `helpers.ok` → `filterByTier` (tier-based redaction) → `capResponse` (size cap) → WO2 `finishedWhileYouWereAway` injection.
+Source of truth: `docs/FINAGAI_CURRENT_STATE_2026-10-09.md`. Code at `94087a7` (live). Rewritten from code and live evidence; supersedes earlier versions of this file.
 
-| Tool | Determinism | Live | Tested | Description (truncated) | Input schema |
-|---|---|---|---|---|---|
-| `get_charter` | deterministic | yes (a16c847+) | mcp.test | Finagai's current charter version and Julian's approved preferences. Read before acting on Julian's behalf. | `z.object({}), annotations: { readOnlyHint: true }, }, async () => { const c = await currentCharter(deps.pool); return ok("get_charter", c.charter ? c : { ...c, note: "No charter has been approved yet." }); }); server.registerTool("capture", { description: "Capture new context from Julian into Finagai (J2). Use when Julian states tasks, deadlines, decisions, facts, corrections, preferences, or proj` |
-| `capture` | model (J2 extract/classify) | yes (a16c847+) | j2.test, system.test |  | `see source` |
-| `get_state_overview` | deterministic | yes (a16c847+) | mcp.test list guard only | Active projects with open, overdue, and next-due counts; open conflicts, pending proposals and approvals; deferred captures; model-spend status. | `z.object({}), annotations: { readOnlyHint: true }, }, async () => ok("get_state_overview", await stateOverview(deps.pool, { timezone: deps.cfg.FINAGAI_TIMEZONE, targetUsd: deps.cfg.MODEL_BUDGET_TARGET_USD_MONTH, ceilingUsd: deps.cfg.MODEL_HARD_CEILING_USD_MONTH, now: now() }))); server.registerTool("get_project", { description: "One project by ID or exact name: its work items, current knowledge, a` |
-| `get_project` | deterministic | yes (a16c847+) | mcp.test list guard only |  | `see source` |
-| `search_state` | deterministic (FTS) | yes (a16c847+) | mcp.test list guard only |  | `see source` |
-| `get_item` | deterministic | yes (a16c847+) | mcp.test list guard only |  | `see source` |
-| `list_open_conflicts` | deterministic | yes (a16c847+) | mcp.test list guard only |  | `see source` |
-| `list_pending_proposals` | deterministic | yes (a16c847+) | mcp.test list guard only |  | `see source` |
-| `request_conflict_resolution` | deterministic (stages governance) | yes (a16c847+) | mcp.test list guard only |  | `see source` |
-| `request_proposal_decision` | deterministic (stages) | yes (a16c847+) | mcp.test list guard only | Stage Julian's decision on a pending proposal. Does NOT change anything: returns an approval link Julian must confirm himself. | `z.object({ proposal_id: z.string().uuid(), decision: z.enum(["approve", "reject"]), rationale: z.string().min(1).max(1000) })` |
-| `request_archival` | deterministic (stages) | yes (a16c847+) | mcp.test list guard only | Stage archival of records (for example third-party information past its review date). Archival is never deletion. Does NOT change anything until Julian confirms. | `z.object({ records: z.array(z.object({ type: z.enum(ARCHIVABLE), id: z.string().uuid() })).min(1).max(50), rationale: z.string().min(1).max(1000), })` |
-| `request_seed_promotion` | deterministic (stages) | yes (a16c847+) | mcp.test list guard only | Stage promotion of a reviewed seeding batch into live state. Does NOT change anything until Julian confirms. | `z.object({ batch_id: z.string().uuid(), rationale: z.string().min(1).max(1000) })` |
-| `get_approval_request` | deterministic | yes (a16c847+) | mcp.test list guard only | Status of a staged governance request: pending, approved, rejected, expired, superseded, executed, or failed. | `z.object({ approval_id: z.string().uuid() }), annotations: { readOnlyHint: true }, }, async ({ approval_id }) => { const r = await approvalStatus(deps.pool, approval_id); return r ? ok("get_approval_request", r) : fail("get_approval_request", "No approval request with that ID."); }); // ---------------------------------------------------------------- M7 seeding (staging only) server.registerTool("` |
-| `seed_add_source` | model (J2) | yes (a16c847+) | mcp.test list guard only |  | `see source` |
-| `seed_questions` | deterministic | yes (a16c847+) | mcp.test list guard only | The seeding confirmation interview: code-generated questions grouped by project (conflicts, unverified or missing dates, missing projects, duplicates), plus items clear enough for bulk confirmation. | `z.object({ batch_id: z.string().uuid().optional() }), annotations: { readOnlyHint: false }, }, async (a) => ok("seed_questions", await questions(deps.j2, a.batch_id ?? await openBatch(deps.pool)))); server.registerTool("seed_answer", { description: "Record Julian's answers to seeding questions: confirm or reject staged items, set a project, or set a due date in his own words. Changes staging only.` |
-| `seed_answer` | deterministic | yes (a16c847+) | mcp.test list guard only |  | `see source` |
-| `control_mac` | creates task; execution model-mediated (J6 planner) | yes (a16c847+) | mcp.test (list), m01-interaction | Operate Julian's Mac step by step (J6): open apps, click, type, run commands, use logged-in sessions, for general desktop actions. IMPORTANT: do NOT use this to chart/plot/visualize data from a named local spreadsheet or | `z.object({ request: z.string().min(1).max(4000) })` |
-| `make_mac_chart` | deterministic (M01 parser) + coordinator | yes (a16c847+) | m01-acceptance 9, m01-interaction 3, m01-financial-layout 4, live tasks #69-#74 | Find a spreadsheet on Julian's Mac by (approximate) name, read it, detect the best meaningful series, generate a verified chart, and return the chart image. Use when Julian asks to chart/visualize data from a named local | `z.object({ filename: z.string().min(1).max(200), title: z.string().max(200).optional() })` |
-| `pending_results` | deterministic | yes (a16c847+) | interactions.test W2 (undelivered→delivered), live | Results of earlier Finagai requests that finished after their chat turn ended (charts, Mac task results). Returns each with its image and marks them delivered. Call when a tool response mentions finishedWhileYouWereAway, | `z.object({})` |
-| `mac_get_context` | deterministic | yes (a16c847+) | mac-context U1-U6 (resolver), live | What Julian is looking at on his Mac right now: frontmost app, active window, open document path, selected Finder files, active browser tab (app/url/title), plus the most recent Finagai artifact and how fresh the snapsho | `z.object({})` |
-| `resolve_reference` | deterministic | yes (a16c847+) | mac-context 6/6, live U2 | Deterministically resolve a vague reference — 'this', 'that', 'this file', 'this page', 'the spreadsheet I have open', 'the last chart', 'what I'm looking at' — to a concrete referent (file path, URL, document, or artifa | `z.object({ phrase: z.string().min(1).max(300) })` |
-| `mac_status` | deterministic | yes (a16c847+) | mac-runtime unit 7 + integration 6, live | The truthful status of Finagai's Mac runtime: connected?, last heartbeat, capability matrix (screen capture, accessibility, filesystem, browser, clipboard, active window), current app/window, and the current task's real  | `z.object({})` |
-| `control_result` | deterministic | yes (a16c847+) | live tasks #74,#77 | Read the result of a Mac task started with control_mac. Returns its status and, when finished, the summary, the information Finagai gathered, AND the final screenshot/chart image so you can show it to Julian directly in  | `z.object({ task_code: z.number().int().positive().optional() })` |
-| `operating_review` | model (J3 compose) | yes (a16c847+) | j3.test, j3-eval-cases | Run Julian's operating review now (J3). Returns the rendered review and its ID. Facts come from Finagai's records; Claude only prioritizes. | `z.object({})` |
-| `get_latest_review` | deterministic | yes (a16c847+) | mcp.test list guard only |  | `see source` |
+| Label | Meaning |
+|---|---|
+| **LIVE VERIFIED** | Exercised against production (Render + Neon + Julian's Mac) with observed output, today or in a recorded live run |
+| **LIVE UNVERIFIED** | Deployed, but no live run observed that proves it works |
+| **BUILT** | Code + tests exist; not wired into a live path, or never exercised live |
+| **PARTIAL** | Works for a subset of the stated scope; the gap is named |
+| **DESIGNED** | ADR/doc only |
+| **ABSENT** | Nothing exists |
+| **BROKEN** | Exists and produces a wrong result, with evidence |
 
-## Natural language → tool mapping (how it actually works)
 
-- **Chat surface:** Claude (claude.ai) selects tools from descriptions. There is **no Finagai-side intent router for chat**; selection is model-only, guided by tool descriptions and by `instruction` fields returned in results (e.g. `finishedWhileYouWereAway`, `stillRunning` → "call control_result again now").
-- **Deterministic fast paths that exist:** `make_mac_chart` (M01: Spotlight → xlsx parser → series detection → SVG → Mac rasterization; no planner); iMessage self-thread routing in the helper (`helper/finagai-imessage.mjs`: chart-like text → M01, else → J6 task); contact-path chart routing (ADR-064).
-- **Planner:** J6 (`src/pipelines/j6/control.ts` `planNext`) — model-mediated step planner (MODEL_J6_PLANNER=claude-sonnet-5-5) over screenshot + page text + AX tree + context + **route hint** (WO4/WO8 `src/mac/router.ts`).
-- **Capability router:** `src/mac/router.ts` — deterministic, health-aware ladder (parser → app scripting → browser DOM → AX → perception → mouse). Injected into every `planNext` prompt and returned by `control_mac`. It is **advisory to the planner**, not an enforced dispatcher; the only hard enforcement of a rung is `make_mac_chart` (parser-only).
-- **Employee layer (Areas/Objectives/Follow-ups/Brief): NO MCP tools exist.** Services exist in `src/cos/*` with an integration test, but "Create Career as an Area" / "What am I waiting on?" / "Give me my executive brief" are **not reachable from conversation today**.
+## 4. MCP tools (28 registered)
+
+See `docs/current-state/tools.md` for schemas and failure modes. Summary:
+
+| Tool | R/W | Engine | Approval | Status |
+|---|---|---|---|---|
+| plan_resources | R | deterministic + Google API | none | LIVE VERIFIED |
+| list_capabilities | R | deterministic + probes | none | LIVE VERIFIED (BROKEN: 2 Mac health fields, §5) |
+| execution_metrics | R (runs reconcile) | SQL | none | LIVE VERIFIED (data gaps §18) |
+| control_mac | W | J6 LLM planner | per write step over iMessage | LIVE VERIFIED |
+| control_result | R | SQL | none | LIVE VERIFIED |
+| pending_results | R + marks delivered | SQL | none | LIVE VERIFIED earlier |
+| make_mac_chart | R on Mac | deterministic parse + model | none | LIVE VERIFIED, DEGRADED 5/12 |
+| mac_status / mac_get_context | R | heartbeat snapshot | none | LIVE VERIFIED |
+| resolve_reference | R | deterministic | none | PARTIAL (Firefox wrong, §8) |
+| get_state_overview, search_state, get_item, get_project, get_charter, get_latest_review, list_open_conflicts, list_pending_proposals, get_approval_request | R | SQL | none | LIVE VERIFIED (overview today); the rest LIVE UNVERIFIED recently |
+| capture | W (DB) | J2 LLM extraction | proposals for preference/procedure changes | BUILT, LIVE UNVERIFIED recently |
+| request_proposal_decision, request_conflict_resolution, request_archival, request_seed_promotion | W | deterministic | creates an approval request (WebAuthn page) | BUILT |
+| seed_questions, seed_answer, seed_add_source | W (DB) | seed pipeline | — | BUILT |
+| operating_review | R | J3 | — | LIVE UNVERIFIED |
+
+**How natural language is mapped to a tool:** there is no router. The claude.ai model picks a tool from the tool descriptions (for example, `plan_resources` says "Call FIRST…"). The only code-level routing is in `src/mac` (chart vs. control) and in J6's regex skill triggers. Tool choice is therefore prompt-only (§20).
+
+
+## Input schemas (extracted from src/tools/server.ts, src/tools/j3Tools.ts)
+
+| Tool | inputSchema (zod) | annotation |
+|---|---|---|
+| `get_charter` | `z.object({})` | read-only hint |
+| `capture` | `z.object({ text: z.string().min(1).max(30_000), source_type: z.enum(["conversation", "note", "document", "correction"]).default("conversation"), mode: z.enum(["inline", "explicit", "end_of_session", "audit"]).default("inline"), project_hint: z.string().max(200` |  |
+| `get_state_overview` | `z.object({})` | read-only hint |
+| `get_project` | `z.object({ project: z.string().min(1).max(200) })` | read-only hint |
+| `search_state` | `z.object({ query: z.string().min(2).max(300), limit: z.number().int().min(1).max(50).default(20) })` | read-only hint |
+| `get_item` | `z.object({ type: z.string(), id: z.string().uuid() })` | read-only hint |
+| `list_open_conflicts` | `z.object({})` | read-only hint |
+| `list_pending_proposals` | `z.object({})` | read-only hint |
+| `request_conflict_resolution` | `z.object({ conflict_id: z.string().uuid(), resolution: z.enum(["keep_existing", "accept_new", "both_valid", "custom"]), custom_value: z.string().max(2000).optional(), rationale: z.string().min(1).max(1000), })` |  |
+| `request_proposal_decision` | `z.object({ proposal_id: z.string().uuid(), decision: z.enum(["approve", "reject"]), rationale: z.string().min(1).max(1000) })` |  |
+| `request_archival` | `z.object({ records: z.array(z.object({ type: z.enum(ARCHIVABLE), id: z.string().uuid() })).min(1).max(50), rationale: z.string().min(1).max(1000), })` |  |
+| `request_seed_promotion` | `z.object({ batch_id: z.string().uuid(), rationale: z.string().min(1).max(1000) })` |  |
+| `get_approval_request` | `z.object({ approval_id: z.string().uuid() })` | read-only hint |
+| `seed_add_source` | `z.object({ text: z.string().min(1).max(30_000), title: z.string().max(200).optional(), idempotency_key: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/).describe("A new opaque ID for this source; reuse only when retrying the same call."), })` |  |
+| `seed_questions` | `z.object({ batch_id: z.string().uuid().optional() })` |  |
+| `seed_answer` | `z.object({ batch_id: z.string().uuid(), answers: z.array(z.union([ z.object({ candidate_id: z.string().uuid(), action: z.enum(["confirm", "reject"]) }), z.object({ candidate_id: z.string().uuid(), action: z.literal("set_project"), value: z.string().min(1).max(` |  |
+| `control_mac` | `z.object({ request: z.string().min(1).max(4000) })` |  |
+| `make_mac_chart` | `z.object({ filename: z.string().min(1).max(200), title: z.string().max(200).optional() })` |  |
+| `list_capabilities` | `z.object({ type: z.enum(["state", "mac", "external", "agent", "model"]).optional() })` |  |
+| `plan_resources` | `z.object({ request: z.string().min(2).max(2000) })` |  |
+| `execution_metrics` | `z.object({ days: z.number().int().min(1).max(90).optional(), recent: z.number().int().min(0).max(50).optional() })` |  |
+| `pending_results` | `z.object({})` |  |
+| `mac_get_context` | `z.object({})` |  |
+| `resolve_reference` | `z.object({ phrase: z.string().min(1).max(300) })` |  |
+| `mac_status` | `z.object({})` |  |
+| `control_result` | `z.object({ task_code: z.number().int().positive().optional() })` |  |
+| `operating_review` | `z.object({})` |  |
+| `get_latest_review` | `z.object({})` | read-only hint |
+
+Output: every tool returns JSON text content; control_result/pending_results/make_mac_chart also return images.
+
+Failure modes: Mac offline → tasks queue as waiting_for_mac; Google token revoked → registry marks google.* down; budget ceiling → BudgetBlockedError; J6 parse failure → model_parse; approval never given → task waits indefinitely (no expiry).

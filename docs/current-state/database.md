@@ -1,50 +1,63 @@
-# Database / state model (production: Neon Postgres, schema `finagai`)
+# Database — current state (audit 2026-10-09)
 
-Source of truth: `migrations/*.sql`, applied by the GitHub Actions `migrate` workflow (`.github/workflows/migrate.yml`, environment `production`, reviewer = Julian). Preflight (`src/ops/preflight.ts`) refuses to start the server until every migration the code expects is applied. **Applied in production: 0001–0021 (verified: server a16c847 starts).**
+Source of truth: `docs/FINAGAI_CURRENT_STATE_2026-10-09.md`. Code at `94087a7` (live). Rewritten from code and live evidence; supersedes earlier versions of this file.
+
+| Label | Meaning |
+|---|---|
+| **LIVE VERIFIED** | Exercised against production (Render + Neon + Julian's Mac) with observed output, today or in a recorded live run |
+| **LIVE UNVERIFIED** | Deployed, but no live run observed that proves it works |
+| **BUILT** | Code + tests exist; not wired into a live path, or never exercised live |
+| **PARTIAL** | Works for a subset of the stated scope; the gap is named |
+| **DESIGNED** | ADR/doc only |
+| **ABSENT** | Nothing exists |
+| **BROKEN** | Exists and produces a wrong result, with evidence |
+
+
+## 13. Memory types
+
+| Type | Store | Status |
+|---|---|---|
+| Structured state (projects, work items, knowledge, entities) | Postgres (0002) | BUILT. Live state is **nearly empty**: 1 project ("Unassigned"), 0 open items |
+| Preferences | `preference` table, versioned, proposal-gated | BUILT; read only by `get_charter` |
+| Procedures | `procedure` table, proposal-gated | BUILT; **never read by the J6 executor** |
+| Contact notes (J5) | `concierge_contact.notes` | LIVE VERIFIED earlier |
+| Artifacts / interactions | `interaction`, artifacts | LIVE VERIFIED |
+| Episodic task memory reused across tasks | — | ABSENT |
+| Current Mac context | heartbeat snapshot, ephemeral | LIVE VERIFIED |
+
+
+## 21. Deployment / recovery
+
+- Migrate-before-deploy race: **eliminated, LIVE VERIFIED** (release #6 ran migrate 0023, gated, then deploy, then the SHA check). Render auto-deploy is off. Migrations are frozen by checksum test.
+- Live SHA matches origin/main (`94087a7`).
+- Backup/restore drill: integration test passes (restore into a fresh DB with matching checksums). A live restore has not been run (LIVE UNVERIFIED).
+- Helper recovery: KeepAlive restart LIVE VERIFIED. The independent heartbeat survives long tasks.
+
 
 ## Migrations
 
-| # | File | What it changed |
-|---|---|---|
-| 0001 | `0001_foundation.sql` | Finagai Core, Schema v0 foundation: schema, shared types, helper functions. Runs as the migration role (finagai_migrator). Never edit after release; add a new m   |
-| 0002 | `0002_schema_v0.sql` | Finagai Core, Schema v0 (approved 2026-10-01, with amendments ADR-019 to ADR-026). 20 tables in five groups: audit/operations, work state, knowledge, governance — creates: event, llm_call, job_run, charter, proposal, procedure, preference, seed_batch, capture, project, entity, work_item, relationship, external_ref, knowledge_item, capture_candidate, conflict, governance_request, review, capture_audit — alters: work_item |
-| 0003 | `0003_privileges.sql` | Least-privilege grants for the running service (finagai_app). Database-level protections (Schema v0): * no DELETE privilege on any table (archive only, ADR-004    |
-| 0004 | `0004_bootstrap_rows.sql` | Rows Core requires before first use. The charter itself is NOT seeded here: Finagai's charter text is a later, separately approved deliverable.   |
-| 0005 | `0005_webauthn_credentials.sql` | ADR-030: public verification data for Julian's WebAuthn credentials, and per-ceremony challenges bound to governance requests. No private key material is ever s — creates: webauthn_credential — alters: governance_request |
-| 0006 | `0006_hardening.sql` | M2 hardening (Julian's review, 2026-10-01). Forward-only; 0001-0005 are unchanged. 1. job_run: at-least-once dispatch with leases, attempts, and recovery 2. ide — creates: outbound_delivery — alters: event, governance_request, job_run, llm_call, review, webauthn_credential |
-| 0007 | `0007_budget_deferral_delivery.sql` | Julian's clarifications (2026-10-01): * J2 captures received at the hard model-spend ceiling are stored as sanitized 'budget_deferred' envelopes and replayed la  — alters: capture, capture_candidate, outbound_delivery |
-| 0008 | `0008_concurrency_tokens.sql` | Julian's concurrency fixes (2026-10-01): * capture.payload_sha256: same idempotency key with a different payload is a conflict, not a replay. The hash covers th  — alters: capture, outbound_delivery |
-| 0009 | `0009_capture_leases_sensitive_uncertain.sql` | (Revised before release: not yet applied to any shared environment.) Julian's corrections (2026-10-01): 1. capture.source_text is NULL until the second classifi  — alters: capture, outbound_delivery |
-| 0010 | `0010_approval_page_seeding.sql` | M5 (governance approval page) and M7 (seeding) support. — creates: webauthn_enrollment, webauthn_ceremony — alters: capture_candidate, governance_request |
-| 0011 | `0011_concierge.sql` | J5 ticket concierge (ADR-044). Messages from allow-listed iMessage contacts arrive through the Mac helper; Core drafts replies in Julian's voice; nothing is sen — creates: concierge_contact, concierge_message, concierge_draft — alters: finagai, llm_call |
-| 0012 | `0012_control.sql` | J6 Mac control agent (ADR-050). Julian asks Finagai to do something on his Mac; Finagai plans steps; the Mac helper runs read-only steps freely and QUEUES world — creates: control_task, control_step — alters: finagai, llm_call |
-| 0013 | `0013_control_requester.sql` | J6 tasks can be requested by an allow-listed contact (ADR-051). The requester is recorded for context, but approval of every write step still comes only from Ju  — alters: control_task |
-| 0014 | `0014_control_result.sql` | J6 tasks store their outcome so the Claude chat that started them can read the result (ADR-056), instead of the answer only appearing in Julian's iMessage threa  — alters: control_task |
-| 0015 | `0015_control_image.sql` | A J6 task can produce a final image (a chart or screenshot). Stored so the chat can show it and it can also go to iMessage (ADR-058). Kept small; base64 PNG, ca  — alters: control_task |
-| 0016 | `0016_areas_of_responsibility.sql` | Employee-level layer (product mandate): first-class Areas of Responsibility, Objectives, Follow-ups (closed-loop), and Area health. Linked to the existing proje — creates: area, objective, followup — alters: project |
-| 0017 | `0017_interaction_artifacts.sql` | Interaction reliability (product mandate): durable artifact registry + inbound idempotency ledger, so "send Santiago" resolves the real last chart (even after r — creates: artifact, inbound_message  |
-| 0018 | `0018_mac_runtime.sql` | Mac runtime as a first-class persistent worker (ADR-066). Root cause of tasks 33/34 sitting "active" forever: control_task had no worker liveness at all — a row — creates: mac_runtime — alters: control_task |
-| 0019 | `0019_mac_runtime_health.sql` | WO1 health counters (ADR-066.1): Core must know reconnects, crash/restarts, and last successful execution.  — alters: mac_runtime |
-| 0020 | `0020_interaction.sql` | WO2: an accepted request is a durable interaction, owned until a terminal state, independent of any one Claude turn. Links conversation -> logical request -> ta — creates: interaction — alters: control_task |
-| 0021 | `0021_mac_context.sql` | WO3: ephemeral current-context snapshot from the Mac runtime (frontmost app/window/document, selected Finder items, active browser tab). Overwritten every heart  — alters: mac_runtime |
+- `0001_foundation.sql`
+- `0002_schema_v0.sql`
+- `0003_privileges.sql`
+- `0004_bootstrap_rows.sql`
+- `0005_webauthn_credentials.sql`
+- `0006_hardening.sql`
+- `0007_budget_deferral_delivery.sql`
+- `0008_concurrency_tokens.sql`
+- `0009_capture_leases_sensitive_uncertain.sql`
+- `0010_approval_page_seeding.sql`
+- `0011_concierge.sql`
+- `0012_control.sql`
+- `0013_control_requester.sql`
+- `0014_control_result.sql`
+- `0015_control_image.sql`
+- `0016_areas_of_responsibility.sql`
+- `0017_interaction_artifacts.sql`
+- `0018_mac_runtime.sql`
+- `0019_mac_runtime_health.sql`
+- `0020_interaction.sql`
+- `0021_mac_context.sql`
+- `0022_acceptance_telemetry.sql`
+- `0023_capability_registry.sql`
 
-## Tables that matter for the current mandates (DDL excerpts are in the migration files named)
-
-| Table | Migration | Purpose | Key columns | Lifecycle / authority |
-|---|---|---|---|---|
-| `control_task` | 0012, 0013, 0014, 0015, 0018, 0020 | A Mac task (J6 drive or M01 chart or `mac_ping`) | `id uuid`, `code bigserial` (human code), `request text`, `origin chat/imessage/contact`, `requester`, `status active/done/failed/cancelled`, `result_summary`, `result_detail`, `result_image_b64`, **`claimed_at, lease_until, last_progress_at, worker_id, progress_note` (0018)**, `interaction_id` (0020) | Created by `/control/start`, `make_mac_chart`, helper self-thread. **Claimed** by helper (`/control/claim`, 120s lease). Terminal via `/mac/chart-done` or J6 `done`. **Sweep** (`sweepStaleTasks`, every heartbeat): unclaimed >30min → failed "Abandoned"; lease expired + no progress >10min → failed "Stalled". Derived lifecycle (`src/mac/runtime.ts deriveLifecycle`): queued / waiting_for_mac / executing / stalled / terminal. |
-| `control_step` | 0012 | Each planned J6 step (kind, params, risk, status proposed/approved/running/done/skipped) | `task_id FK`, `code`, `kind`, `params jsonb`, `risk read/write`, `status`, `result` | Written by `planNext`; approvals via `/control/decision` (iMessage "ok N"). |
-| `mac_runtime` | 0018, 0019, 0021 | Single-row (`id='primary'`) health record of the Mac helper | `last_heartbeat_at`, `helper_version`, `capabilities jsonb` (real macDoctor matrix), `frontmost_app/window`, `current_task_id`, `started_at`, `reconnect_count`, `restart_count`, `last_success_at/code`, **`context jsonb` (ephemeral WO3 snapshot, overwritten each heartbeat)** | Upserted every 15s by `/mac/heartbeat`. Online = heartbeat < 45s. |
-| `interaction` | 0020 | WO2 durable ownership of a logical request | `conversation`, `origin_message`, `request_key` (normalized), `state` (received…completed/failed/awaiting_human/superseded), `task_ids uuid[]`, `result_summary`, `result_image_b64`, `final_response_status pending/delivered/not_needed`, `delivered_at`, `retries` | `openInteraction` reuses an equivalent open interaction ≤30 min (dedup). Task terminal → `completeForTask` → pending delivery → surfaced on next tool call (`helpers.ok`) or `pending_results`/`control_result` → delivered. |
-| `artifact` | 0017 | Durable registry of produced files (chart png, screenshots, task results) | `kind chart/screenshot/result/file`, `storage_ref` (local Mac path), `conversation`, `task_id`, `sent_to`, `created_at` | Registered by helper via `/artifact/register`; `resolveRecentArtifact` = most recent for a conversation (24h); `/artifact/sent` marks forwarding. **Storage is the Mac filesystem (`~/.finagai/out/...`), not cloud.** |
-| `inbound_message` | 0017 | Idempotency for iMessage inbound (`/interaction/claim`/`finish`) | `message_guid unique`, `status`, `attempts` | Prevents double-processing of the same iMessage across helper restarts. |
-| `area`, `objective`, `followup` | 0016 | Employee layer (ADR-060) | area: `name unique, health green/yellow/red, owner`; objective: `area_id FK, title, status, due`; followup: `area_id, objective_id, who, what, waiting_since, due, status open/waiting/closed, last_nudged` | Services in `src/cos/*`. **No MCP tools, no scheduler hook** → reachable only from tests/code today. |
-| `event` | 0001 | Append-only audit log | `actor, action, entity_type, entity_id, before/after jsonb, client, at` | Written by `appendEvent` for governance, tool calls (`audit()`), task creation. Not a domain event bus. |
-| `llm_call` | 0001 | Every model call with tokens + USD | `job, model, input/output tokens, cost_usd, cached` | Budget enforcement (`src/guards/budget.ts`) reads monthly sum. |
-| `job_run` | 0001, 0006 | Scheduler runs with leases | `job, scheduled_for, status, lease_until, attempts` | Weekly review / missed-run check / daily maintenance. |
-| `governance_request` | 0002, 0006 | Staged principal decisions | `kind, target, payload, status pending/approved/rejected/expired/superseded, ttl` | Approved only through `/approve` (OIDC + WebAuthn). |
-| `charter`, `proposal`, `procedure`, `preference` | 0002 | Governance + **procedural memory tables (schema exists; `procedure` has NO write path in code — DESIGNED ONLY)** | — | `get_charter` reads charter/preferences. |
-| `project`, `work_item`, `entity`, `knowledge_item`, `relationship`, `external_ref`, `conflict`, `capture*`, `seed_batch` | 0002, 0009, 0010 | J2 factual/state memory (captures → items with provenance) | — | Written by `capture`/seeding; read by `get_project`, `search_state`, `get_item`. |
-| `concierge_contact/message/draft` | 0011 | J5 iMessage concierge | — | Contact allow-list, message log, drafts awaiting "ok". |
-| `review` | 0002 | J3 operating reviews | — | Written by weekly review / `operating_review` tool. |
-| `webauthn_*`, `outbound_delivery` | 0005, 0007 | Approval passkeys; Resend email deliveries with retry | — | — |
+Latest applied live: 0023 (capability, resource_trace). The `event` table is an append-only audit log. `interaction_metrics_daily` is a view (0022).

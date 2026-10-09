@@ -1,18 +1,45 @@
-# Known failures, gaps, technical debt (Core 45e80d0) — ranked
+# Known Gaps — current state (audit 2026-10-09)
 
-| # | Severity | Item | Evidence / root cause | Live state | Regression |
-|---|---|---|---|---|---|
-| 1 | HIGH | Employee layer unreachable from conversation | `src/cos/*` services + tables exist; **zero MCP tools, zero scheduler hooks** | Broken-by-absence: "Create Career as an Area", "What am I waiting on?", "executive brief" do nothing | cos.test (services only) |
-| 2 | HIGH | No event-driven behavior | Only iMessage polling + 15-min cron; no Gmail/Calendar/file watchers | NOT IMPLEMENTED | — |
-| 3 | HIGH | No learning of any kind | `procedure`/`preference` tables exist (0002) with no write path; no tool-reliability or failure records | NOT IMPLEMENTED | — |
-| 4 | MED | Migrate-before-deploy race | Render auto-deploys on push; preflight fails until the GitHub `migrate` workflow is approved → manual "Deploy latest commit" needed (hit 3× on 2026-10-04) | Live friction, every migration | none |
-| 5 | MED | Rasterizer rung uncertainty | NSImage rung produced nothing on Julian's Mac (cause not captured); Chrome rung works | Chrome-first live (task #74 full width) | aspect gate live-proven; no unit test |
-| 6 | MED | J6 write-step approvals via iMessage only | `await_approval` → "ok N" in Messages; a chat-initiated task can stall waiting for an iMessage reply | by design (ADR-051) but surprising from chat | — |
-| 7 | MED | Verification is per-action, not per-task | WO4 actions verify intended outcome; J6 `done` still trusts the planner's claim (no task-level acceptance criteria) | live | partial |
-| 8 | MED | Multi-display, dialogs/sheets, unlabeled icon buttons | `ax_click` searches front window only; capture = main display | NOT VERIFIED | — |
-| 9 | LOW | Chart trend line across regime change | single OLS trend over two-regime series (task #74) misleads | live | — |
-| 10 | LOW | Helper log not visible to Core | failures like "nsimage raster failed" live only in `~/.finagai/imessage-helper.log` | live | — |
-| 11 | LOW | `pending_results` marks text-only results delivered on `helpers.ok` but image results only when fetched | can resurface once | live | interactions W2 |
-| 12 | INFO | Observability: no metrics, no p50/p95, no dashboards; only `event`, `llm_call`, Render logs | measured values below are from single runs | — | — |
+Source of truth: `docs/FINAGAI_CURRENT_STATE_2026-10-09.md`. Code at `94087a7` (live). Rewritten from code and live evidence; supersedes earlier versions of this file.
 
-Measured today (single runs, not aggregates): round-trip ping 11.1s; chart task 69/70/72/73/74: 12–45s; TextEdit AX task #77: ~60s, 6 steps, 0 interventions; false completions caught: 1 (cropped chart, #73); false completions delivered: 1 before gate (#72).
+| Label | Meaning |
+|---|---|
+| **LIVE VERIFIED** | Exercised against production (Render + Neon + Julian's Mac) with observed output, today or in a recorded live run |
+| **LIVE UNVERIFIED** | Deployed, but no live run observed that proves it works |
+| **BUILT** | Code + tests exist; not wired into a live path, or never exercised live |
+| **PARTIAL** | Works for a subset of the stated scope; the gap is named |
+| **DESIGNED** | ADR/doc only |
+| **ABSENT** | Nothing exists |
+| **BROKEN** | Exists and produces a wrong result, with evidence |
+
+
+## 28. Ranked technical debt
+
+1. Browser page read is not real (`read_text` = first AXTextArea); there is no DOM channel.
+2. `browserActiveTab` ignores the frontmost app, and Firefox is unsupported, so deictic answers are wrong with high confidence.
+3. Employee layer (`src/cos`) is unreachable: no tools, no schedule.
+4. Approval waits never expire; interaction ≠ task state (#104/#113 for 4 days).
+5. iMessage-path tasks create no interaction, so telemetry stops at Oct 5.
+6. Registry Mac probe key mismatch (`files`/`screen` vs `filesystem`/`screenCapture`).
+7. "Waiting on" queries are keyword search, with no relevance or spam filtering.
+8. Reconcile errors are swallowed (`.catch(() => {})`) at both call sites, which hides failures.
+9. J6 success is 0.54; coordinate actions produce false completions.
+10. No learning loop; procedures are never read by the executor.
+11. Live state DB nearly empty (1 project), so state-based answers are vacuous.
+12. Scheduler deployed SHA is not observable from /health.
+
+
+## 27. 2-day delta (Oct 7–9)
+
+No code, migration or helper change. The only state change is usage: #117 done, #118 (audit) done, a helper outage of 656 s on Oct 9 that auto-recovered. The Oct 5 changes are covered in the changelog in §1.
+
+
+## Evidence that contradicts earlier capability claims
+
+1. "Browser read" (registry `mac.browser` access=read): page text cannot actually be read (#118). Only URL/title for Chrome/Safari.
+2. "Deterministic deictic resolution": wrong referent with high confidence when Firefox is frontmost (today).
+3. "Mac boolean probes fixed" (ADR-075): accessibility is fixed, but filesystem/screen still show "unknown" because of key names.
+4. "Interactions reconciled" (ADR-075): #104/#113 still "executing" after 4 days (tasks in `waiting_approval`).
+5. "Cost attribution" (ADR-075): every `cost_usd` is still null. Unproven rather than disproven.
+6. "Employee layer (ADR-060)": shipped as code, but unreachable from any tool or job.
+7. "execution_metrics shows how Finagai performs": usage after Oct 5 is missing (the iMessage path is untracked).

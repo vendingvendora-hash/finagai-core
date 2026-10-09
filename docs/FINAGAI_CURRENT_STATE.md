@@ -1,4 +1,6 @@
 # FINAGAI — CURRENT STATE (implementation-level audit)
+
+> **Superseded** by `docs/FINAGAI_CURRENT_STATE_2026-10-09.md` (audit at live `94087a7`). Kept for history.
 Generated 2026-10-04 from the repository at commit **45e80d0** (origin/main). Live Core: `a16c847` (verified `/health` 2026-10-04 ~18:40 EDT; `45e80d0` adds only the WO4 verification fix + control_result delivery mark and is **bundled, not yet pushed**). Mac helper: `runtime-6` installed and running on Julian's Mac (launchd). Companion appendices: `docs/current-state/architecture.md`, `mac-runtime.md`, `database.md`, `tools.md`, `tests.md`, `known-gaps.md`.
 
 Legend: **LIVE** = deployed and observed working · **BUILT** = in repo, not deployed · **PARTIAL** · **DESIGNED** = ADR/schema only · **NONE** · **BROKEN** · **UNVERIFIED**.
