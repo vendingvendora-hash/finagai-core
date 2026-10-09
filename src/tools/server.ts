@@ -25,6 +25,7 @@ import { capResponse, filterByTier, type Tier } from "../guards/output.js";
 import { runCapture, type J2Deps } from "../pipelines/j2/capture.js";
 import { stageGovernanceRequest, type TargetRef } from "../governance/stage.js";
 import { addSource, answer, openBatch, questions } from "../pipelines/seed/seed.js";
+import { parseFinagaiJob, runFinagaiJob } from "../cos/finagai-job.js";
 import {
   approvalStatus, currentCharter, isItemTable, itemWithProvenance, openConflicts, pendingProposals, projectDetail, searchState, stateOverview,
 } from "./queries.js";
@@ -321,6 +322,12 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     description: "Operate Julian's Mac step by step (J6): open apps, click, type, run commands, use logged-in sessions, for general desktop actions. IMPORTANT: do NOT use this to chart/plot/visualize data from a named local spreadsheet or Excel file — use make_mac_chart for that; it is deterministic, finds and reads the file, and returns the chart image directly.",
     inputSchema: z.object({ request: z.string().min(1).max(4000) }),
   }, async ({ request }) => {
+    // ADR-080: whitelisted read-only Core diagnostics ("finagai-job: …") — no Mac task, no Mac needed.
+    const job = parseFinagaiJob(request);
+    if (job) {
+      const r = await runFinagaiJob(deps.pool, deps.google, job);
+      return "error" in r && typeof (r as { error: unknown }).error === "string" ? fail("control_mac", (r as { error: string }).error) : ok("control_mac", { finagaiJob: job.kind, ...r });
+    }
     // HEALTH GATE (ADR-066): don't queue a Mac task for a Mac that isn't connected.
     const rt0 = await getRuntime(deps.pool);
     if (!macOnline(rt0)) {

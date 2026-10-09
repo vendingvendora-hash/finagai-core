@@ -57,31 +57,77 @@ describe.skipIf(!pool)("employee layer (Phase 3)", () => {
 });
 
 import { applyBootstrap, proposeCareerBootstrap } from "../../src/cos/bootstrap.js";
-describe.skipIf(!pool)("Career bootstrap (Phase 3C): propose → approve → apply", () => {
-  const H = "Job ID,Date First Analyzed,Date Last Updated,Company,Title,Location,Work Mode,Employment Type,Posting URL,Eligibility Status,Eligibility Detail,Application Status,Overall Match Score,Fit Concerns Summary,Salary Range,Priority,Next Action,Next Action Date,Latest Resume Link,Latest Cover Letter Link,Job Folder Link";
-  const google = {
-    sheetCsv: async () => ({ name: "Vendora Career Copilot - Job History", modified: "2026-10-09T16:29:38Z", account: "vending.vendora@gmail.com", csv: [H,
-      "mtdy30,,,Altarum,Pricing Analyst,\"Silver Spring, MD\",Hybrid,Full-time,https://www.linkedin.com/jobs/view/4462053616,No Restriction Identified,,Analyzed,88,,95000 105000 USD,Medium,,,,,",
-      "m18usy,,,\"M.C. Dean, Inc.\",Financial Analyst,\"McLean, VA\",,Full-time,https://www.linkedin.com/jobs/view/4205880810/,No Restriction Identified,,Analyzed,92,,,Medium,,,,,",
-      "k53b3a,,,Northrop Grumman,Program Cost Control Analyst,\"Linthicum Heights, MD\",,Full-time,https://www.linkedin.com/jobs/view/4445298534/,Active Security Clearance Required,,Analyzed,90,,,Medium,,,,,"].join("\n") }),
-    gmail: async (t: string[]) => t[0] === "interview" ? [{ name: "Gmail: RE: Interview with Altarum / Julian - Pricing Analyst [u]", path: "g", modified: "2026-09-24T15:09:36.000Z", text: "From: Beth Young <Beth.Young@altarum.org>\n" }] : [],
-    calendar: async () => [{ name: "Google Calendar [u]", path: "c", text: "2026-09-28T15:00:00-04:00 | Interview with Altarum / Julian - Pricing Analyst | |" }],
-  };
-  it("proposes without writing; flags the status conflict; shortlist excludes clearance-required roles", async () => {
+import { replayProposal, traceProposal } from "../../src/cos/career-diagnostics.js";
+import { parseFinagaiJob, runFinagaiJob } from "../../src/cos/finagai-job.js";
+import { CAREER_QUERIES } from "../../src/cos/career-evidence.js";
+import { ACCOUNT, REC, SHEET_CSV, queryHits } from "../fixtures/career-2026-10-09.js";
+import type { GmailRecord } from "../../src/google/client.js";
+describe.skipIf(!pool)("Career bootstrap (ADR-080): acquire → snapshot → interpret → propose → apply, reproducibly", () => {
+  const keyOf = (q: string) => Object.entries(CAREER_QUERIES).find(([, b]) => q.endsWith(b))![0];
+  const google = (recs: GmailRecord[], omit = new Set<string>()) => ({
+    sheetCsv: async () => ({ id: "sheet-1", name: "Vendora Career Copilot - Job History", modified: "2026-10-09T16:29:38Z", account: "vending.vendora@gmail.com", csv: SHEET_CSV }),
+    gmailEnumerate: async (q: string) => { const h = queryHits(keyOf(q), recs).filter((x) => !omit.has(x.id)); return [{ account: ACCOUNT, ok: true, records: h, pages: 1, truncated: false, ids: h.length, vanished: [] }]; },
+    gmailMetadata: async (_a: string, ids: string[]) => ({ records: recs.filter((x) => ids.includes(x.id)), missing: ids.filter((id) => !recs.some((x) => x.id === id)).map((id) => ({ id, reason: "deleted at source" })) }),
+    calendarEnumerate: async (q: string) => [{ account: ACCOUNT, ok: true, pages: 1, records: q === "interview" ? [{ id: "cal-1", start: "2026-09-28T15:00:00-04:00", summary: "Interview with Altarum / Julian David Perez Cardozo - Pricing Analyst" }] : [] }],
+  });
+  const ALL = Object.values(REC);
+  const BEFORE = ALL.filter((x) => ![REC.riSent1009, REC.riThanks1009, REC.riPricing1009].includes(x));
+  const T = new Date("2026-10-09T17:00:00Z");
+  it("stores the frozen snapshot + acquisition, proposes without writing Career state, and records provenance", async () => {
     const before = (await pool!.query(`SELECT count(*)::int AS n FROM opportunity`)).rows[0].n;
-    const p = await proposeCareerBootstrap(pool!, google as never, new Date("2026-10-09T16:00:00Z"));
-    expect((await pool!.query(`SELECT count(*)::int AS n FROM opportunity`)).rows[0].n).toBe(before);   // nothing written yet
-    expect(p.summary.activeProjects.map((a) => a.org)).toEqual(["Altarum"]);
-    expect(p.summary.activeProjects[0]!.contact).toBe("Beth Young");
-    expect(p.summary.activeProjects[0]!.proposedFollowup).toMatch(/Waiting on Beth Young/);
-    expect(p.summary.conflicts.join(" ")).toMatch(/Altarum: the Career Copilot sheet still says "analyzed"/);
-    expect(p.summary.pipeline.shortlist.map((s) => s.org)).toEqual(["M.C. Dean, Inc."]);
+    const p = await proposeCareerBootstrap(pool!, google(BEFORE) as never, T);
+    expect((await pool!.query(`SELECT count(*)::int AS n FROM opportunity`)).rows[0].n).toBe(before);
+    expect(p.summary.provenance).toEqual(expect.objectContaining({ complete: true, interpreterVersion: "career-interpret-3", previousSnapshot: null }));
+    expect(p.summary.activeProjects.map((a) => `${a.org}:${a.status}`).sort()).toEqual(["Altarum Institute:interviewing", "Amazon:applied", "Chimes:applied", "Vallum Associates:applied"]);
+    expect(p.summary.closed!.map((c) => `${c.org}:${c.status}`).sort()).toEqual(["Accenture:rejected", "Cvent:rejected", "Immuta:rejected", "Johns Hopkins University:rejected", "Transurban:rejected", "Window Nation:rejected", "Yahoo:rejected"]);
+    const row = (await pool!.query(`SELECT snapshot_digest, interpretation_digest, interpreter_version FROM bootstrap_proposal WHERE code = $1`, [p.code])).rows[0];
+    expect(row.snapshot_digest).toBe(p.summary.provenance!.snapshotDigest);
+  });
+  it("same sources again → same snapshot row, same digests; a search that drops Transurban is healed by carry-forward", async () => {
+    const a = await proposeCareerBootstrap(pool!, google(BEFORE) as never, new Date(T.getTime() + 60_000));
+    const b = await proposeCareerBootstrap(pool!, google(BEFORE, new Set([REC.transSent1002.id, REC.transViewed1002.id, REC.transSenior1002.id])) as never, new Date(T.getTime() + 120_000));
+    expect(b.summary.provenance!.snapshotDigest).toBe(a.summary.provenance!.snapshotDigest);
+    expect(b.summary.provenance!.opportunitySetDigest).toBe(a.summary.provenance!.opportunitySetDigest);
+    expect(b.summary.provenance!.searchMisses).toBe(3);
+    expect(b.summary.delta).toEqual(expect.objectContaining({ sameInput: true, sameOpportunitySet: true, unexplained: [] }));
+    expect((await pool!.query(`SELECT count(DISTINCT snapshot_id)::int AS n FROM bootstrap_proposal WHERE code IN ($1, $2)`, [a.code, b.code])).rows[0].n).toBe(1);
+    const r = await replayProposal(pool!, b.code, 10);
+    expect(r).toEqual(expect.objectContaining({ identical: true, matchesStoredProposal: true, runs: 10 }));
+    const t = await traceProposal(pool!, b.code, "Transurban") as { found: Array<{ stage: string; acquiredVia: string[] }>; final: { status: string } };
+    expect(t.final.status).toBe("rejected"); expect(t.found.filter((f) => !f.acquiredVia.includes("carry-forward"))).toEqual([]);
+  });
+  it("new evidence → the delta names the records; apply upserts by stable identity and never deletes", async () => {
+    const p = await proposeCareerBootstrap(pool!, google(ALL) as never, new Date(T.getTime() + 180_000));
+    expect(p.summary.delta!.oppAdded).toEqual([{ org: "Resource Innovations", explainedBy: [REC.riSent1009.id, REC.riThanks1009.id, REC.riPricing1009.id] }]);
+    expect(p.summary.applicable).toEqual({ ok: true, why: [] });
     const a = await applyBootstrap(pool!, p.code);
-    expect(a).toEqual(expect.objectContaining({ area: "Career", opportunities: 3, activeProjects: ["Altarum"] }));
-    const alt = (await pool!.query(`SELECT status, project_id IS NOT NULL AS linked, contact FROM opportunity WHERE org = 'Altarum'`)).rows[0];
-    expect(alt).toEqual({ status: "interviewing", linked: true, contact: "Beth Young" });
+    expect(a).toEqual(expect.objectContaining({ area: "Career" }));
+    const st = Object.fromEntries((await pool!.query(`SELECT org, status FROM opportunity WHERE archived_at IS NULL`)).rows.map((r) => [r.org, r.status]));
+    expect(st).toEqual(expect.objectContaining({ Altarum: "interviewing", Immuta: "rejected", Transurban: "rejected", "Resource Innovations": "applied", "Vallum Associates": "applied", Amazon: "applied" }));
+    expect(Object.keys(st)).not.toContain("Senior");
+    const n1 = (await pool!.query(`SELECT count(*)::int AS n FROM opportunity`)).rows[0].n;
+    const again = await proposeCareerBootstrap(pool!, google(ALL) as never, new Date(T.getTime() + 240_000));
+    await applyBootstrap(pool!, again.code);
+    expect((await pool!.query(`SELECT count(*)::int AS n FROM opportunity`)).rows[0].n).toBe(n1);   // idempotent: no duplicates
     expect((await applyBootstrap(pool!, p.code)) as { error?: string }).toEqual({ error: expect.stringMatching(/already applied/) });
     const w = await waitingOn(pool!, "Career");
-    expect(JSON.stringify(w)).toMatch(/Beth Young/);
+    expect(JSON.stringify(w)).toMatch(/Chimes|Beth Young/);
+  });
+  it("an incomplete acquisition yields a proposal that cannot be applied", async () => {
+    const g = { ...google(ALL), gmailEnumerate: async () => [{ account: ACCOUNT, ok: false, error: "google gmail.googleapis.com HTTP 429", records: [], pages: 0, truncated: false, ids: 0 }] };
+    const p = await proposeCareerBootstrap(pool!, g as never, new Date(T.getTime() + 300_000));
+    expect(p.summary.applicable!.ok).toBe(false);
+    expect((await applyBootstrap(pool!, p.code)) as { error?: string }).toEqual({ error: expect.stringMatching(/not applicable: incomplete snapshot/) });
+  });
+  it("finagai-job channel: whitelisted, read-only, no Mac task", async () => {
+    expect(parseFinagaiJob("open Safari")).toBeNull();
+    expect(parseFinagaiJob("finagai-job: stability 10 Immuta, Transurban")).toEqual({ kind: "stability", runs: 10, orgs: ["Immuta", "Transurban"] });
+    expect(parseFinagaiJob("finagai-job: apply 3")).toEqual({ kind: "unknown", text: "apply 3" });
+    const tasks = (await pool!.query(`SELECT count(*)::int AS n FROM control_task`)).rows[0].n;
+    const r = await runFinagaiJob(pool!, google(ALL) as never, { kind: "acquisitions", limit: 3 }) as { acquisitions: unknown[] };
+    expect(r.acquisitions.length).toBe(3);
+    expect(await runFinagaiJob(pool!, undefined, { kind: "unknown", text: "apply 3" })).toEqual({ error: expect.stringMatching(/Unknown finagai-job/) });
+    expect((await pool!.query(`SELECT count(*)::int AS n FROM control_task`)).rows[0].n).toBe(tasks);
   });
 });
+

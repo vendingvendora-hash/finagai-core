@@ -6,15 +6,15 @@
  * Failures are recorded per source (never hidden), and a source that fails falls back per the plan.
  */
 import type pg from "pg";
+import type { CareerSources } from "../cos/career-evidence.js";
 import { SLOT_SOURCES, type ResourcePlan } from "./planner.js";
 import { writeTrace } from "./trace.js";
 
 export interface Retrieved { capabilityId: string; status: "ok" | "empty" | "failed" | "delegated"; items: Array<{ title: string; detail: string; source: string }>; note?: string }
-export interface GoogleSearch { search?(terms: string[]): Promise<Array<{ name: string; path: string; modified?: string; text: string }>>;
+export interface GoogleSearch extends CareerSources { search?(terms: string[]): Promise<Array<{ name: string; path: string; modified?: string; text: string }>>;
   gmail?(terms: string[]): Promise<Array<{ name: string; path: string; modified?: string; text: string }>>;
   calendar?(terms: string[]): Promise<Array<{ name: string; path: string; modified?: string; text: string }>>;
-  drive?(terms: string[]): Promise<Array<{ name: string; path: string; modified?: string; text: string }>>;
-  sheetCsv?(title: string): Promise<{ name: string; csv: string; modified: string; account?: string } | null> }
+  drive?(terms: string[]): Promise<Array<{ name: string; path: string; modified?: string; text: string }>> }
 
 const MAX_ITEMS = 5, MAX_CHARS = 600, MAX_SUMMARY_CHARS = 3000, MAX_GMAIL_ITEMS = 8;
 const clip = (s: unknown, max = MAX_CHARS) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, max);

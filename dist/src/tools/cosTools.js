@@ -3,6 +3,7 @@
  */
 import { z } from "zod";
 import { applyBootstrap, proposeCareerBootstrap } from "../cos/bootstrap.js";
+import { diagnosticResult, replayProposal, startStabilityJob, traceProposal } from "../cos/career-diagnostics.js";
 import { addWaiting, areaStatus, ensureArea, executiveBriefV2, placeUnderArea, resolveWaiting, setObjective, waitingOn } from "../cos/operating.js";
 export function registerCosTools(server, { ok, fail }, pool, google) {
     const out = (tool, r) => ("error" in r && typeof r.error === "string" ? fail(tool, r.error) : ok(tool, r));
@@ -45,8 +46,34 @@ export function registerCosTools(server, { ok, fail }, pool, google) {
         if (!google?.sheetCsv)
             return fail("bootstrap_area", "Google is not connected, so the Career sources can't be read.");
         const r = await proposeCareerBootstrap(pool, google);
-        return ok("bootstrap_area", { proposalCode: r.code, ...r.summary, instruction: `Show Julian this proposal concisely (objective to confirm, active opportunities, conflicts). Apply only after he approves: apply_bootstrap {code:${r.code}}.` });
+        const s = r.summary;
+        return ok("bootstrap_area", { proposalCode: r.code, ...s, instruction: s.applicable?.ok === false
+                ? `This proposal is NOT applicable (${s.applicable.why.join("; ")}). Tell Julian plainly; do not offer to apply it.`
+                : `Show Julian this proposal concisely (objective to confirm, active opportunities, closed ones, conflicts, and what changed since the previous snapshot with the records that explain it). Apply only after he approves: apply_bootstrap {code:${r.code}}.` });
     });
+    server.registerTool("bootstrap_trace", {
+        description: "Explain exactly why an organization is (or is not) in a Career bootstrap proposal: every source record that mentions it, how each was acquired, classified and merged, and the final status transitions. Read-only.",
+        inputSchema: z.object({ code: z.number().int().positive(), org: z.string().min(2).max(120) }),
+        annotations: { readOnlyHint: true },
+    }, async ({ code, org }) => out("bootstrap_trace", await traceProposal(pool, code, org)));
+    server.registerTool("bootstrap_replay", {
+        description: "Re-run the interpretation of a proposal's frozen input snapshot N times (record order permuted) and report whether every run produces identical digests and the stored result. Read-only.",
+        inputSchema: z.object({ code: z.number().int().positive(), runs: z.number().int().min(1).max(50).default(10) }),
+        annotations: { readOnlyHint: true },
+    }, async ({ code, runs }) => out("bootstrap_replay", await replayProposal(pool, code, runs)));
+    server.registerTool("bootstrap_stability", {
+        description: "Run N consecutive LIVE Career bootstrap proposals (fresh acquisition each time) and report whether the opportunity set and statuses are identical, attributing any difference to specific new/removed source records. Writes no Career state. Returns a job code; read it with diagnostic_result.",
+        inputSchema: z.object({ runs: z.number().int().min(2).max(20).default(10), trace: z.array(z.string().min(2).max(120)).max(6).optional() }),
+    }, async ({ runs, trace }) => {
+        if (!google?.gmailEnumerate)
+            return fail("bootstrap_stability", "Google is not connected, so the Career sources can't be read.");
+        return ok("bootstrap_stability", await startStabilityJob(pool, google, runs, trace ?? ["Immuta", "Transurban"]));
+    });
+    server.registerTool("diagnostic_result", {
+        description: "Read a diagnostic job (e.g. a bootstrap stability run) by its code: status, per-run progress and the verdict.",
+        inputSchema: z.object({ code: z.number().int().positive() }),
+        annotations: { readOnlyHint: true },
+    }, async ({ code }) => out("diagnostic_result", await diagnosticResult(pool, code)));
     server.registerTool("apply_bootstrap", {
         description: "Apply a bootstrap proposal Julian approved (by its short code): creates/links the Area, his confirmed objective, pipeline records, active-opportunity projects and their waiting follow-ups. Idempotent; links existing records instead of duplicating.",
         inputSchema: z.object({ code: z.number().int().positive(), objective: z.string().max(300).optional().describe("Julian's own wording of the objective, if he changed it"), skip_followups: z.boolean().optional() }),

@@ -1,5 +1,6 @@
 import { appendEvent, withTransaction } from "../db/index.js";
 import { ensureArea } from "./operating.js";
+import { acquireCareerSnapshot, evidenceRecords, interpretCareer, interpretationDigest, opportunitySetDigest, snapshotDelta, snapshotDigest, INTERPRETER_VERSION } from "./career-evidence.js";
 export const CAREER_SHEET = "Career Copilot - Job History";
 /** RFC-4180 CSV (quotes, embedded commas/newlines). */
 export function parseCsv(text) {
@@ -141,63 +142,94 @@ export function extractEngagement(items, source) {
     }
     return out;
 }
-const ELIGIBLE = (e) => !e || /no restriction/i.test(e);
-export async function proposeCareerBootstrap(pool, google, now = new Date()) {
-    // DISCOVER
-    const sheet = google?.sheetCsv ? await google.sheetCsv(CAREER_SHEET).catch(() => null) : null;
-    const gmail = google?.gmail ? await Promise.all([google.gmail(["interview"]), google.gmail(["phone screen"]), google.gmail(["application"])].map((p) => p.catch(() => []))) : [];
-    const cal = google?.calendar ? await google.calendar(["interview"]).catch(() => []) : [];
-    // EXTRACT
-    const ex = sheet ? extractSheet(sheet.csv) : { rows: [], dropped: 0, duplicates: 0 };
-    const engaged = [...extractEngagement(gmail.flat(), "gmail"), ...extractEngagement(cal, "calendar")];
-    // LINK (by normalized org) + existing projects
-    const byOrg = new Map();
-    for (const e of engaged) {
-        const k = normOrg(e.org);
-        if (!k)
-            continue;
-        byOrg.set(k, [...(byOrg.get(k) ?? []), e]);
-    }
-    const projects = (await pool.query(`SELECT name FROM project WHERE archived_at IS NULL AND NOT is_unassigned_holding`)).rows.map((r) => String(r.name));
-    const conflicts = [];
-    const activeProjects = [];
-    const day = 86_400_000;
-    for (const [k, evs] of byOrg) {
-        const latest = evs.map((e) => e.when).filter(Boolean).sort().pop() ?? null;
-        const sheetRows = ex.rows.filter((r) => normOrg(r.org) === k);
-        const existing = projects.find((p) => normOrg(p) === k) ?? null;
-        // The strongest evidence decides the proposed status: an interview/screen → interviewing; an application notice → applied.
-        const proposed = evs.some((e) => e.kind === "interview" || e.kind === "screen") ? "interviewing" : "applied";
-        const label = proposed === "interviewing" ? "interview/screen" : "application";
-        if (sheetRows.length && sheetRows.every((r) => ["analyzed", "discovered"].includes(r.status)))
-            conflicts.push(`${evs[0].org}: the Career Copilot sheet still says "${sheetRows[0].status}" but ${evs.length} ${label} record(s) exist — pipeline status lags reality (proposed: ${proposed})`);
-        for (const r of sheetRows)
-            if (["analyzed", "discovered"].includes(r.status))
-                r.status = proposed;
-        const stale = latest ? now.getTime() - Date.parse(latest) > 7 * day : false;
-        const contact = evs.find((e) => e.contact)?.contact ?? null;
-        activeProjects.push({ org: evs[0].org, evidence: Array.from(new Set(evs.map((e) => `${e.kind} (${e.source}${e.when ? ` ${e.when.slice(0, 10)}` : ""})`))).slice(0, 6),
-            lastContact: latest, contact, existingProject: existing,
-            proposedFollowup: stale ? `Waiting on ${contact ?? evs[0].org} — next step after ${latest.slice(0, 10)} (no contact for ${Math.floor((now.getTime() - Date.parse(latest)) / day)} days)` : null });
-    }
-    const byStatus = {};
-    for (const r of ex.rows)
-        byStatus[r.status] = (byStatus[r.status] ?? 0) + 1;
-    const shortlist = ex.rows.filter((r) => r.status === "analyzed" && (r.fitScore ?? 0) >= 88 && ELIGIBLE(r.eligibility)).sort((a, b) => (b.fitScore ?? 0) - (a.fitScore ?? 0)).slice(0, 10)
-        .map((r) => ({ org: r.org, title: r.title, score: r.fitScore, eligibility: r.eligibility }));
-    const ineligible = ex.rows.filter((r) => !ELIGIBLE(r.eligibility)).length;
-    if (ineligible)
-        conflicts.push(`${ineligible} analyzed posting(s) list citizenship/clearance requirements — kept in the pipeline but excluded from the shortlist`);
-    const payload = {
-        area: "Career", objective: { proposed: "Secure a strong Financial / Pricing Analyst role", needsConfirmation: true },
-        source: { sheet: sheet?.name ?? null, account: sheet?.account ?? null, rows: ex.rows.length, dropped: ex.dropped, duplicates: ex.duplicates },
-        pipeline: { total: ex.rows.length, byStatus, shortlist }, activeProjects, conflicts, opportunities: ex.rows,
-    };
-    const r = await pool.query(`INSERT INTO bootstrap_proposal (area, payload) VALUES ('Career', $1::jsonb) RETURNING code`, [JSON.stringify(payload)]);
-    const { opportunities: _omit, ...summary } = payload;
-    return { code: Number(r.rows[0].code), summary };
+/** The stored snapshot that carry-forward and deltas compare against: the latest COMPLETE acquisition. */
+export async function latestCareerSnapshot(pool, area = "Career") {
+    const r = await pool.query(`SELECT s.id, s.digest, s.payload FROM evidence_acquisition a JOIN evidence_snapshot s ON s.id = a.snapshot_id
+    WHERE a.area = $1 AND a.complete ORDER BY a.acquired_at DESC, a.created_at DESC LIMIT 1`, [area]);
+    return r.rows[0] ? { id: r.rows[0].id, digest: r.rows[0].digest, snapshot: r.rows[0].payload } : null;
 }
-/** Apply an approved proposal: area, (confirmed) objective, pipeline records, engaged projects + follow-ups. Idempotent. */
+/** ACQUIRE + store (content-addressed) + record the run. Never interprets. */
+export async function acquireAndStoreCareer(pool, google, now = new Date()) {
+    const prev = await latestCareerSnapshot(pool);
+    const snapshot = await acquireCareerSnapshot(google, CAREER_SHEET, now, prev ? { digest: prev.digest, snapshot: prev.snapshot } : null);
+    const digest = snapshotDigest(snapshot);
+    const records = evidenceRecords(snapshot).length;
+    const ins = await pool.query(`INSERT INTO evidence_snapshot (area, digest, interpreter_version, acquired_at, complete, record_count, payload) VALUES ('Career', $1, $2, $3, $4, $5, $6::jsonb)
+    ON CONFLICT (area, digest) DO UPDATE SET area = EXCLUDED.area RETURNING id`, [digest, INTERPRETER_VERSION, snapshot.acquiredAt, snapshot.completeness.complete, records, JSON.stringify(snapshot)]);
+    const snapshotId = String(ins.rows[0].id);
+    const stats = { gmail: snapshot.gmail.map((g) => ({ key: g.key, account: g.account, ok: g.ok, pages: g.pages, ids: g.ids, records: g.records.length, truncated: g.truncated, vanished: g.vanished.length })),
+        carryForward: snapshot.carryForward.map((c) => ({ account: c.account, requested: c.requested, recovered: c.records.length, missing: c.missing })),
+        // Exact source record ids of THIS run (the stored snapshot is content-addressed and may come from an earlier run).
+        ids: Object.fromEntries([...snapshot.gmail.map((g) => [`${g.key}@${g.account}`, g.records.map((r) => r.id).sort()]),
+            ...snapshot.carryForward.map((c) => [`carry-forward@${c.account}`, c.records.map((r) => r.id).sort()]), ...snapshot.calendar.map((c) => [`cal:${c.query}@${c.account}`, c.records.map((r) => r.id).sort()])]),
+        calendar: snapshot.calendar.map((c) => ({ query: c.query, account: c.account, ok: c.ok, records: c.records.length })), sheet: { id: snapshot.sheet.id ?? null, sha256: snapshot.sheet.sha256 ?? null, mutated: snapshot.sheet.mutatedDuringRun ?? false } };
+    const acq = await pool.query(`INSERT INTO evidence_acquisition (area, snapshot_id, acquired_at, complete, search_misses, problems, stats) VALUES ('Career', $1, $2, $3, $4, $5::jsonb, $6::jsonb) RETURNING id`, [snapshotId, snapshot.acquiredAt, snapshot.completeness.complete, snapshot.completeness.searchMisses, JSON.stringify(snapshot.completeness.problems), JSON.stringify(stats)]);
+    return { snapshot, digest, snapshotId, acquisitionId: String(acq.rows[0].id), prev, records, stats };
+}
+/** Pure: interpretation → proposal payload (opportunities carry stable identity: canonical key + every alias). */
+export function buildCareerPayload(interp, snapshot, projects) {
+    const sheet = snapshot.sheet.ok && snapshot.sheet.csv ? extractSheet(snapshot.sheet.csv) : { rows: [], dropped: 0, duplicates: 0 };
+    const orgs = new Map();
+    for (const o of interp.traces.orgs)
+        for (const a of o.aliases)
+            orgs.set(a, { status: o.status, aliases: o.aliases, ids: o.records.map((r) => r.recordId) });
+    const covered = new Set();
+    const opportunities = sheet.rows.map((r) => {
+        const o = orgs.get(normOrg(r.org));
+        if (o)
+            o.aliases.forEach((a) => covered.add(a));
+        return { ...r, status: o ? o.status : r.status, statusSource: o && o.ids.length ? "evidence" : "sheet", dedupe: dedupeKey(r.org, r.title, r.url), aliasKeys: [dedupeKey(r.org, r.title, r.url)], evidenceIds: o?.ids ?? [] };
+    });
+    for (const o of [...interp.active, ...interp.closed.map((c) => ({ ...c, titles: [], evidence: c.evidenceIds.map((id) => ({ recordId: id })) }))]) {
+        if (o.aliases.some((a) => covered.has(a)))
+            continue;
+        opportunities.push({ sourceId: `evidence:${o.orgKey}`, org: o.org, title: o.titles[0] ?? "(role from email evidence)", url: null, location: null, workMode: null, salary: null, eligibility: null,
+            status: o.status, fitScore: null, fitNotes: null, resume: null, nextAction: null, nextActionAt: null, folder: null, updatedAt: null,
+            statusSource: "evidence", dedupe: `org:${o.orgKey}`, aliasKeys: o.aliases.map((a) => `org:${a}`).sort(), evidenceIds: o.evidence.map((e) => e.recordId) });
+    }
+    const projKeys = new Map(projects.map((p) => [normOrg(p), p]));
+    const activeProjects = interp.active.map((a) => ({
+        org: a.org, orgKey: a.orgKey, aliases: a.aliases, status: a.status, titles: a.titles,
+        evidence: a.evidence.map((e) => `${e.kind} ${e.at.slice(0, 10)}: ${e.subject}`), evidenceIds: a.evidence.map((e) => e.recordId),
+        lastContact: a.lastEvidenceAt, contact: a.contact, proposedFollowup: a.followup, followupDue: a.followupDue,
+        existingProject: a.aliases.map((k) => projKeys.get(k)).find(Boolean) ?? null
+    }));
+    const byStatus = {};
+    for (const o of opportunities)
+        byStatus[o.status] = (byStatus[o.status] ?? 0) + 1;
+    return {
+        area: "Career", objective: { proposed: "Secure a strong Financial / Pricing Analyst role", needsConfirmation: true },
+        source: { sheet: snapshot.sheet.name ?? null, sheetId: snapshot.sheet.id ?? null, account: snapshot.sheet.account ?? null, rows: sheet.rows.length, dropped: sheet.dropped, duplicates: sheet.duplicates },
+        pipeline: { total: opportunities.length, byStatus, shortlist: interp.pipeline.shortlist },
+        activeProjects, closed: interp.closed.map((c) => ({ org: c.org, status: c.status, lastEvidence: c.lastEvidenceAt, evidenceIds: c.evidenceIds })),
+        conflicts: interp.conflicts, opportunities,
+    };
+}
+/**
+ * ADR-080: acquisition → frozen snapshot → pure interpretation → proposal with full provenance and a delta against the
+ * previous snapshot. A proposal is APPLICABLE only if its snapshot is complete and every opportunity change since the
+ * previous snapshot is explained by specific source records.
+ */
+export async function proposeCareerBootstrap(pool, google, now = new Date()) {
+    const src = (google ?? {});
+    const acq = await acquireAndStoreCareer(pool, src, now);
+    const asOf = now.toISOString();
+    const interp = interpretCareer(acq.snapshot, { asOf });
+    const delta = acq.prev ? snapshotDelta(acq.prev.snapshot, acq.snapshot, { asOfPrev: asOf, asOfCur: asOf }) : null;
+    const projects = (await pool.query(`SELECT name FROM project WHERE archived_at IS NULL AND NOT is_unassigned_holding`)).rows.map((r) => String(r.name));
+    const why = [...(acq.snapshot.completeness.complete ? [] : [`incomplete snapshot: ${acq.snapshot.completeness.problems.join("; ")}`]),
+        ...(delta?.unexplained.length ? [`unexplained change since the previous snapshot: ${delta.unexplained.join(", ")}`] : [])];
+    const provenance = { snapshotId: acq.snapshotId, acquisitionId: acq.acquisitionId, snapshotDigest: acq.digest, interpretationDigest: interpretationDigest(interp), opportunitySetDigest: opportunitySetDigest(interp),
+        interpreterVersion: INTERPRETER_VERSION, acquiredAt: acq.snapshot.acquiredAt, asOf: interp.asOf, complete: acq.snapshot.completeness.complete, problems: acq.snapshot.completeness.problems,
+        searchMisses: acq.snapshot.completeness.searchMisses, records: acq.records, previousSnapshot: acq.prev?.digest ?? null };
+    const payload = { ...buildCareerPayload(interp, acq.snapshot, projects), provenance, applicable: { ok: why.length === 0, why }, delta };
+    const r = await pool.query(`INSERT INTO bootstrap_proposal (area, payload, snapshot_id, acquisition_id, snapshot_digest, interpretation_digest, opportunity_set_digest, interpreter_version)
+    VALUES ('Career', $1::jsonb, $2, $3, $4, $5, $6, $7) RETURNING code`, [JSON.stringify(payload), acq.snapshotId, acq.acquisitionId, acq.digest, provenance.interpretationDigest, provenance.opportunitySetDigest, INTERPRETER_VERSION]);
+    const { opportunities: _omit, ...summary } = payload;
+    return { code: Number(r.rows[0].code), summary, interp };
+}
+/** Apply an approved proposal: area, (confirmed) objective, pipeline records, engaged projects + follow-ups. Idempotent.
+ *  Stable identity: an opportunity is matched by ANY of its alias keys; nothing is ever deleted. */
 export async function applyBootstrap(pool, code, opts = {}) {
     const p = (await pool.query(`SELECT id, status, payload FROM bootstrap_proposal WHERE code = $1`, [code])).rows[0];
     if (!p)
@@ -205,6 +237,8 @@ export async function applyBootstrap(pool, code, opts = {}) {
     if (p.status !== "pending")
         return { error: `Bootstrap proposal ${code} is already ${p.status}.` };
     const pl = p.payload;
+    if (pl.applicable && !pl.applicable.ok)
+        return { error: `Bootstrap proposal ${code} is not applicable: ${pl.applicable.why.join("; ")}` };
     const area = await ensureArea(pool, pl.area);
     return withTransaction(pool, async (tx) => {
         let objectiveId = null;
@@ -212,27 +246,36 @@ export async function applyBootstrap(pool, code, opts = {}) {
         const ob = await tx.query(`SELECT id FROM objective WHERE area_id = $1 AND lower(name) = lower($2)`, [area.id, objName]);
         objectiveId = ob.rows[0]?.id ?? (await tx.query(`INSERT INTO objective (area_id, name) VALUES ($1, $2) RETURNING id`, [area.id, objName])).rows[0].id;
         let upserted = 0;
-        for (const o of pl.opportunities) {
-            const r = await tx.query(`INSERT INTO opportunity (kind, area_id, org, title, url, location, work_mode, salary, eligibility, status, fit_score, fit_notes, resume_ref, next_action, next_action_at, source, dedupe_key, details)
-         VALUES ('job', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb)
-         ON CONFLICT (kind, dedupe_key) WHERE archived_at IS NULL DO UPDATE SET status = EXCLUDED.status, fit_score = COALESCE(EXCLUDED.fit_score, opportunity.fit_score), updated_at = now()
-         RETURNING id`, [area.id, o.org, o.title, o.url, o.location, o.workMode, o.salary, o.eligibility, o.status, o.fitScore, o.fitNotes, o.resume, o.nextAction,
-                o.nextActionAt && !Number.isNaN(Date.parse(o.nextActionAt)) ? o.nextActionAt : null, `career_copilot:${o.sourceId}`, dedupeKey(o.org, o.title, o.url), JSON.stringify({ folder: o.folder, sheetUpdatedAt: o.updatedAt })]);
-            if (r.rowCount)
-                upserted++;
+        for (const raw of pl.opportunities) {
+            const o = raw;
+            const key = o.dedupe ?? dedupeKey(o.org, o.title, o.url);
+            const aliases = o.aliasKeys?.length ? o.aliasKeys : [key];
+            const details = JSON.stringify({ folder: o.folder, sheetUpdatedAt: o.updatedAt, aliasKeys: aliases, evidenceIds: o.evidenceIds ?? [], statusSource: o.statusSource ?? "sheet" });
+            const existing = await tx.query(`SELECT id FROM opportunity WHERE kind = 'job' AND archived_at IS NULL AND dedupe_key = ANY($1::text[]) ORDER BY created_at LIMIT 1`, [[key, ...aliases]]);
+            if (existing.rows[0]) {
+                await tx.query(`UPDATE opportunity SET status = $2, fit_score = COALESCE($3, fit_score), details = details || $4::jsonb, updated_at = now() WHERE id = $1`, [existing.rows[0].id, o.status, o.fitScore, details]);
+            }
+            else {
+                await tx.query(`INSERT INTO opportunity (kind, area_id, org, title, url, location, work_mode, salary, eligibility, status, fit_score, fit_notes, resume_ref, next_action, next_action_at, source, dedupe_key, details)
+           VALUES ('job', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb)`, [area.id, o.org, o.title, o.url, o.location, o.workMode, o.salary, o.eligibility, o.status, o.fitScore, o.fitNotes, o.resume, o.nextAction,
+                    o.nextActionAt && !Number.isNaN(Date.parse(o.nextActionAt)) ? o.nextActionAt : null, o.sourceId.startsWith("evidence:") ? "gmail" : `career_copilot:${o.sourceId}`, key, details]);
+            }
+            upserted++;
         }
         const created = [];
         for (const a of pl.activeProjects) {
             let pid;
-            const ex = await tx.query(`SELECT id FROM project WHERE archived_at IS NULL AND lower(name) = lower($1)`, [a.existingProject ?? a.org]);
+            const names = [a.existingProject, a.org].filter((x) => !!x);
+            const ex = await tx.query(`SELECT id FROM project WHERE archived_at IS NULL AND lower(name) = ANY($1::text[]) ORDER BY created_at LIMIT 1`, [names.map((n) => n.toLowerCase())]);
             if (ex.rows[0])
                 pid = ex.rows[0].id;
             else {
-                pid = (await tx.query(`INSERT INTO project (name, description, last_activity_at) VALUES ($1, $2, now()) RETURNING id`, [a.org, `Job opportunity (${a.evidence.join(", ")})`])).rows[0].id;
+                pid = (await tx.query(`INSERT INTO project (name, description, last_activity_at) VALUES ($1, $2, now()) RETURNING id`, [a.org, `Job opportunity (${a.status}; ${a.evidence.slice(0, 3).join("; ")})`.slice(0, 500)])).rows[0].id;
                 created.push(a.org);
             }
             await tx.query(`UPDATE project SET area_id = $2, objective_id = $3, updated_at = now() WHERE id = $1`, [pid, area.id, objectiveId]);
-            await tx.query(`UPDATE opportunity SET project_id = $2, contact = COALESCE(contact, $3) WHERE area_id = $4 AND lower(org) = lower($1)`, [a.org, pid, a.contact, area.id]);
+            const keys = (a.aliases ?? [normOrg(a.org)]);
+            await tx.query(`UPDATE opportunity SET project_id = $2, contact = COALESCE(contact, $3) WHERE area_id = $4 AND archived_at IS NULL AND (lower(org) = lower($1) OR details->'aliasKeys' ?| $5::text[] OR dedupe_key = ANY($5::text[]))`, [a.org, pid, a.contact, area.id, keys.map((k) => `org:${k}`)]);
             if (a.proposedFollowup && !opts.skipFollowups) {
                 const dup = await tx.query(`SELECT 1 FROM followup WHERE project_id = $1 AND state IN ('open','waiting','overdue')`, [pid]);
                 if (!dup.rowCount)
@@ -240,7 +283,7 @@ export async function applyBootstrap(pool, code, opts = {}) {
             }
         }
         await tx.query(`UPDATE bootstrap_proposal SET status = 'applied', applied_at = now() WHERE id = $1`, [p.id]);
-        await appendEvent(tx, { actor: "julian", action: "bootstrap_applied", entityType: "area", entityId: area.id, after: { code, opportunities: upserted, projectsCreated: created } });
+        await appendEvent(tx, { actor: "julian", action: "bootstrap_applied", entityType: "area", entityId: area.id, after: { code, opportunities: upserted, projectsCreated: created, snapshot: pl.provenance?.snapshotDigest ?? null } });
         return { area: area.name, objective: objName, opportunities: upserted, activeProjects: pl.activeProjects.map((a) => a.org), projectsCreated: created };
     });
 }
