@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { materialize } from "../../eval/runner/j3cases.js";
 import { applyBootstrap, proposeCareerBootstrap } from "../../src/cos/bootstrap.js";
 import { CAREER_QUERIES } from "../../src/cos/career-evidence.js";
-import { syncCareer, type SyncResult } from "../../src/cos/career-sync.js";
+import { runCareerSync, syncCareer, type SyncResult } from "../../src/cos/career-sync.js";
 import { archiveTestJob, findOpportunity, inTx, lifecycleTick, pipelineSummary, recordOpportunityUpdate, trackOpportunity } from "../../src/cos/opportunities.js";
 import { addWaiting, areaStatus, ensureArea, executiveBriefV2 } from "../../src/cos/operating.js";
 import { createTask, recordRun, runCoreStep } from "../../src/pipelines/j6/control.js";
@@ -53,6 +53,9 @@ describe.skipIf(!admin || !migT || !appT)("opportunity lifecycle (Phase 4, ADR-0
   afterAll(async () => { await pool?.end(); await db?.drop(); });
 
   it("lifecycle: a preview writes nothing; the real tick gives every engaged job exactly one next step; a second tick changes nothing", async () => {
+    // Live defect (sync chat, 2026-10-09): the bootstrap follow-up said "due 2026-10-05" but was stored as apply-time + 3 days.
+    const bf = await one(`SELECT summary, to_char(due_at, 'YYYY-MM-DD') AS due FROM followup WHERE origin = 'bootstrap' AND summary LIKE 'Follow up with Chimes%'`);
+    expect(bf.summary).toContain(`follow-up due ${bf.due}`);
     const before = await counts();
     const prev = await inTx(pool, true, (tx) => lifecycleTick(tx, T));
     expect(prev.changes.length).toBeGreaterThan(0);
@@ -132,6 +135,12 @@ describe.skipIf(!admin || !migT || !appT)("opportunity lifecycle (Phase 4, ADR-0
     expect(s2.counts).toEqual({ jobsCreated: 0, eventsAdded: 0, statusChanges: 0, lifecycleChanges: 0, decisions: 0 });
     const b = await executiveBriefV2(pool, new Date("2026-10-10T16:00:00Z"));
     expect(b.changes.join(" ")).toMatch(/Vallum Associates — Project Finance Analyst - SMR: applied → rejected/);
+  });
+
+  it("sync_career returns its result inline (no second call needed)", async () => {
+    const r = await runCareerSync(pool, google([...ALL, VALLUM_SMR_REJECTED]) as never, true, 30_000) as { preview: boolean; counts: { eventsAdded: number }; jobCode: number };
+    expect(r).toEqual(expect.objectContaining({ preview: true, counts: expect.objectContaining({ eventsAdded: 0, statusChanges: 0 }) }));
+    expect(r.jobCode).toBeGreaterThan(0);
   });
 
   it("an incomplete acquisition writes nothing", async () => {

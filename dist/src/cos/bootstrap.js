@@ -380,7 +380,7 @@ export async function applyBootstrap(pool, code, opts = {}) {
             if (a.proposedFollowup && !opts.skipFollowups) {
                 const dup = await tx.query(`SELECT 1 FROM followup WHERE project_id = $1 AND state IN ('open','waiting','overdue')`, [pid]);
                 if (!dup.rowCount)
-                    await tx.query(`INSERT INTO followup (summary, counterparty, state, due_at, last_action_at, area_id, project_id, opportunity_id, origin) VALUES ($1, $2, 'waiting', now() + interval '3 days', $3, $4, $5, $6, 'bootstrap')`, [a.proposedFollowup, a.contact ?? a.employer, a.lastContact ?? new Date().toISOString(), area.id, pid, oid ?? null]);
+                    await tx.query(`INSERT INTO followup (summary, counterparty, state, due_at, last_action_at, area_id, project_id, opportunity_id, origin) VALUES ($1, $2, 'waiting', COALESCE($7::date + time '16:00', now() + interval '3 days'), $3, $4, $5, $6, 'bootstrap')`, [a.proposedFollowup, a.contact ?? a.employer, a.lastContact ?? new Date().toISOString(), area.id, pid, oid ?? null, a.followupDue]); // live: the stored due must be the due the text states
             }
         }
         await tx.query(`UPDATE bootstrap_proposal SET status = 'applied', applied_at = now() WHERE id = $1`, [p.id]);

@@ -128,6 +128,28 @@ export async function syncCareer(pool, google, opts = {}) {
     });
 }
 /** Async wrapper (acquisition can take a minute): progress and result are kept in diagnostic_job. */
+/** Compact, decision-relevant view of a sync result for chat (full detail stays in the diagnostic job). */
+export function compactSync(r) {
+    return { ok: r.ok, preview: r.dryRun, snapshot: r.snapshotDigest, records: r.records, complete: r.complete, newSourceRecords: r.newSourceRecords, counts: r.counts,
+        changes: r.changes.slice(0, 30).map((c) => `${c.change}: ${c.job} — ${c.detail} [${c.sources.join(", ")}]`),
+        nextSteps: r.lifecycle.slice(0, 30).map((c) => `${c.change}: ${c.job} — ${c.detail}`),
+        decisions: r.decisions, unassignedEvents: r.unassigned.length, supersededProposals: r.supersededProposals.length };
+}
+/** Start a sync and wait for it up to waitMs (it usually takes seconds thanks to the content cache); else return the job code. */
+export async function runCareerSync(pool, google, dryRun, waitMs = 50_000) {
+    const started = await startCareerSync(pool, google, dryRun);
+    const t0 = Date.now();
+    while (Date.now() - t0 < waitMs) {
+        const j = (await pool.query(`SELECT status, result, error FROM diagnostic_job WHERE code = $1`, [started.jobCode])).rows[0];
+        if (j && j.status !== "running") {
+            if (j.status === "failed" || !j.result || "error" in j.result)
+                return { jobCode: started.jobCode, error: j.error ?? j.result?.error ?? "sync failed" };
+            return { jobCode: started.jobCode, ...compactSync(j.result) };
+        }
+        await new Promise((res) => setTimeout(res, 1000));
+    }
+    return { ...started, note: `${started.note} Still running after ${Math.round(waitMs / 1000)}s.` };
+}
 export async function startCareerSync(pool, google, dryRun) {
     const running = await pool.query(`SELECT code FROM diagnostic_job WHERE kind = 'career_sync' AND status = 'running' AND created_at > now() - interval '20 minutes' LIMIT 1`);
     if (running.rows[0])

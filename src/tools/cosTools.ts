@@ -8,7 +8,7 @@ import type { ToolHelpers } from "./server.js";
 import { applyBootstrap, compactProposal, proposeCareerBootstrap } from "../cos/bootstrap.js";
 import { diagnosticResult, replayProposal, startStabilityJob, traceProposal } from "../cos/career-diagnostics.js";
 import type { GoogleSearch } from "../resources/retrieve.js";
-import { startCareerSync } from "../cos/career-sync.js";
+import { runCareerSync } from "../cos/career-sync.js";
 import { findOpportunity, inTx, pipelineSummary, recordOpportunityUpdate, trackOpportunity } from "../cos/opportunities.js";
 import { addWaiting, areaStatus, ensureArea, executiveBriefV2, placeUnderArea, resolveWaiting, setObjective, waitingOn } from "../cos/operating.js";
 
@@ -54,11 +54,16 @@ export function registerCosTools(server: McpServer, { ok, fail }: ToolHelpers, p
   }, async ({ area }) => out("area_status", await areaStatus(pool, area ?? null)));
 
   server.registerTool("bootstrap_area", {
-    description: "Stage a bootstrap of real operational state for an Area from Julian's authorized sources (Career: the Career Copilot job-history sheet in Drive, interview/recruiter evidence in Gmail and Calendar, existing projects). Read-only: returns a concise PROPOSAL with a short code (pipeline counts, shortlist, active opportunities with evidence, proposed follow-ups, conflicts). Show it to Julian; nothing is written until he approves with apply_bootstrap.",
+    description: "ONE-TIME initial import (before Career exists in state). Not for syncing/refreshing/updating an already-bootstrapped area — use sync_career for that. Stage a bootstrap of real operational state for an Area from Julian's authorized sources (Career: the Career Copilot job-history sheet in Drive, interview/recruiter evidence in Gmail and Calendar, existing projects). Read-only: returns a concise PROPOSAL with a short code (pipeline counts, shortlist, active opportunities with evidence, proposed follow-ups, conflicts). Show it to Julian; nothing is written until he approves with apply_bootstrap.",
     inputSchema: z.object({ area: z.enum(["Career"]).default("Career") }),
     annotations: { readOnlyHint: true },
   }, async () => {
     if (!google?.sheetCsv) return fail("bootstrap_area", "Google is not connected, so the Career sources can't be read.");
+    // Live (2026-10-09): "sync my Career pipeline" was routed here after #45 was applied, staging a useless proposal.
+    // Once a bootstrap is applied, keeping Career current is sync_career's job.
+    const applied = (await pool.query(`SELECT code FROM bootstrap_proposal WHERE area = 'Career' AND status = 'applied' ORDER BY applied_at DESC LIMIT 1`)).rows[0];
+    if (applied) return ok("bootstrap_area", { alreadyBootstrapped: true, appliedProposal: Number(applied.code),
+      instruction: `Career was already bootstrapped (proposal ${applied.code} applied). Do NOT stage another bootstrap. To bring it up to date call sync_career {} (or sync_career {preview:true} to see the changes first) and report its result.` });
     const r = await proposeCareerBootstrap(pool, google);
     const s = r.summary;
     return ok("bootstrap_area", { ...compactProposal(r.code, s), instruction: s.applicable?.ok === false
@@ -134,11 +139,11 @@ export function registerCosTools(server: McpServer, { ok, fail }: ToolHelpers, p
   });
 
   server.registerTool("sync_career", {
-    description: "Bring the applied Career pipeline up to date from Julian's email and the Career Copilot sheet (same deterministic reading as the bootstrap): new replies, interviews, rejections and applications are recorded on the exact job they concern; status only moves forward; anything ambiguous becomes a decision, never a guess; every change names its source email. preview:true computes the same changes without writing. Returns a job code; read it with diagnostic_result.",
+    description: "\"Sync / refresh / update my Career pipeline\": bring the applied Career pipeline up to date from Julian's email and the Career Copilot sheet (same deterministic reading as the bootstrap): new replies, interviews, rejections and applications are recorded on the exact job they concern; status only moves forward; anything ambiguous becomes a decision, never a guess; every change names its source email. preview:true computes the same changes without writing. Also gives every engaged job its next step (waiting on the employer until a date, or Julian's decision). Returns the result (or a job code for diagnostic_result if it takes longer than ~50s).",
     inputSchema: z.object({ preview: z.boolean().default(false) }),
   }, async ({ preview }) => {
     if (!google?.gmailEnumerate) return fail("sync_career", "Google is not connected, so the Career sources can't be read.");
-    return ok("sync_career", await startCareerSync(pool, google, preview));
+    return out("sync_career", await runCareerSync(pool, google, preview));
   });
 
   server.registerTool("executive_brief", {
