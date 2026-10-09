@@ -7,6 +7,7 @@
  *  stability  N consecutive LIVE proposals; each compared with the previous one, every difference attributed
  */
 import type pg from "pg";
+import { toolRef } from "../tools/manifest.js";
 import { proposeCareerBootstrap, type BootstrapPayload } from "./bootstrap.js";
 import { interpretCareer, interpretationDigest, opportunitySetDigest, snapshotDigest, traceOrg, type CareerSnapshot } from "./career-evidence.js";
 import type { GoogleSearch } from "../resources/retrieve.js";
@@ -144,7 +145,7 @@ export async function startStabilityJob(pool: pg.Pool, google: GoogleSearch | un
       await pool.query(`UPDATE diagnostic_job SET status = 'failed', error = $2, finished_at = now(), progress = $3::jsonb WHERE id = $1`, [id, String((e as Error)?.stack ?? e).slice(0, 2000), JSON.stringify(progress)]).catch(() => {});
     }
   })();
-  return { jobCode: Number(j.rows[0].code), runs: n, note: `Running ${n} consecutive live proposals; read it with diagnostic_result {code:${j.rows[0].code}}.` };
+  return { jobCode: Number(j.rows[0].code), runs: n, note: `Running ${n} consecutive live proposals; read it: ${toolRef("diagnostic_result", { code: Number(j.rows[0].code) })}.` };
 }
 
 export async function diagnosticResult(pool: pg.Pool, code: number) {

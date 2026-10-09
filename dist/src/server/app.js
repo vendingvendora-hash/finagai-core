@@ -89,6 +89,7 @@ export function createHandler(cfg, info, log, deps) {
                 service: "finagai-core",
                 version: info.version,
                 uptimeSeconds: Math.round((Date.now() - info.startedAt.getTime()) / 1000),
+                ...(info.tools?.() ? { tools: { count: info.tools().count, digest: info.tools().digest } } : {}),
             });
         }
         // Phase 1 live acceptance (ADR-077): harmless static test pages for the browser operator (B01–B13). The form
@@ -132,6 +133,14 @@ export function createHandler(cfg, info, log, deps) {
                 }
                 try {
                     const webReq = await toWebRequest(req, new URL(req.url ?? "/", cfg.FINAGAI_PUBLIC_BASE_URL).toString());
+                    if (deps.onMcpTraffic && req.method === "POST") {
+                        // Observability only: never blocks or alters the request (ADR-083).
+                        webReq.clone().json().then((body) => {
+                            const msgs = (Array.isArray(body) ? body : [body]).filter((m) => !!m && typeof m.method === "string");
+                            if (msgs.length)
+                                return deps.onMcpTraffic(msgs, principal.clientId ?? "unknown");
+                        }).catch(() => { });
+                    }
                     const token = extractBearer(req.headers.authorization);
                     const response = await deps.mcp.fetch(webReq, { authInfo: {
                             token, clientId: principal.clientId ?? "unknown", scopes: [], expiresAt: Math.floor(principal.expiresAt.getTime() / 1000),

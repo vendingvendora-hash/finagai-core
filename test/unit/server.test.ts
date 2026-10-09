@@ -77,6 +77,15 @@ describe("public endpoints", () => {
     expect(text).not.toMatch(/canary|auth\.example\.test/);
   });
 
+  it("ADR-083: /health publishes the live MCP tool manifest (count + digest) so a deploy can be checked against the build", async () => {
+    const srv = http.createServer(createHandler(cfg, { version: "test", startedAt: new Date(), tools: () => ({ count: 49, digest: "414231f5d284" }) },
+      createLogger(cfg, () => {}), { keys: createLocalJWKSet({ keys: [jwk] }) }));
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const b = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+    expect(await (await fetch(`${b}/health`)).json()).toMatchObject({ status: "ok", tools: { count: 49, digest: "414231f5d284" } });
+    await new Promise<void>((r) => srv.close(() => r()));
+  });
+
   it("publishes protected-resource metadata whose resource equals the MCP URL exactly", async () => {
     for (const path of ["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"]) {
       expect(await (await fetch(base + path)).json()).toEqual({

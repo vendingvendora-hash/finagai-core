@@ -5,6 +5,7 @@ import { z } from "zod";
 import { applyBootstrap, compactProposal, proposeCareerBootstrap } from "../cos/bootstrap.js";
 import { diagnosticResult, replayProposal, startStabilityJob, traceProposal } from "../cos/career-diagnostics.js";
 import { runCareerSync } from "../cos/career-sync.js";
+import { toolRef } from "./manifest.js";
 import { findOpportunity, inTx, pipelineSummary, recordOpportunityUpdate, trackOpportunity } from "../cos/opportunities.js";
 import { addWaiting, areaStatus, ensureArea, executiveBriefV2, placeUnderArea, resolveWaiting, setObjective, waitingOn } from "../cos/operating.js";
 export function registerCosTools(server, { ok, fail }, pool, google) {
@@ -52,7 +53,7 @@ export function registerCosTools(server, { ok, fail }, pool, google) {
         const applied = (await pool.query(`SELECT code FROM bootstrap_proposal WHERE area = 'Career' AND status = 'applied' ORDER BY applied_at DESC LIMIT 1`)).rows[0];
         if (applied)
             return ok("bootstrap_area", { alreadyBootstrapped: true, appliedProposal: Number(applied.code),
-                instruction: `Career was already bootstrapped (proposal ${applied.code} applied). Do NOT stage another bootstrap. To bring it up to date call sync_career {} (or sync_career {preview:true} to see the changes first) and report its result.` });
+                instruction: `Career was already bootstrapped (proposal ${applied.code} applied). Do NOT stage another bootstrap. To bring it up to date ${toolRef("sync_career", {})}, and report its result.` });
         const r = await proposeCareerBootstrap(pool, google);
         const s = r.summary;
         return ok("bootstrap_area", { ...compactProposal(r.code, s), instruction: s.applicable?.ok === false

@@ -1,3 +1,4 @@
+import { toolRef } from "../tools/manifest.js";
 import { proposeCareerBootstrap } from "./bootstrap.js";
 import { interpretCareer, interpretationDigest, opportunitySetDigest, snapshotDigest, traceOrg } from "./career-evidence.js";
 const countBy = (xs) => { const m = {}; for (const x of [...xs].sort())
@@ -144,7 +145,7 @@ export async function startStabilityJob(pool, google, runs = 10, traceOrgs = ["I
             await pool.query(`UPDATE diagnostic_job SET status = 'failed', error = $2, finished_at = now(), progress = $3::jsonb WHERE id = $1`, [id, String(e?.stack ?? e).slice(0, 2000), JSON.stringify(progress)]).catch(() => { });
         }
     })();
-    return { jobCode: Number(j.rows[0].code), runs: n, note: `Running ${n} consecutive live proposals; read it with diagnostic_result {code:${j.rows[0].code}}.` };
+    return { jobCode: Number(j.rows[0].code), runs: n, note: `Running ${n} consecutive live proposals; read it: ${toolRef("diagnostic_result", { code: Number(j.rows[0].code) })}.` };
 }
 export async function diagnosticResult(pool, code) {
     const r = await pool.query(`SELECT code, kind, params, status, progress, result, error, created_at, finished_at FROM diagnostic_job WHERE code = $1`, [code]);

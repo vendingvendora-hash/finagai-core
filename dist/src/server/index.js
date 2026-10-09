@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { remoteKeys } from "../auth/bearer.js";
 import { criticalFailures, preflight } from "../ops/preflight.js";
 import { createMcpHandler } from "@modelcontextprotocol/server";
+import { liveManifest } from "../tools/manifest.js";
 import { appendEvent, createPool, PgLlmCallRecorder } from "../db/index.js";
 import { AnthropicProvider } from "../llm/anthropic.js";
 import { MeteredModelClient } from "../llm/metered.js";
@@ -70,7 +71,25 @@ async function main() {
         models: { planner: cfg.MODEL_J6_PLANNER, grader: cfg.MODEL_EVAL_GRADER, concierge: cfg.MODEL_J5_CONCIERGE, review: cfg.MODEL_J3_COMPOSE } });
     refreshRegistry(pool).then((n) => log("capability registry refreshed", { capabilities: n })).catch((e) => log("capability registry refresh failed", { error: String(e?.message ?? e).slice(0, 200) }));
     const control = createControlHandler({ pool, model, modelId: cfg.MODEL_J5_CONCIERGE, plannerModel: cfg.MODEL_J6_PLANNER, graderModel: cfg.MODEL_EVAL_GRADER, thinkingTokens: cfg.J6_THINKING_TOKENS, log, ...(sharedGoogle ? { google: sharedGoogle } : {}) }, cfg.CONCIERGE_HELPER_TOKEN, log);
-    const server = http.createServer(createHandler(cfg, { version: VERSION, startedAt: new Date() }, log, { keys: remoteKeys(cfg.OAUTH_JWKS_URL), mcp, approval, concierge, control,
+    // ADR-083: build the tool surface once at startup so /health publishes the live manifest before any client connects.
+    buildMcpServer({ pool, cfg, client: "startup", j2: { pool, model, cfg }, ...(sharedGoogle ? { google: sharedGoogle } : {}), extend: registerJ3Tools(pool, j3) });
+    const toolNames = () => new Set(liveManifest()?.names ?? []);
+    const server = http.createServer(createHandler(cfg, { version: VERSION, startedAt: new Date(), tools: () => liveManifest() }, log, { keys: remoteKeys(cfg.OAUTH_JWKS_URL), mcp, approval, concierge, control,
+        onMcpTraffic: async (msgs, clientId) => {
+            for (const m of msgs) {
+                if (m.method === "initialize") {
+                    await appendEvent(pool, { actor: "system", action: "mcp_initialize", client: "claude_ai", after: { clientId, clientInfo: m.params?.clientInfo ?? null, protocolVersion: m.params?.protocolVersion ?? null, serverTools: liveManifest()?.digest ?? null } });
+                }
+                else if (m.method === "tools/list") {
+                    await appendEvent(pool, { actor: "system", action: "mcp_tools_listed", client: "claude_ai", after: { clientId, served: liveManifest()?.digest ?? null, count: liveManifest()?.count ?? null, cursor: m.params?.cursor ?? null } });
+                }
+                else if (m.method === "tools/call") {
+                    const name = String(m.params?.name ?? "");
+                    if (!toolNames().has(name))
+                        await appendEvent(pool, { actor: "system", action: "mcp_unknown_tool", entityType: "tool", reason: name, client: "claude_ai", after: { clientId } });
+                }
+            }
+        },
         onClientObserved: async (clientId) => {
             const seen = await pool.query(`SELECT 1 FROM event WHERE action = 'mcp_client_observed' AND after->>'client_id' = $1 LIMIT 1`, [clientId]);
             if (!seen.rowCount)

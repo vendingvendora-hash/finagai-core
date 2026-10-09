@@ -12,6 +12,7 @@
  * caused it. An incomplete acquisition writes nothing. A dry run computes exactly the same changes and rolls back.
  */
 import type pg from "pg";
+import { toolRef } from "../tools/manifest.js";
 import { appendEvent } from "../db/index.js";
 import type { GoogleSearch } from "../resources/retrieve.js";
 import { acquireAndStoreCareer, buildCareerPayload, type BootstrapOpportunity } from "./bootstrap.js";
@@ -171,5 +172,5 @@ export async function startCareerSync(pool: pg.Pool, google: GoogleSearch | unde
       await pool.query(`UPDATE diagnostic_job SET status = 'failed', error = $2, finished_at = now() WHERE id = $1`, [id, String((e as Error)?.stack ?? e).slice(0, 2000)]).catch(() => {});
     }
   })();
-  return { jobCode: Number(j.rows[0].code), dryRun, note: `Career sync ${dryRun ? "preview " : ""}started; read it with diagnostic_result {code:${j.rows[0].code}}.` };
+  return { jobCode: Number(j.rows[0].code), dryRun, note: `Career sync ${dryRun ? "preview " : ""}started; read it: ${toolRef("diagnostic_result", { code: Number(j.rows[0].code) })}.` };
 }

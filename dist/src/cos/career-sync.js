@@ -1,3 +1,4 @@
+import { toolRef } from "../tools/manifest.js";
 import { appendEvent } from "../db/index.js";
 import { acquireAndStoreCareer, buildCareerPayload } from "./bootstrap.js";
 import { interpretCareer, interpretationDigest, INTERPRETER_VERSION } from "./career-evidence.js";
@@ -165,6 +166,6 @@ export async function startCareerSync(pool, google, dryRun) {
             await pool.query(`UPDATE diagnostic_job SET status = 'failed', error = $2, finished_at = now() WHERE id = $1`, [id, String(e?.stack ?? e).slice(0, 2000)]).catch(() => { });
         }
     })();
-    return { jobCode: Number(j.rows[0].code), dryRun, note: `Career sync ${dryRun ? "preview " : ""}started; read it with diagnostic_result {code:${j.rows[0].code}}.` };
+    return { jobCode: Number(j.rows[0].code), dryRun, note: `Career sync ${dryRun ? "preview " : ""}started; read it: ${toolRef("diagnostic_result", { code: Number(j.rows[0].code) })}.` };
 }
 //# sourceMappingURL=career-sync.js.map

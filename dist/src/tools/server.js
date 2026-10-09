@@ -18,6 +18,7 @@ import { runCapture } from "../pipelines/j2/capture.js";
 import { stageGovernanceRequest } from "../governance/stage.js";
 import { addSource, answer, openBatch, questions } from "../pipelines/seed/seed.js";
 import { parseFinagaiJob, runFinagaiJob } from "../cos/finagai-job.js";
+import { META_TOOLS, SERVER_INSTRUCTIONS, describeCatalog, manifestOf, setLiveManifest } from "./manifest.js";
 import { approvalStatus, currentCharter, isItemTable, itemWithProvenance, openConflicts, pendingProposals, projectDetail, searchState, stateOverview, } from "./queries.js";
 /** G19 on any nested array of rows that carry a classification. */
 function filterDeep(value) {
@@ -36,8 +37,18 @@ function filterDeep(value) {
     return value;
 }
 export function buildMcpServer(deps) {
-    const server = new McpServer({ name: "finagai-core", version: "0.1.0" });
+    const server = new McpServer({ name: "finagai-core", version: "0.1.0" }, { instructions: SERVER_INSTRUCTIONS });
     const now = deps.now ?? (() => new Date());
+    // ADR-083: capture every registration — the server's own registry is the single source of truth for list_tools/call_tool.
+    const catalog = new Map();
+    const register = server.registerTool.bind(server);
+    server.registerTool = (name, config, cb) => {
+        if (catalog.has(name))
+            throw new Error(`MCP tool "${name}" registered twice`);
+        catalog.set(name, { name, description: String(config.description ?? ""), inputSchema: config.inputSchema,
+            readOnly: config.annotations?.readOnlyHint === true, handler: cb });
+        return register(name, config, cb);
+    };
     const audit = (tool, outcome) => appendEvent(deps.pool, {
         actor: "system", action: "tool_called", entityType: "tool", reason: tool, after: { tool, outcome }, client: deps.client
     });
@@ -74,6 +85,31 @@ export function buildMcpServer(deps) {
         },
     };
     const { ok, fail } = helpers;
+    // ADR-083: the two STABLE meta-tools, registered first. They never change, so once a client has cached them every
+    // tool deployed later is reachable immediately, whatever that client's cached tools/list says.
+    server.registerTool("list_tools", {
+        description: "The LIVE list of Finagai tools with their input schemas (your client's tool list may be cached and older). Use when a Finagai tool named by Julian, a result or an instruction is missing from your tools; then run it with call_tool. Optional query filters by words.",
+        inputSchema: z.object({ query: z.string().max(200).optional() }),
+        annotations: { readOnlyHint: true },
+    }, async ({ query }) => {
+        const m = manifestOf(catalog);
+        return ok("list_tools", { count: m.count, digest: m.digest, tools: describeCatalog(catalog, query ?? null).filter((t) => !META_TOOLS.includes(t.name)) });
+    });
+    server.registerTool("call_tool", {
+        description: "Run any live Finagai tool by name with its arguments — the same tool, validation, safety rules and audit as calling it directly. Use when the tool you need (named by Julian, a Finagai result, or list_tools) is not in your tool list because your client's list is cached.",
+        inputSchema: z.object({ tool: z.string().min(2).max(80), arguments: z.record(z.string(), z.unknown()).optional() }),
+    }, async ({ tool, arguments: args }, extra) => {
+        const e = catalog.get(tool);
+        if (!e || META_TOOLS.includes(tool)) {
+            await appendEvent(deps.pool, { actor: "system", action: "mcp_unknown_tool", entityType: "tool", reason: tool, after: { via: "call_tool" }, client: deps.client }).catch(() => { });
+            return fail("call_tool", `There is no Finagai tool "${tool}". Live tools: ${[...catalog.keys()].filter((n) => !META_TOOLS.includes(n)).join(", ")}.`);
+        }
+        const parsed = e.inputSchema ? e.inputSchema.safeParse(args ?? {}) : { success: true, data: args ?? {} };
+        if (!parsed.success)
+            return fail("call_tool", `Invalid arguments for ${tool}: ${parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")}`);
+        await appendEvent(deps.pool, { actor: "system", action: "tool_called", entityType: "tool", reason: "call_tool", after: { tool: "call_tool", routedTo: tool }, client: deps.client });
+        return e.handler(parsed.data, extra);
+    });
     server.registerTool("get_charter", {
         description: "Finagai's current charter version and Julian's approved preferences. Read before acting on Julian's behalf.",
         inputSchema: z.object({}),
@@ -524,6 +560,7 @@ export function buildMcpServer(deps) {
     });
     registerCosTools(server, helpers, deps.pool, deps.google); // Phase 3 (ADR-079): employee layer reachable in plain language
     deps.extend?.(server, helpers);
+    setLiveManifest(manifestOf(catalog));
     return server;
 }
 //# sourceMappingURL=server.js.map

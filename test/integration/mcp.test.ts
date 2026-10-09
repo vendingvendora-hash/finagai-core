@@ -76,12 +76,12 @@ describe.skipIf(!url)("MCP tool layer end to end", () => {
     const client = await connect(await token());
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
     expect(names).toEqual([
-      "apply_bootstrap", "area_status", "bootstrap_area", "bootstrap_replay", "bootstrap_stability", "bootstrap_trace", "capture", "control_mac", "control_result", "create_area",
-      "diagnostic_result", "execution_metrics", "executive_brief", "find_opportunity", "get_approval_request", "get_charter", "get_item", "get_project", "get_state_overview", "list_capabilities",
+      "apply_bootstrap", "area_status", "bootstrap_area", "bootstrap_replay", "bootstrap_stability", "bootstrap_trace", "call_tool", "capture", "control_mac", "control_result", "create_area",
+      "diagnostic_result", "execution_metrics", "executive_brief", "find_opportunity", "get_approval_request", "get_charter", "get_item", "get_project", "get_state_overview", "list_capabilities", "list_tools",
       "list_open_conflicts", "list_pending_proposals", "mac_get_context", "mac_status", "make_mac_chart", "pending_results", "pipeline", "place_under_area", "plan_resources", "record_opportunity_update",
       "request_archival", "request_conflict_resolution", "request_proposal_decision", "request_seed_promotion", "resolve_reference", "resolve_waiting", "search_state", "seed_add_source", "seed_answer", "seed_questions",
       "set_objective", "sync_career", "track_opportunity", "track_waiting", "waiting_on",
-    ]);   // Phase 4: opportunity lifecycle tools (ADR-082). Phase 3: employee-layer tools (ADR-079) — names only, no deletes   // mac_status + pending_results (WO1/WO2) are read-only: health matrix and already-finished results
+    ].sort());   // Phase 4: opportunity lifecycle tools (ADR-082). Phase 3: employee-layer tools (ADR-079) — names only, no deletes   // mac_status + pending_results (WO1/WO2) are read-only: health matrix and already-finished results
     for (const forbidden of ["delete", "approve", "resolve_conflict", "decide_proposal", "send_email", "sql"]) {
       expect(names.some((n) => n.includes(forbidden) && !n.startsWith("request_") && n !== "list_open_conflicts")).toBe(false);
     }
@@ -106,6 +106,54 @@ describe.skipIf(!url)("MCP tool layer end to end", () => {
     const { finishedWhileYouWereAway: _f, instruction: _i, ...shown } = brief;                                           // transport metadata aside,
     expect(JSON.stringify(shown)).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/);                                  // no UUIDs shown to Julian
     expect((await call("resolve_waiting", { counterparty: "Beth", outcome: "Beth replied: next round scheduled" })).closed).toHaveLength(1);
+    await client.close();
+  });
+
+  it("ADR-083: a client whose cached tool list lacks a tool still reaches it — list_tools shows the live catalog, call_tool runs it with the same validation", async () => {
+    const client = await connect(await token());
+    const listed = (await client.listTools()).tools.map((t) => t.name);
+    expect(listed.slice(0, 2)).toEqual(["list_tools", "call_tool"]);                         // stable meta-tools come first
+    const live = json(await client.callTool({ name: "list_tools", arguments: {} }));
+    expect(live.tools.map((t: { name: string }) => t.name).sort()).toEqual(listed.filter((n) => n !== "list_tools" && n !== "call_tool").sort());
+    expect(live.digest).toMatch(/^[0-9a-f]{12}$/);
+    expect(live.tools.find((t: { name: string }) => t.name === "sync_career").input.properties).toHaveProperty("preview");
+    const filtered = json(await client.callTool({ name: "list_tools", arguments: { query: "career pipeline" } }));
+    expect(filtered.tools.map((t: { name: string }) => t.name)).toContain("sync_career");
+    // Routed call = same tool, same answer.
+    const direct = json(await client.callTool({ name: "waiting_on", arguments: {} }));
+    const routed = json(await client.callTool({ name: "call_tool", arguments: { tool: "waiting_on", arguments: {} } }));
+    expect(routed.source).toBe(direct.source);
+    // Same schema validation as a direct call; unknown and meta tools are refused.
+    const bad = await client.callTool({ name: "call_tool", arguments: { tool: "track_opportunity", arguments: { employer: "X" } } });
+    expect(bad.isError).toBe(true); expect((bad.content as Array<{ text: string }>)[0]!.text).toMatch(/Invalid arguments for track_opportunity: .*title/);
+    const unknown = await client.callTool({ name: "call_tool", arguments: { tool: "drop_database" } });
+    expect(unknown.isError).toBe(true); expect((unknown.content as Array<{ text: string }>)[0]!.text).toMatch(/no Finagai tool "drop_database"/);
+    expect((await client.callTool({ name: "call_tool", arguments: { tool: "call_tool", arguments: { tool: "waiting_on" } } })).isError).toBe(true);
+    await client.close();
+  });
+
+  it("ADR-083: every tool named in a description or instruction is a registered tool, and the committed manifest matches the live registry", async () => {
+    const client = await connect(await token());
+    const tools = (await client.listTools()).tools;
+    const names = new Set(tools.map((t) => t.name));
+    const { readFileSync, readdirSync, writeFileSync } = await import("node:fs");
+    const texts = [...tools.map((t) => t.description ?? ""),
+      ...["src/tools", "src/cos"].flatMap((d) => readdirSync(d).filter((f) => f.endsWith(".ts")).map((f) => readFileSync(`${d}/${f}`, "utf8")))];
+    const refs = new Set<string>();
+    for (const t of texts) for (const m of t.matchAll(/\b(?:call|use|with|via|approves:|toolRef\(")\s*`?([a-z]+(?:_[a-z]+)+)\b/g)) refs.add(m[1]!);
+    const NOT_TOOLS = new Set(["call_tool"]);   // (call_tool itself is registered; listed only to document the rule)
+    const dangling = [...refs].filter((r) => !names.has(r) && !NOT_TOOLS.has(r) && /^(get|list|request|seed|control|make|plan|execution|pending|mac|resolve|search|capture|create|set|place|track|waiting|area|bootstrap|diagnostic|apply|executive|find|pipeline|record|sync|operating)_/.test(r));
+    expect(refs.size).toBeGreaterThan(5);
+    expect(dangling).toEqual([]);
+    // The PRODUCTION surface includes the J3 tools (extend), exactly as src/server/index.ts builds it.
+    const { liveManifest } = await import("../../src/tools/manifest.js");
+    const { registerJ3Tools } = await import("../../src/tools/j3Tools.js");
+    const cfg = loadConfig({ ...env, FINAGAI_PUBLIC_BASE_URL: base, FINAGAI_MCP_RESOURCE_URL: `${base}/mcp` });
+    buildMcpServer({ pool: pool!, cfg, client: "manifest", j2: { pool: pool!, model, cfg }, extend: registerJ3Tools(pool!, {} as never) });
+    const m = liveManifest()!;
+    const committed = JSON.parse(readFileSync("docs/mcp-tool-manifest.json", "utf8"));
+    if (process.env.UPDATE_TOOL_MANIFEST) writeFileSync("docs/mcp-tool-manifest.json", JSON.stringify({ ...m, note: "Production MCP tool surface (ADR-083), in registration order. /health publishes count+digest; the release script compares them after every deploy." }, null, 1) + "\n");
+    expect({ count: committed.count, digest: committed.digest, names: committed.names }).toEqual({ count: m.count, digest: m.digest, names: m.names });
     await client.close();
   });
 

@@ -24,6 +24,8 @@ const FIXTURES: Record<string, string> = { "apply.html": "text/html; charset=utf
 export interface AppInfo {
   version: string;
   startedAt: Date;
+  /** ADR-083: the live MCP tool manifest (count + digest), published on /health so deploys can be checked. */
+  tools?: () => { count: number; digest: string } | null;
 }
 
 export interface AppDeps {
@@ -33,6 +35,8 @@ export interface AppDeps {
   mcp?: McpHttpHandler;
   /** Called once per newly seen MCP client ID while no client is pinned (audit event for provisioning). */
   onClientObserved?: (clientId: string) => Promise<void>;
+  /** ADR-083: JSON-RPC methods a client sent (initialize / tools/list / tools/call names), for tool-surface observability. */
+  onMcpTraffic?: (messages: Array<{ method: string; params?: Record<string, unknown> }>, clientId: string) => Promise<void>;
   /** M5 approval page; when absent, /approve/* only validates the session (pre-M5 behavior). */
   approval?: (req: http.IncomingMessage, res: http.ServerResponse, url: URL) => Promise<void>;
   /** J5 helper API (ADR-044); its own bearer secret, checked inside the handler. */
@@ -129,6 +133,7 @@ export function createHandler(cfg: Config, info: AppInfo, log: LogFn, deps: AppD
         service: "finagai-core",
         version: info.version,
         uptimeSeconds: Math.round((Date.now() - info.startedAt.getTime()) / 1000),
+        ...(info.tools?.() ? { tools: { count: info.tools()!.count, digest: info.tools()!.digest } } : {}),
       });
     }
 
@@ -171,6 +176,13 @@ export function createHandler(cfg: Config, info: AppInfo, log: LogFn, deps: AppD
           }
           try {
             const webReq = await toWebRequest(req, new URL(req.url ?? "/", cfg.FINAGAI_PUBLIC_BASE_URL).toString());
+            if (deps.onMcpTraffic && req.method === "POST") {
+              // Observability only: never blocks or alters the request (ADR-083).
+              webReq.clone().json().then((body: unknown) => {
+                const msgs = (Array.isArray(body) ? body : [body]).filter((m): m is { method: string; params?: Record<string, unknown> } => !!m && typeof (m as { method?: unknown }).method === "string");
+                if (msgs.length) return deps.onMcpTraffic!(msgs, principal.clientId ?? "unknown");
+              }).catch(() => {});
+            }
             const token = extractBearer(req.headers.authorization);
             const response = await deps.mcp.fetch(webReq, { authInfo: {
               token, clientId: principal.clientId ?? "unknown", scopes: [], expiresAt: Math.floor(principal.expiresAt.getTime() / 1000),

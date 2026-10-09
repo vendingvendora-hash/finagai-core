@@ -3,6 +3,7 @@ import { careerState, diagnosticResult, jobsAtEmployer, replayProposal, startSta
 import { startCareerSync } from "./career-sync.js";
 import { findOpportunity, inTx, lifecycleTick, pipelineSummary } from "./opportunities.js";
 import { areaStatus, executiveBriefV2, waitingOn } from "./operating.js";
+import { liveManifest } from "../tools/manifest.js";
 export function parseFinagaiJob(request) {
     const m = /^\s*finagai-job:\s*(.*)$/is.exec(request);
     if (!m)
@@ -49,6 +50,8 @@ export function parseFinagaiJob(request) {
         return { kind: "area-status", area: rest.join(" ") || "Career" };
     if (c === "waiting")
         return { kind: "waiting" };
+    if (c === "mcp-manifest")
+        return { kind: "mcp-manifest" };
     return { kind: "unknown", text: t.slice(0, 100) };
 }
 export async function runFinagaiJob(pool, google, job) {
@@ -89,7 +92,15 @@ export async function runFinagaiJob(pool, google, job) {
         case "brief": return executiveBriefV2(pool);
         case "area-status": return areaStatus(pool, job.area);
         case "waiting": return waitingOn(pool, null);
-        case "unknown": return { error: `Unknown finagai-job "${job.text}". Allowed: stability [runs] [org,org], result <code>, trace <proposal> <org>, replay <proposal> [runs], jobs <proposal> <employer>, proposal <code>, reinterpret <code>, career-state, propose, acquisitions [n], pipeline [area], find <text>, sync-preview, lifecycle-preview, brief, area-status [area], waiting.` };
+        case "mcp-manifest": {
+            // ADR-083: what this live process registers vs what clients have fetched / tried to call.
+            const m = liveManifest();
+            const traffic = (await pool.query(`SELECT occurred_at, action, reason, after FROM event WHERE action IN ('mcp_initialize','mcp_tools_listed','mcp_unknown_tool')
+        ORDER BY id DESC LIMIT 25`)).rows;
+            const lastList = traffic.find((t) => t.action === "mcp_tools_listed");
+            return { live: m, lastToolsListServed: lastList ? { at: lastList.occurred_at, digest: lastList.after?.served, count: lastList.after?.count } : null, recentTraffic: traffic };
+        }
+        case "unknown": return { error: `Unknown finagai-job "${job.text}". Allowed: stability [runs] [org,org], result <code>, trace <proposal> <org>, replay <proposal> [runs], jobs <proposal> <employer>, proposal <code>, reinterpret <code>, career-state, propose, acquisitions [n], pipeline [area], find <text>, sync-preview, lifecycle-preview, brief, area-status [area], waiting, mcp-manifest.` };
     }
 }
 //# sourceMappingURL=finagai-job.js.map
