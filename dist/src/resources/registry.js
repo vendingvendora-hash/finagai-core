@@ -13,6 +13,7 @@ export const CATALOG = [
     { id: "state.charter", type: "state", scope: "charter and approved preferences", access: "read", operations: ["get_charter"], authority: 95, freshness: "live" },
     { id: "state.projects", type: "state", scope: "projects, work items, knowledge, entities (J2 memory with provenance)", access: "read_write", operations: ["get_project", "search_state", "get_item", "capture"], authority: 80, freshness: "live" },
     { id: "state.areas", type: "state", scope: "Areas of Responsibility, Objectives, Follow-ups", access: "read_write", operations: ["areas", "objectives", "followups"], authority: 85, freshness: "live" },
+    { id: "state.opportunities", type: "state", scope: "job pipeline: one record per application (employer, title, requisition, status, applied date, contact, history, next step)", access: "read_write", operations: ["find_opportunity", "pipeline", "track_opportunity", "record_opportunity_update", "sync_career"], authority: 90, freshness: "live" },
     { id: "state.reviews", type: "state", scope: "operating reviews (J3)", access: "read", operations: ["get_latest_review"], authority: 70, freshness: "weekly" },
     { id: "state.artifacts", type: "state", scope: "charts, screenshots and files Finagai produced", access: "read_write", operations: ["recent_artifact", "send_artifact"], authority: 90, freshness: "live" },
     { id: "state.interactions", type: "state", scope: "past requests, outcomes, telemetry", access: "read", operations: ["execution_metrics", "pending_results"], authority: 90, freshness: "live" },

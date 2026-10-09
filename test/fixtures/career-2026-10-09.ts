@@ -100,3 +100,9 @@ export function queryHits(key: string, recs: GmailRecord[]): GmailRecord[] {
   if (key === "outcomes") return recs.filter((x) => /regret to inform|not to move forward|not moving forward|unable to move forward|not be proceeding|move forward with other|move forward with another|made the decision|position has been filled|no longer under consideration|not been selected|offer letter|pleased to offer/.test(t(x)));
   return [];
 }
+
+/** Phase 4 tests build NEW evidence with the same real shapes. */
+export const fixtureRecord = r;
+export const linkedInRejection = liRejected;
+export const linkedInCard = liCard;
+export const LINKEDIN_SENDER = LI;

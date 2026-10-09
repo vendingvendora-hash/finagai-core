@@ -25,6 +25,32 @@ const deps = (m: Script): ControlDeps => ({ pool: pool!, model: m, modelId: "cla
 describe.skipIf(!pool)("J6 control lifecycle", () => {
   afterAll(async () => { await pool?.end(); });
 
+  it("Phase 4 golden workflow: the posting is recorded by Finagai itself (never sent to the Mac) and the planner continues in the same turn", async () => {
+    const task = await createTask(pool!, "Prepare my application for the open Acme Health Pricing Analyst posting — do not submit", "chat");
+    const model = new Script([
+      { kind: "browser_read", params: {}, risk: "read", summary: "Read the posting" },
+      { kind: "record_opportunity", params: { employer: "Acme Health", title: "Pricing Analyst", url: "https://finagai-core.onrender.com/fixtures/apply.html" }, risk: "read", summary: "Record the posting" },
+      { kind: "browser_fill_form", params: { fields: [{ label: "First name", value: "Julian" }] }, risk: "write", summary: "Fill name" },
+      { kind: "done", summary: "Prepared; not submitted", needsJulian: ["Final Submit"] },
+      "PASS: prepared, not submitted",
+    ]);
+    const d = deps(model);
+    const statuses: string[] = []; const kinds: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const r = await planNext(d, task.id, `s${i}`);
+      statuses.push(r.status);
+      if (r.status === "done") break;
+      kinds.push(r.step!.kind);
+      await recordRun(pool!, r.step!.id, true, r.step!.kind.startsWith("browser_") ? "verified: ok" : "observed: {}");
+    }
+    expect(kinds).toEqual(["browser_read", "browser_fill_form"]);          // record_opportunity never reached the helper
+    expect(statuses).toEqual(["run_read", "run_approved", "done"]);
+    const steps = (await pool!.query(`SELECT kind, status, result FROM control_step WHERE task_id = $1 ORDER BY seq`, [task.id])).rows;
+    expect(steps[1]).toEqual(expect.objectContaining({ kind: "record_opportunity", status: "done", result: expect.stringMatching(/^recorded: Acme Health — Pricing Analyst .*area Finagai Test/) }));
+    const job = (await pool!.query(`SELECT o.status, a.name AS area FROM control_task t JOIN opportunity o ON o.id = t.opportunity_id JOIN area a ON a.id = o.area_id WHERE t.id = $1`, [task.id])).rows[0];
+    expect(job).toEqual({ status: "preparing", area: "Finagai Test" });
+  });
+
   it("Phase 2 acceptance: one delegation fills, attaches and navigates with NO per-step approval; Submit is held back; one review packet", async () => {
     const task = await createTask(pool!, "Fill this harmless test application completely but do not submit it.", "chat");
     const model = new Script([

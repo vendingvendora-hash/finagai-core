@@ -204,6 +204,13 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
   for (const g of (await pool.query(`SELECT action, count(*)::int AS n FROM governance_request WHERE status = 'pending' AND expires_at > now() GROUP BY action`)).rows)
     decisions.push(`${g.n} pending approval(s): ${String(g.action).replace(/_/g, " ")}`);
   for (const p of (await pool.query(`SELECT count(*)::int AS n FROM proposal WHERE status = 'pending'`).catch(() => ({ rows: [{ n: 0 }] }))).rows) if (p.n) decisions.push(`${p.n} pending proposal(s) to review`);
+  // Phase 4 (ADR-082): next steps the lifecycle assigned to Julian (decide on a nudge, answer an offer, finish an
+  // application) and anything the last Career sync could not decide on its own.
+  for (const f of (await pool.query(`SELECT summary, due_at FROM followup WHERE origin = 'lifecycle' AND state IN ('open','overdue')
+      AND rule IN ('applied.nudge_or_let_go','interviewing.nudge','offer.respond','preparing.submit') ORDER BY due_at LIMIT 8`)).rows)
+    decisions.push(`${f.summary} (by ${new Date(f.due_at).toISOString().slice(0, 10)})`);
+  const sync = (await pool.query(`SELECT after FROM event WHERE action = 'career_synced' AND occurred_at > now() - interval '48 hours' AND (after->>'dryRun')::boolean IS NOT TRUE ORDER BY occurred_at DESC LIMIT 1`)).rows[0]?.after as { decisions?: string[] } | undefined;
+  for (const d of (sync?.decisions ?? []).slice(0, 5)) decisions.push(`Career: ${d}`);
 
   const blocked: string[] = [];
   for (const f of (await pool.query(`SELECT counterparty, summary, due_at FROM followup WHERE state = 'overdue' ORDER BY due_at LIMIT 10`)).rows)
@@ -222,6 +229,12 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
   if (exp?.length) changes.push(`${exp.length} stale Mac task(s) expired unanswered (${exp.join(", ")}) — say "resume <code>" only if still wanted`);
   for (const e of (await pool.query(`SELECT action, after FROM event WHERE action IN ('followup_done','area_created','objective_set','project_placed') AND occurred_at > now() - interval '48 hours' ORDER BY occurred_at DESC LIMIT 8`)).rows)
     changes.push(`${String(e.action).replace(/_/g, " ")}${e.after?.outcome ? `: ${e.after.outcome}` : e.after?.name ? `: ${e.after.name}` : ""}`);
+  // Job pipeline movement (evidence or Julian): status changes per job, and projects the lifecycle closed.
+  for (const e of (await pool.query(`SELECT ev.before, ev.after, o.org, o.title, o.requisition_id FROM event ev JOIN opportunity o ON o.id = ev.entity_id
+      WHERE ev.action = 'opportunity_status' AND ev.occurred_at > now() - interval '48 hours' ORDER BY ev.occurred_at DESC LIMIT 10`)).rows)
+    changes.push(`${e.org} — ${e.title}${e.requisition_id ? ` (${e.requisition_id})` : ""}: ${e.before?.status ?? "?"} → ${e.after?.status ?? "?"}`);
+  const closedProjects = (await pool.query(`SELECT count(*)::int AS n FROM event WHERE action = 'project_completed' AND occurred_at > now() - interval '48 hours'`)).rows[0]?.n ?? 0;
+  if (closedProjects) changes.push(`${closedProjects} job project(s) closed by the lifecycle (rejected, withdrawn, or no response and nobody to nudge — they stay in the pipeline)`);
 
   const risks: string[] = [];
   for (const f of (await pool.query(`SELECT counterparty, summary, due_at FROM followup WHERE state IN ('open','waiting') AND due_at < now() + interval '3 days' ORDER BY due_at LIMIT 8`)).rows)

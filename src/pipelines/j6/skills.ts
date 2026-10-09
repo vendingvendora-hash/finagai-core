@@ -40,6 +40,8 @@ export const SKILLS: Skill[] = [
     name: "fill-a-form",
     when: /\b(form|formulario|apply|aplicar|application|registrar|sign ?up|checkout|rellenar|fill|workday|greenhouse|lever)\b/i,
     play: `FILL A FORM / JOB APPLICATION:
+- A JOB APPLICATION starts with the posting: browser_read it, then record_opportunity {"employer","title","reqId?","url","location?"} from the page's own job heading/details. If the result says ALREADY, stop and report it (no duplicate applications).
+- Prefer browser_fill_form / browser_fill / browser_select / browser_upload when the browser page block is present; otherwise:
 - Click each field, type its value, Tab or click to the next. Read labels from the page to map fields correctly.
 - Use Julian's profile facts you were given; never invent personal data.
 - Stop with ask{} for anything you don't have or must not guess (passwords, SSN, payment, 2FA).

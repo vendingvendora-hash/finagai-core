@@ -38,7 +38,8 @@ export interface DelegationEnvelope {
 export const ENVELOPE_DEFAULTS = { ttlMs: 4 * 3_600_000, maxSteps: 120, costLimitUsd: 3 } as const;
 
 const READ = new Set(["screenshot", "read_text", "list_apps", "list_files", "read_file", "wait", "done", "ask", "observe",
-  "browser_read", "browser_find", "browser_list_tabs", "browser_wait"]);
+  "browser_read", "browser_find", "browser_list_tabs", "browser_wait",
+  "record_opportunity"]);   // Phase 4: Finagai's own bookkeeping of a posting Julian is looking at (no external effect)
 const PREP = new Set(["open_app", "activate_app", "open_url", "open_path", "menu_item", "ax_click", "ax_set_value", "click", "double_click",
   "right_click", "move", "drag", "scroll", "type", "key", "hotkey", "browser_open_tab", "browser_switch_tab", "browser_navigate", "browser_click",
   "browser_fill", "browser_fill_form", "browser_select", "browser_check", "browser_scroll", "browser_upload", "browser_download", "browser_close_tab"]);

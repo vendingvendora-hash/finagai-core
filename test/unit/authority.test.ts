@@ -77,3 +77,11 @@ describe("delegation envelope", () => {
     expect(authorize(s("trash_file", { path: "~/Downloads/a.pdf" }), e).decision).toBe("approve");
   });
 });
+
+describe("Phase 4 (ADR-082): recording a posting is Finagai's own bookkeeping", () => {
+  it("record_opportunity is an observation (automatic, even with words like 'apply' in it), never a commitment", () => {
+    const step = { kind: "record_opportunity", params: { employer: "Acme", title: "Pricing Analyst" }, summary: "Record the posting before preparing the application to apply" };
+    expect(classify(step)).toBe("OBSERVE");
+    expect(authorize(step, null).decision).toBe("auto");
+  });
+});

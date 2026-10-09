@@ -323,12 +323,12 @@ export function resolveAliases(keys: Iterable<string>): Map<string, string> {
 //   exists at several locations). An event names its job; an event that names no job attaches only when the
 //   employer has exactly one job in evidence, otherwise it is kept as an UNASSIGNED employer event (never guessed).
 
-const normTitle = (t: string) => t.toLowerCase().replace(/&/g, " and ").replace(/\bsr\b\.?/g, "senior").replace(/\bjr\b\.?/g, "junior").replace(/[^a-z0-9]+/g, " ").trim();
+export const normTitle = (t: string) => t.toLowerCase().replace(/&/g, " and ").replace(/\bsr\b\.?/g, "senior").replace(/\bjr\b\.?/g, "junior").replace(/[^a-z0-9]+/g, " ").trim();
 const normLoc = (l: string) => l.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 /** A job title names a role; signatures ("Best regards", "Beth Young", "O | 734…") and boilerplate never do. */
 const ROLE_WORD = /\b(analyst|manager|accountant|specialist|associate|director|coordinator|consultant|controller|strategist|estimator|officer|engineer|lead|intern|administrator|planner|advisor|adviser|auditor|economist|representative|assistant|partner|head|vp|vice president|executive|developer|scientist|bookkeeper|treasurer|clerk|cfo|fp&a|fp and a)\b/i;
 const BAD_TITLE = /\b(julian|your application|job below|application data|safekeeping|personal information)\b|^(?:the )?(?:position|role|job|opening)$/i;
-function cleanTitle(raw: string | undefined, org?: string): string | undefined {
+export function cleanTitle(raw: string | undefined, org?: string): string | undefined {
   if (!raw) return undefined;
   let t = raw.replace(/^\s*reference role:\s*/i, "").replace(/\s*\(ID:?\s*\d+\)\s*/gi, " ").replace(/^\s*(?:R\d{4}-\d{3,}|R\d{6,}|req(?:uisition)?\s*#?\s*\w+)\s+/i, "")
     .replace(/\s+(?:\||[\w&]+ (?:recruitment|recruiting|talent acquisition) team\b).*$/i, "")

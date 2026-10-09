@@ -4,6 +4,8 @@
 import { z } from "zod";
 import { applyBootstrap, compactProposal, proposeCareerBootstrap } from "../cos/bootstrap.js";
 import { diagnosticResult, replayProposal, startStabilityJob, traceProposal } from "../cos/career-diagnostics.js";
+import { startCareerSync } from "../cos/career-sync.js";
+import { findOpportunity, inTx, pipelineSummary, recordOpportunityUpdate, trackOpportunity } from "../cos/opportunities.js";
 import { addWaiting, areaStatus, ensureArea, executiveBriefV2, placeUnderArea, resolveWaiting, setObjective, waitingOn } from "../cos/operating.js";
 export function registerCosTools(server, { ok, fail }, pool, google) {
     const out = (tool, r) => ("error" in r && typeof r.error === "string" ? fail(tool, r.error) : ok(tool, r));
@@ -78,6 +80,47 @@ export function registerCosTools(server, { ok, fail }, pool, google) {
         description: "Apply a bootstrap proposal Julian approved (by its short code): creates/links the Area, his confirmed objective, pipeline records, active-opportunity projects and their waiting follow-ups. Idempotent; links existing records instead of duplicating.",
         inputSchema: z.object({ code: z.number().int().positive(), objective: z.string().max(300).optional().describe("Julian's own wording of the objective, if he changed it"), skip_followups: z.boolean().optional() }),
     }, async ({ code, objective, skip_followups }) => out("apply_bootstrap", await applyBootstrap(pool, code, { objective: objective ?? null, skipFollowups: skip_followups === true })));
+    // ---- Phase 4 (ADR-082): the opportunity lifecycle — one record per specific job/application, never per employer.
+    server.registerTool("find_opportunity", {
+        description: "Look up specific jobs in Julian's pipeline — \"Have I applied to Amazon's delivery finance role?\", \"What happened with Altarum?\", \"Is this posting one I already applied to?\" (pass its URL / requisition id). Each application is its own record with status, dates, contact, history and next step. Read-only; answers from structured state, not an inbox search.",
+        inputSchema: z.object({ query: z.string().max(200).optional().describe("free text: employer and/or title words"), employer: z.string().max(200).optional(), title: z.string().max(200).optional(),
+            req_id: z.string().max(60).optional(), url: z.string().max(500).optional(), status: z.enum(["analyzed", "shortlisted", "preparing", "applied", "interviewing", "offer", "rejected", "withdrawn", "closed"]).optional() }),
+        annotations: { readOnlyHint: true },
+    }, async (a) => {
+        if (!a.query && !a.employer && !a.title && !a.req_id && !a.url && !a.status)
+            return fail("find_opportunity", "Say which job (employer, title, requisition id or posting URL).");
+        return ok("find_opportunity", await findOpportunity(pool, { query: a.query ?? null, employer: a.employer ?? null, title: a.title ?? null, reqId: a.req_id ?? null, url: a.url ?? null, status: a.status ?? null }));
+    });
+    server.registerTool("pipeline", {
+        description: "\"Where am I with all my applications?\" — the job pipeline of an Area (default Career): offers, interviews, applications awaiting a response, silent ones, what changed in the last 7 days, and high-fit postings not applied to. Read-only.",
+        inputSchema: z.object({ area: z.string().max(200).optional() }),
+        annotations: { readOnlyHint: true },
+    }, async ({ area }) => out("pipeline", await pipelineSummary(pool, area ?? "Career")));
+    server.registerTool("track_opportunity", {
+        description: "Track ONE specific job posting Julian is considering, preparing or has applied to (employer + title, plus requisition id / URL when known). Deduplicates against every job already known (same requisition, same LinkedIn id, or same employer+title = the same job) and says so if he ALREADY applied. Creates the job's project and next step when it is being prepared or applied to. Never submits anything.",
+        inputSchema: z.object({ employer: z.string().min(2).max(200), title: z.string().min(2).max(200), req_id: z.string().max(60).optional(), url: z.string().max(500).optional(), location: z.string().max(120).optional(),
+            status: z.enum(["shortlisted", "preparing", "applied", "interviewing"]).default("shortlisted"), fit_score: z.number().int().min(0).max(100).optional(), notes: z.string().max(500).optional(), contact: z.string().max(120).optional() }),
+    }, async (a) => out("track_opportunity", await inTx(pool, false, (tx) => trackOpportunity(tx, { employer: a.employer, title: a.title, reqId: a.req_id ?? null, url: a.url ?? null, location: a.location ?? null,
+        status: a.status, fitScore: a.fit_score ?? null, notes: a.notes ?? null, contact: a.contact ?? null, source: "julian" }))));
+    server.registerTool("record_opportunity_update", {
+        description: "Record what happened to ONE specific job — \"I submitted the Altarum application\", \"Altarum scheduled a panel\", \"Amazon 10471926 rejected me\", \"I got an offer\", \"I withdrew\". Status moves forward only (a closed job never reopens); the job's next step and project are updated. If several jobs match, it asks which (give the title or requisition id).",
+        inputSchema: z.object({ job: z.string().max(200).optional().describe("employer and/or title words"), employer: z.string().max(200).optional(), title: z.string().max(200).optional(), req_id: z.string().max(60).optional(),
+            kind: z.enum(["application", "screen", "interview", "rejection", "offer", "withdrawal", "posting_closed", "note"]), at: z.string().max(40).optional().describe("YYYY-MM-DD; default today"),
+            contact: z.string().max(120).optional(), note: z.string().max(500).optional() }),
+    }, async (a) => {
+        if (!a.job && !a.employer && !a.title && !a.req_id)
+            return fail("record_opportunity_update", "Say which job.");
+        return out("record_opportunity_update", await inTx(pool, false, (tx) => recordOpportunityUpdate(tx, { job: a.job ?? null, employer: a.employer ?? null, title: a.title ?? null, reqId: a.req_id ?? null,
+            kind: a.kind, at: a.at ?? null, contact: a.contact ?? null, note: a.note ?? null })));
+    });
+    server.registerTool("sync_career", {
+        description: "Bring the applied Career pipeline up to date from Julian's email and the Career Copilot sheet (same deterministic reading as the bootstrap): new replies, interviews, rejections and applications are recorded on the exact job they concern; status only moves forward; anything ambiguous becomes a decision, never a guess; every change names its source email. preview:true computes the same changes without writing. Returns a job code; read it with diagnostic_result.",
+        inputSchema: z.object({ preview: z.boolean().default(false) }),
+    }, async ({ preview }) => {
+        if (!google?.gmailEnumerate)
+            return fail("sync_career", "Google is not connected, so the Career sources can't be read.");
+        return ok("sync_career", await startCareerSync(pool, google, preview));
+    });
     server.registerTool("executive_brief", {
         description: "Julian's executive brief, management by exception: 1) decisions he must make, 2) blocked work, 3) important changes, 4) deadlines and risks, 5) what Finagai completed, 6) everything else compressed. Lead with the headline; do not pad.",
         inputSchema: z.object({}),

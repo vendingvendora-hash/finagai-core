@@ -58,6 +58,8 @@ export function slotsFor(request: string): Set<string> {
   if (/\b(file|document|spreadsheet|workbook|xlsx|csv|pdf|docx|deck|report|template)\b/.test(r)) s.add("documents");
   if (/\b(this|on my screen|open (window|tab|document)|what i'?m looking at|current (tab|page|window))\b/.test(r)) s.add("current_context");
   if (/\b(text|imessage|message (to|from))\b|\bsend\b[^.?!]{0,40}\bto\b/.test(r)) s.add("messaging");
+  // Phase 4 (ADR-082): applications/jobs are structured pipeline state first (one record per job); email supplements.
+  if (OPPORTUNITIES.test(r)) s.add("opportunities");
   // Phase 3D: "what am I waiting on?" is STRUCTURED commitment state, never an inbox keyword search.
   if (COMMITMENTS.test(r)) { s.add("commitments"); s.delete("project_state"); s.delete("correspondence"); }
   return s;
@@ -65,12 +67,14 @@ export function slotsFor(request: string): Set<string> {
 
 /** Which capability answers which slot, with the slot's authority order (highest first) — R09. */
 export const COMMITMENTS = /\b(waiting (on|for)|i'?m waiting|pending (from|on)|who owes|outstanding (items|follow[- ]?ups)|open follow[- ]?ups|executive brief|my brief|why is \w+ (yellow|red|green)|area (health|status))\b/;
+export const OPPORTUNITIES = /\b(appl(?:y|ied|ying|ication|ications)|job|jobs|posting|requisition|pipeline|offer|rejected|rejection|interviewing|recruiter|role at|position at)\b/;
 export const SLOT_SOURCES: Record<string, string[]> = {
+  opportunities: ["state.opportunities", "google.gmail"],
   commitments: ["state.areas"],
   schedule: ["google.calendar", "state.projects", "google.gmail"],
   correspondence: ["google.gmail", "mac.imessage"],
   // ADR-075: when Finagai's own memory has nothing on a named thing ("status of Altarum"), its status lives in email.
-  project_state: ["state.areas", "state.projects", "google.gmail"],
+  project_state: ["state.areas", "state.opportunities", "state.projects", "google.gmail"],
   prior_work: ["state.artifacts", "state.interactions"],
   documents: ["mac.local_parser", "mac.filesystem", "google.drive"],
   current_context: ["mac.context", "mac.browser", "mac.screen"],

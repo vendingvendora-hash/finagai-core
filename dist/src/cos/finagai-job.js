@@ -1,5 +1,8 @@
 import { compactProposal, proposeCareerBootstrap, reinterpretProposal } from "./bootstrap.js";
 import { careerState, diagnosticResult, jobsAtEmployer, replayProposal, startStabilityJob, traceProposal } from "./career-diagnostics.js";
+import { startCareerSync } from "./career-sync.js";
+import { findOpportunity, inTx, lifecycleTick, pipelineSummary } from "./opportunities.js";
+import { areaStatus, executiveBriefV2, waitingOn } from "./operating.js";
 export function parseFinagaiJob(request) {
     const m = /^\s*finagai-job:\s*(.*)$/is.exec(request);
     if (!m)
@@ -31,6 +34,21 @@ export function parseFinagaiJob(request) {
         return { kind: "reinterpret", code: int(rest[0], 0) };
     if (c === "acquisitions")
         return { kind: "acquisitions", limit: Math.min(int(rest[0], 10), 30) };
+    // Phase 4 (ADR-082): read-only views and PREVIEWS (computed inside a transaction that is rolled back).
+    if (c === "pipeline")
+        return { kind: "pipeline", area: rest.join(" ") || "Career" };
+    if (c === "find" && rest.length)
+        return { kind: "find", text: rest.join(" ") };
+    if (c === "sync-preview")
+        return { kind: "sync-preview" };
+    if (c === "lifecycle-preview")
+        return { kind: "lifecycle-preview" };
+    if (c === "brief")
+        return { kind: "brief" };
+    if (c === "area-status")
+        return { kind: "area-status", area: rest.join(" ") || "Career" };
+    if (c === "waiting")
+        return { kind: "waiting" };
     return { kind: "unknown", text: t.slice(0, 100) };
 }
 export async function runFinagaiJob(pool, google, job) {
@@ -64,7 +82,14 @@ export async function runFinagaiJob(pool, google, job) {
         WHERE a.area = 'Career' ORDER BY a.acquired_at DESC LIMIT $1`, [job.limit]);
             return { acquisitions: r.rows };
         }
-        case "unknown": return { error: `Unknown finagai-job "${job.text}". Allowed: stability [runs] [org,org], result <code>, trace <proposal> <org>, replay <proposal> [runs], jobs <proposal> <employer>, proposal <code>, reinterpret <code>, career-state, propose, acquisitions [n].` };
+        case "pipeline": return pipelineSummary(pool, job.area);
+        case "find": return findOpportunity(pool, { query: job.text });
+        case "sync-preview": return startCareerSync(pool, google, true);
+        case "lifecycle-preview": return inTx(pool, true, async (tx) => ({ preview: true, note: "computed and rolled back — nothing was written", ...(await lifecycleTick(tx, new Date())) }));
+        case "brief": return executiveBriefV2(pool);
+        case "area-status": return areaStatus(pool, job.area);
+        case "waiting": return waitingOn(pool, null);
+        case "unknown": return { error: `Unknown finagai-job "${job.text}". Allowed: stability [runs] [org,org], result <code>, trace <proposal> <org>, replay <proposal> [runs], jobs <proposal> <employer>, proposal <code>, reinterpret <code>, career-state, propose, acquisitions [n], pipeline [area], find <text>, sync-preview, lifecycle-preview, brief, area-status [area], waiting.` };
     }
 }
 //# sourceMappingURL=finagai-job.js.map

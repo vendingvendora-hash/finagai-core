@@ -122,6 +122,7 @@ export function effectiveAuthority(plan: ResourcePlan, results: Retrieved[]): Re
   return out;
 }
 
+const concatDetail = (xs: Array<string | null>) => xs.filter(Boolean).join(" · ");
 async function retrieveOne(pool: pg.Pool, plan: ResourcePlan, id: string, deps: { google?: GoogleSearch }): Promise<Retrieved> {
   const t = terms(plan);
   const out: Retrieved[] = [];
@@ -144,6 +145,17 @@ async function retrieveOne(pool: pg.Pool, plan: ResourcePlan, id: string, deps: 
                AND (cardinality($2::text[]) = 0 OR concat_ws(' ', f.summary, f.counterparty) ILIKE ALL ($2::text[]))
              ORDER BY f.due_at NULLS LAST LIMIT $1`, [MAX_ITEMS, deictic(plan.request) || plan.authoritative.commitments ? [] : likePatterns(t)]);
         out.push({ capabilityId: id, status: r.rowCount ? "ok" : "empty", items: r.rows.map((x) => ({ title: x.title, detail: clip(x.detail), source: "Finagai follow-ups" })) });
+      } else if (id === "state.opportunities") {
+        // Phase 4 (ADR-082): one row per JOB (never per employer), most engaged first.
+        const pats = deictic(plan.request) ? [] : likePatterns(t);
+        const r = await pool.query(
+          `SELECT coalesce(e.name, o.org) AS employer, o.title, o.requisition_id, o.status, o.applied_at::date AS applied, o.last_evidence_at::date AS last, o.contact
+             FROM opportunity o LEFT JOIN employer e ON e.id = o.employer_id
+            WHERE o.archived_at IS NULL AND (cardinality($2::text[]) = 0 AND o.status IN ('preparing','applied','interviewing','offer')
+                   OR cardinality($2::text[]) > 0 AND concat_ws(' ', e.name, o.org, o.title, o.requisition_id) ILIKE ANY ($2::text[]))
+            ORDER BY CASE WHEN o.status IN ('offer','interviewing','preparing','applied') THEN 0 ELSE 1 END, o.last_evidence_at DESC NULLS LAST LIMIT $1`, [MAX_ITEMS * 2, pats]);
+        out.push({ capabilityId: id, status: r.rowCount ? "ok" : "empty", items: r.rows.map((x) => ({ title: `${x.employer} — ${x.title}${x.requisition_id ? ` (${x.requisition_id})` : ""}`,
+          detail: clip(concatDetail([x.status, x.applied ? `applied ${new Date(x.applied).toISOString().slice(0, 10)}` : null, x.last ? `last contact ${new Date(x.last).toISOString().slice(0, 10)}` : null, x.contact ? `contact ${x.contact}` : null])), source: "Finagai job pipeline" })) });
       } else if (id === "state.artifacts") {
         // Live fix: unrelated recent artifacts (move-file tests) were returned as "prior work" for Altarum.
         // "that chart" means the most recent CHART, not the most recent anything.

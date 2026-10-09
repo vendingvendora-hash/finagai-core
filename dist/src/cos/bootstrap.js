@@ -380,10 +380,12 @@ export async function applyBootstrap(pool, code, opts = {}) {
             if (a.proposedFollowup && !opts.skipFollowups) {
                 const dup = await tx.query(`SELECT 1 FROM followup WHERE project_id = $1 AND state IN ('open','waiting','overdue')`, [pid]);
                 if (!dup.rowCount)
-                    await tx.query(`INSERT INTO followup (summary, counterparty, state, due_at, last_action_at, area_id, project_id) VALUES ($1, $2, 'waiting', now() + interval '3 days', $3, $4, $5)`, [a.proposedFollowup, a.contact ?? a.employer, a.lastContact ?? new Date().toISOString(), area.id, pid]);
+                    await tx.query(`INSERT INTO followup (summary, counterparty, state, due_at, last_action_at, area_id, project_id, opportunity_id, origin) VALUES ($1, $2, 'waiting', now() + interval '3 days', $3, $4, $5, $6, 'bootstrap')`, [a.proposedFollowup, a.contact ?? a.employer, a.lastContact ?? new Date().toISOString(), area.id, pid, oid ?? null]);
             }
         }
         await tx.query(`UPDATE bootstrap_proposal SET status = 'applied', applied_at = now() WHERE id = $1`, [p.id]);
+        // ADR-082: once one proposal is applied, the other pending ones are history, not candidates (sync keeps state current).
+        await tx.query(`UPDATE bootstrap_proposal SET status = 'discarded' WHERE area = $1 AND status = 'pending' AND id <> $2`, [pl.area, p.id]);
         await appendEvent(tx, { actor: "julian", action: "bootstrap_applied", entityType: "area", entityId: area.id, after: { code, inserted, updated, events, projectsCreated: created, snapshot: pl.provenance?.snapshotDigest ?? null } });
         return { area: area.name, objective: objName, employers: pl.employers.length, opportunities: pl.opportunities.length, inserted, updated, events, activeProjects: pl.activeProjects.map((a) => a.name), projectsCreated: created };
     });
