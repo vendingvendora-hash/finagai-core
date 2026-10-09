@@ -61,6 +61,8 @@ export function lastObservation(trace: StepTrace[]): Record<string, string> | nu
   return null;
 }
 
+const READ_RESULT = /^(browser_read|browser_find|browser_list_tabs|read_file|read_text|list_files|list_apps|observe|screenshot)$/;
+
 export async function verifyCompletion(
   deps: { model: Pick<MeteredModelClient, "complete">; graderModel: string; taskId?: string },
   contract: AcceptanceContract, trace: StepTrace[], claimedSummary: string, finalScreenshotB64: string | null,
@@ -97,8 +99,9 @@ export async function verifyCompletion(
 OBJECTIVE: ${contract.objective}
 EXPECTED OUTCOME: ${contract.expectedOutcome}
 CLAIMED SUMMARY (untrusted): ${claimedSummary}
+NOTE: every step result below is attached verbatim to the final report Julian receives — information found by a read step counts as reported even if the summary only references it. Judge whether the evidence achieves the objective.
 STEP TRACE (most recent last):
-${trace.slice(-12).map((t) => `- [${t.kind}] ${t.summary}: ${(t.result ?? "").slice(0, 300)}`).join("\n")}
+${trace.slice(-12).map((t) => `- [${t.kind}] ${t.summary}: ${(t.result ?? "").slice(0, READ_RESULT.test(t.kind) ? 2500 : 300)}`).join("\n")}
 Reply with exactly one line: PASS: <why the evidence shows it> or FAIL: <what is missing or contradicted>.` }];
   if (finalScreenshotB64) content.push({ type: "image", mediaType: "image/png", dataBase64: finalScreenshotB64 });
   const ask = async () => {

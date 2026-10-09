@@ -51,10 +51,19 @@ const HIGH_HINT = /\b(delete|borrar|eliminar|remove account|close account|deacti
 export interface StepLike { kind: string; params: Record<string, unknown>; summary: string; risk?: "read" | "write" }
 
 /** Deterministic authority class of one step. `frontApp` lets "press Return in a browser form" count as a commitment risk. */
+/** Kinds that can TRIGGER something (a button, a menu command, a key). Filling, selecting, attaching, scrolling or
+ *  switching tabs cannot commit anything, whatever words the summary uses (live #121: "Fill name fields (no submit)"). */
+const TRIGGERS = new Set(["browser_click", "click", "double_click", "right_click", "ax_click", "menu_item", "key", "hotkey", "run", "browser_download"]);
+/** Remove negated mentions so "(no submit)", "without sending", "do not pay" never read as the commitment itself. */
+export function stripNegations(s: string): string {
+  return s.replace(/\b(?:no|not|never|without|don'?t|do not|sin|no lo)\s+(?:\w+\s+){0,2}?(?:submit\w*|send\w*|enviar|apply\w*|pay\w*|pagar|purchas\w*|buy\w*|comprar|publish\w*|post\w*|book\w*|accept\w*|sign\w*|delet\w*)\b/gi, " ");
+}
+
 export function classify(step: StepLike, ctx: { frontApp?: string | null; grants?: string[] } = {}): AuthorityClass {
-  const target = [step.summary, step.params.label, step.params.name, step.params.text, step.params.title,
-    Array.isArray(step.params.path) ? (step.params.path as unknown[]).join(" ") : ""].filter(Boolean).join(" ");
+  const target = stripNegations([step.summary, step.params.label, step.params.name, step.params.text, step.params.title,
+    Array.isArray(step.params.path) ? (step.params.path as unknown[]).join(" ") : ""].filter(Boolean).join(" "));
   if (READ.has(step.kind)) return "OBSERVE";
+  if (PREP.has(step.kind) && !TRIGGERS.has(step.kind)) return "PREPARATORY";
   if (HIGH_HINT.test(target)) return "HIGH_RISK";
   if (HIGH.has(step.kind)) {
     if (step.kind === "move_file" && ctx.grants?.includes("move_files")) return "PREPARATORY";
@@ -102,7 +111,7 @@ const FORBID_WORDS: Record<string, RegExp> = {
 export function authorize(step: StepLike, env: DelegationEnvelope | null, ctx: { frontApp?: string | null; now?: Date; usage?: { steps: number; costUsd: number } } = {}): AuthorityDecision {
   const cls = classify(step, { frontApp: ctx.frontApp ?? null, grants: env?.grants ?? [] });
   if (cls === "OBSERVE") return { decision: "auto", cls, reason: "observation" };
-  const target = `${step.summary} ${step.params.label ?? ""} ${step.params.name ?? ""} ${step.params.text ?? ""}`;
+  const target = stripNegations(`${step.summary} ${step.params.label ?? ""} ${step.params.name ?? ""} ${step.params.text ?? ""}`);
   if (env && (cls === "EXTERNAL_COMMITMENT" || cls === "HIGH_RISK")) {
     const hit = env.forbidden.find((w) => (FORBID_WORDS[w] ?? new RegExp(`\\b${w}`, "i")).test(target));
     if (hit) return { decision: "refuse", cls, reason: `Julian said not to ${hit} — stop at the review stage instead` };

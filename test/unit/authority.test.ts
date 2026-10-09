@@ -24,6 +24,18 @@ describe("authority classes", () => {
   });
 });
 
+describe("live #121 regression: negated or non-triggering mentions are not commitments", () => {
+  it("filling fields with '(no submit)' in the summary stays preparatory and is auto inside the envelope", () => {
+    const env = deriveEnvelope("Fill this harmless test application completely but do not submit it.", { principal: true })!;
+    const fill = s("browser_fill_form", { fields: [] }, "Fill First name, Last name and Email on the test form (no submit)");
+    expect(classify(fill)).toBe("PREPARATORY");
+    expect(authorize(fill, env).decision).toBe("auto");
+    expect(classify(s("browser_click", { label: "Next" }, "Go to step 2 without submitting"))).toBe("PREPARATORY");
+    expect(classify(s("browser_click", { label: "Submit application" }, "Submit"))).toBe("EXTERNAL_COMMITMENT");
+    expect(classify(s("type", { text: "x" }, "type the note; do not send"))).toBe("PREPARATORY");
+  });
+});
+
 describe("delegation envelope", () => {
   const env = deriveEnvelope(ACCEPTANCE, { principal: true, now: new Date("2026-10-09T16:00:00Z") })!;
   it("is derived from Julian's words: preparation delegated, submission forbidden, bounded", () => {

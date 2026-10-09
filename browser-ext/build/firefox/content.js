@@ -129,7 +129,8 @@
     return d;
   }
 
-  const COMMIT = /\b(submit|apply|send|pay|purchase|buy|place order|confirm|checkout|enviar|pagar|comprar|postular|aplicar|sign up|register|delete|remove|publish|post)\b/i;
+  // External commitments only. "Apply"/"Easy Apply" OPENS an application (preparatory); "Submit application" commits.
+  const COMMIT = /\b(submit|send|pay|purchase|buy|place order|confirm (?:and )?(?:pay|order|purchase|booking|submit)|checkout|enviar|pagar|comprar|sign up|register|create account|publish|i agree|accept (?:and|terms|offer))\b/i;
 
   function detectBlockers() {
     const b = [];
