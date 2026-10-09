@@ -76,13 +76,15 @@ describe.skipIf(!pool)("Career bootstrap (ADR-080): acquire → snapshot → int
   const ALL = Object.values(REC);
   const BEFORE = ALL.filter((x) => ![REC.riSent1009, REC.riThanks1009, REC.riPricing1009].includes(x));
   const T = new Date("2026-10-09T17:00:00Z");
-  it("stores the frozen snapshot + acquisition, proposes without writing Career state, and records provenance", async () => {
-    const before = (await pool!.query(`SELECT count(*)::int AS n FROM opportunity`)).rows[0].n;
+  const careerCounts = async () => (await pool!.query(`SELECT (SELECT count(*) FROM opportunity)::int AS o, (SELECT count(*) FROM employer)::int AS e, (SELECT count(*) FROM opportunity_event)::int AS ev, (SELECT count(*) FROM project)::int AS p, (SELECT count(*) FROM followup)::int AS f`)).rows[0];
+  it("stores the frozen snapshot + acquisition, proposes WITHOUT writing any Career state, and records provenance", async () => {
+    const before = await careerCounts();
     const p = await proposeCareerBootstrap(pool!, google(BEFORE) as never, T);
-    expect((await pool!.query(`SELECT count(*)::int AS n FROM opportunity`)).rows[0].n).toBe(before);
-    expect(p.summary.provenance).toEqual(expect.objectContaining({ complete: true, interpreterVersion: "career-interpret-4", previousSnapshot: null }));
-    expect(p.summary.activeProjects.map((a) => `${a.org}:${a.status}`).sort()).toEqual(["Altarum:interviewing", "Amazon:applied", "Chimes:applied", "Vallum Associates:applied"]);
-    expect(p.summary.closed!.map((c) => `${c.org}:${c.status}`).sort()).toEqual(["Accenture:rejected", "Cvent:rejected", "Immuta:rejected", "Johns Hopkins University:rejected", "Transurban:rejected", "Window Nation:rejected", "Yahoo:rejected"]);
+    expect(await careerCounts()).toEqual(before);                                  // read-only until approval
+    expect(p.summary.provenance).toEqual(expect.objectContaining({ complete: true, interpreterVersion: "career-interpret-5", previousSnapshot: null }));
+    expect(p.summary.activeProjects.map((a) => `${a.name}:${a.status}`)).toEqual(expect.arrayContaining(["Altarum — Pricing Analyst:interviewing", "Vallum Associates — Project Finance Analyst - SMR:applied",
+      "Amazon — Senior Financial Analyst, R2L Sub Same Day - Delivery Finance (10471926):applied"]));
+    expect(p.summary.closed!.map((c) => c.job)).toEqual(expect.arrayContaining(["Amazon — Sr. Financial Analyst, Amazon Business Finance (10460629)", "Transurban — Senior Financial Planning Analyst", "Vallum Associates — Structured Finance Analyst"]));
     const row = (await pool!.query(`SELECT snapshot_digest, interpretation_digest, interpreter_version FROM bootstrap_proposal WHERE code = $1`, [p.code])).rows[0];
     expect(row.snapshot_digest).toBe(p.summary.provenance!.snapshotDigest);
   });
@@ -99,25 +101,34 @@ describe.skipIf(!pool)("Career bootstrap (ADR-080): acquire → snapshot → int
     expect((await pool!.query(`SELECT count(DISTINCT snapshot_id)::int AS n FROM bootstrap_proposal WHERE code IN ($1, $2)`, [a.code, b.code])).rows[0].n).toBe(1);
     const r = await replayProposal(pool!, b.code, 10);
     expect(r).toEqual(expect.objectContaining({ identical: true, matchesStoredProposal: true, runs: 10 }));
-    const t = await traceProposal(pool!, b.code, "Transurban") as { found: Array<{ stage: string; acquiredVia: string[] }>; final: { status: string } };
-    expect(t.final.status).toBe("rejected"); expect(t.found.filter((f) => !f.acquiredVia.includes("carry-forward"))).toEqual([]);
+    const t = await traceProposal(pool!, b.code, "Transurban") as unknown as { found: Array<{ stage: string; acquiredVia: string[] }>; jobs: Array<{ status: string }> };
+    expect(t.jobs.map((j) => j.status)).toEqual(["rejected"]); expect(t.found.filter((f) => !f.acquiredVia.includes("carry-forward"))).toEqual([]);
   });
   it("new evidence → the delta names the records; apply upserts by stable identity and never deletes", async () => {
     const p = await proposeCareerBootstrap(pool!, google(ALL) as never, new Date(T.getTime() + 180_000));
-    expect(p.summary.delta!.oppAdded).toEqual([{ org: "Resource Innovations", explainedBy: [REC.riSent1009.id, REC.riThanks1009.id, REC.riPricing1009.id] }]);
+    expect(p.summary.delta!.oppAdded).toEqual([{ org: "Resource Innovations — Pricing Analyst", explainedBy: [REC.riSent1009.id, REC.riThanks1009.id, REC.riPricing1009.id] }]);
     expect(p.summary.applicable).toEqual({ ok: true, why: [] });
     const a = await applyBootstrap(pool!, p.code);
     expect(a).toEqual(expect.objectContaining({ area: "Career" }));
-    const st = Object.fromEntries((await pool!.query(`SELECT org, status FROM opportunity WHERE archived_at IS NULL`)).rows.map((r) => [r.org, r.status]));
-    expect(st).toEqual(expect.objectContaining({ Altarum: "interviewing", Immuta: "rejected", Transurban: "rejected", "Resource Innovations": "applied", "Vallum Associates": "applied", Amazon: "applied" }));
-    expect(Object.keys(st)).not.toContain("Senior");
+    // One row per JOB; the employer is shared; each job has its own status, requisition, history and project.
+    const amz = (await pool!.query(`SELECT o.requisition_id, o.status, o.title, e.name AS employer, (SELECT count(*)::int FROM opportunity_event v WHERE v.opportunity_id = o.id) AS events
+      FROM opportunity o JOIN employer e ON e.id = o.employer_id WHERE e.key = 'amazon' AND o.requisition_id IS NOT NULL ORDER BY o.requisition_id`)).rows;
+    expect(amz.map((r) => [r.requisition_id, r.status, r.events])).toEqual([["10383371", "applied", 2], ["10460629", "rejected", 3], ["10466286", "applied", 1], ["10471926", "applied", 2], ["10491543", "withdrawn", 3], ["10499413", "closed", 3]]);
+    expect(new Set(amz.map((r) => r.employer))).toEqual(new Set(["Amazon"]));
+    const vallum = (await pool!.query(`SELECT title, status FROM opportunity WHERE org = 'Vallum Associates' AND archived_at IS NULL ORDER BY title`)).rows;
+    expect(vallum).toEqual([{ title: "Project Finance Analyst - SMR", status: "applied" }, { title: "Structured Finance Analyst", status: "rejected" }]);
+    const proj = (await pool!.query(`SELECT p.name FROM opportunity o JOIN project p ON p.id = o.project_id WHERE o.requisition_id = '10471926'`)).rows;
+    expect(proj).toEqual([{ name: "Amazon — Senior Financial Analyst, R2L Sub Same Day - Delivery Finance (10471926)" }]);
+    expect((await pool!.query(`SELECT count(*)::int AS n FROM opportunity WHERE org ~* '^senior'`)).rows[0].n).toBe(0);
     const n1 = (await pool!.query(`SELECT count(*)::int AS n FROM opportunity`)).rows[0].n;
     const again = await proposeCareerBootstrap(pool!, google(ALL) as never, new Date(T.getTime() + 240_000));
     await applyBootstrap(pool!, again.code);
     expect((await pool!.query(`SELECT count(*)::int AS n FROM opportunity`)).rows[0].n).toBe(n1);   // idempotent: no duplicates
+    expect((await pool!.query(`SELECT count(*)::int AS n FROM (SELECT opportunity_id, source_id FROM opportunity_event GROUP BY 1, 2 HAVING count(*) > 1) d`)).rows[0].n).toBe(0);
     expect((await applyBootstrap(pool!, p.code)) as { error?: string }).toEqual({ error: expect.stringMatching(/already applied/) });
-    const w = await waitingOn(pool!, "Career");
-    expect(JSON.stringify(w)).toMatch(/Chimes|Beth Young/);
+    const f = (await pool!.query(`SELECT p.name, f.counterparty FROM followup f JOIN project p ON p.id = f.project_id WHERE f.state = 'waiting' ORDER BY p.name`)).rows;
+    expect(f).toEqual(expect.arrayContaining([{ name: "Chimes — role not named in evidence", counterparty: "Chimes" }]));   // follow-ups are per JOB project
+    void waitingOn;
   });
   it("an incomplete acquisition yields a proposal that cannot be applied", async () => {
     const g = { ...google(ALL), gmailEnumerate: async () => [{ account: ACCOUNT, ok: false, error: "google gmail.googleapis.com HTTP 429", records: [], pages: 0, truncated: false, ids: 0 }] };

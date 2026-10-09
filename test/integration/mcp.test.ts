@@ -89,15 +89,15 @@ describe.skipIf(!url)("MCP tool layer end to end", () => {
   it("Phase 3: the employee layer in Julian's words, end to end over MCP (no UUIDs anywhere)", async () => {
     const client = await connect(await token());
     const call = async (name: string, args: Record<string, unknown> = {}) => json(await client.callTool({ name, arguments: args }));
-    expect((await call("create_area", { name: "Career" })).name).toBe("Career");                                      // "Create Career as an Area."
-    expect((await call("set_objective", { objective: "Secure a strong finance role", area: "Career" })).created).toBe(true);
-    const placed = await call("place_under_area", { item: "Altarum", area: "Career" });                              // "Altarum belongs under Career."
-    expect(placed).toEqual(expect.objectContaining({ project: "Altarum", area: "Career", linkedToObjective: true }));
-    expect((await call("track_waiting", { counterparty: "Beth Young", about: "Altarum", due: "in 5 days" })).project).toBe("Altarum");  // "I'm waiting on Beth."
+    expect((await call("create_area", { name: "Job Search" })).name).toBe("Job Search");                                      // "Create Career as an Area."
+    expect((await call("set_objective", { objective: "Secure a strong finance role", area: "Job Search" })).created).toBe(true);
+    const placed = await call("place_under_area", { item: "Northwind Capital", area: "Job Search" });                              // "Northwind Capital belongs under Career."
+    expect(placed).toEqual(expect.objectContaining({ project: "Northwind Capital", area: "Job Search", linkedToObjective: true }));
+    expect((await call("track_waiting", { counterparty: "Beth Young", about: "Northwind Capital", due: "in 5 days" })).project).toBe("Northwind Capital");  // "I'm waiting on Beth."
     const w = await call("waiting_on");                                                                                 // "What am I waiting on?"
     expect(w.source).toMatch(/structured state/);
-    expect(w.items.find((i: { waitingOn: string }) => i.waitingOn === "Beth Young")).toEqual(expect.objectContaining({ project: "Altarum", area: "Career", state: "waiting" }));
-    const s = await call("area_status", { area: "Career" });                                                           // "Why is Career yellow?"
+    expect(w.items.find((i: { waitingOn: string }) => i.waitingOn === "Beth Young")).toEqual(expect.objectContaining({ project: "Northwind Capital", area: "Job Search", state: "waiting" }));
+    const s = await call("area_status", { area: "Job Search" });                                                           // "Why is Career yellow?"
     expect(["green", "yellow", "red"]).toContain(s.color); expect(typeof s.why).toBe("string");
     const brief = await call("executive_brief");                                                                       // "Give me my executive brief."
     expect(brief).toEqual(expect.objectContaining({ headline: expect.any(String), decisions: expect.any(Array), blocked: expect.any(Array), risks: expect.any(Array) }));

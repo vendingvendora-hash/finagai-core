@@ -58,7 +58,7 @@ const STATUS_MAP = { analyzed: "analyzed", shortlisted: "shortlisted", applied: 
 export function extractSheet(csv) {
     const [header, ...data] = parseCsv(csv);
     if (!header)
-        return { rows: [], dropped: 0, duplicates: 0 };
+        return { rows: [], dropped: 0, duplicates: 0, duplicateRows: [] };
     const col = (re) => header.findIndex((h) => re.test(h.trim()));
     const c = { id: col(/^job id$/i), org: col(/^company$/i), title: col(/^title$/i), url: col(/posting url/i), loc: col(/^location$/i), mode: col(/work mode/i),
         salary: col(/salary/i), elig: col(/eligibility status/i), status: col(/application status/i), score: col(/match score/i), concerns: col(/fit concerns/i),
@@ -66,8 +66,9 @@ export function extractSheet(csv) {
     const get = (r, i) => (i >= 0 ? (r[i] ?? "").trim() : "") || null;
     const out = [];
     let dropped = 0;
-    const seen = new Set();
+    const seen = new Map();
     let duplicates = 0;
+    const duplicateRows = [];
     for (const r of data) {
         const org = get(r, c.org), title = get(r, c.title);
         const isTest = !!org && !!title && /\b(test|diagnostics?|verify)\b/i.test(org) && /\b(test|qa|verification|readable)\b/i.test(title);
@@ -76,18 +77,20 @@ export function extractSheet(csv) {
             continue;
         }
         const key = dedupeKey(org, title, get(r, c.url));
+        // Same posting listed twice (same LinkedIn job id, or same employer + title): kept as ONE row, and the merge is reported.
         if (seen.has(key)) {
             duplicates++;
+            duplicateRows.push({ id: get(r, c.id) ?? key, sameAs: seen.get(key), key });
             continue;
         }
-        seen.add(key);
+        seen.set(key, get(r, c.id) ?? key);
         const score = Number(get(r, c.score));
         out.push({ sourceId: get(r, c.id) ?? key, org, title, url: get(r, c.url), location: get(r, c.loc), workMode: get(r, c.mode), salary: get(r, c.salary),
             eligibility: get(r, c.elig), status: STATUS_MAP[(get(r, c.status) ?? "analyzed").toLowerCase()] ?? "analyzed",
             fitScore: Number.isFinite(score) && score > 0 ? Math.round(score) : null, fitNotes: get(r, c.concerns), resume: get(r, c.resume),
             nextAction: get(r, c.next), nextActionAt: get(r, c.nextAt), folder: get(r, c.folder), updatedAt: get(r, c.updated) });
     }
-    return { rows: out, dropped, duplicates };
+    return { rows: out, dropped, duplicates, duplicateRows };
 }
 const ORG_AFTER = /\b([Pp]hone [Ss]creen|[Ii]nterview|[Aa]pplication)\b[^A-Za-z]{0,3}(?:with|for|at|to)\s+([A-Z][\w&.'-]*(?:\s+[A-Z][\w&.'-]*){0,4})/;
 const ORG = "([A-Z][\\w&.'-]*(?:\\s+[A-Z][\\w&.'-]*){0,4})";
@@ -180,60 +183,72 @@ export async function acquireAndStoreCareer(pool, google, now = new Date()) {
     const acq = await pool.query(`INSERT INTO evidence_acquisition (area, snapshot_id, acquired_at, complete, search_misses, problems, stats) VALUES ('Career', $1, $2, $3, $4, $5::jsonb, $6::jsonb) RETURNING id`, [snapshotId, snapshot.acquiredAt, snapshot.completeness.complete, snapshot.completeness.searchMisses, JSON.stringify(snapshot.completeness.problems), JSON.stringify(stats)]);
     return { snapshot, digest, snapshotId, acquisitionId: String(acq.rows[0].id), prev, records, stats };
 }
-const normTitle = (t) => t.toLowerCase().replace(/&/g, " and ").replace(/\b(sr|senior)\b\.?/g, "senior").replace(/[^a-z0-9]+/g, " ").trim();
-const titleMatch = (a, b) => { const x = normTitle(a), y = normTitle(b); return !!x && !!y && (x === y || x.includes(y) || y.includes(x)); };
 /** Projects (with follow-ups) only for real engagement: interviewing/offer, or an application with evidence in the last
  *  PROJECT_RECENT_DAYS. Older unanswered applications stay pipeline records — no project, no follow-up noise. */
 export const PROJECT_RECENT_DAYS = 14;
-/** Pure: interpretation → proposal payload (opportunities carry stable identity: canonical key + every alias). */
+const jobLabel = (o) => `${o.employer} — ${o.title ?? "role not named in evidence"}${o.reqId ? ` (${o.reqId})` : ""}`;
+/** Pure: interpretation → proposal payload. One record per JOB; Career Copilot rows not linked to evidence stay their own records. */
 export function buildCareerPayload(interp, snapshot, projects) {
-    const sheet = snapshot.sheet.ok && snapshot.sheet.csv ? extractSheet(snapshot.sheet.csv) : { rows: [], dropped: 0, duplicates: 0 };
-    const orgs = new Map();
-    const evTitles = (o) => [...new Set(interp.traces.records.filter((t) => t.orgKey && interp.traces.orgs.find((x) => x.orgKey === o.orgKey)?.aliases.includes(t.orgKey) && t.title).map((t) => t.title))].sort();
-    for (const o of interp.traces.orgs) {
-        const info = { status: o.status, aliases: o.aliases, ids: o.records.map((r) => r.recordId), titles: evTitles(o), org: o.org, orgKey: o.orgKey };
-        for (const a of o.aliases)
-            orgs.set(a, info);
+    const sheet = snapshot.sheet.ok && snapshot.sheet.csv ? extractSheet(snapshot.sheet.csv) : { rows: [], dropped: 0, duplicates: 0, duplicateRows: [] };
+    const rowById = new Map(sheet.rows.map((r) => [r.sourceId, r]));
+    const linked = new Set(interp.opportunities.flatMap((o) => o.sheetRows));
+    const empKeyOf = (org) => interp.employers.find((e) => e.aliases.includes(normOrg(org)))?.key ?? normOrg(org);
+    const opportunities = [];
+    for (const o of interp.opportunities) {
+        const row = o.sheetRows.length ? rowById.get(o.sheetRows[0]) : undefined;
+        opportunities.push({
+            sourceId: row?.sourceId ?? o.key, org: o.employer, title: o.title ?? row?.title ?? "(role not named in evidence)", url: row?.url ?? null, location: o.location ?? row?.location ?? null,
+            workMode: row?.workMode ?? null, salary: row?.salary ?? null, eligibility: row?.eligibility ?? null, status: o.status, fitScore: row?.fitScore ?? null, fitNotes: row?.fitNotes ?? null,
+            resume: row?.resume ?? null, nextAction: row?.nextAction ?? null, nextActionAt: row?.nextActionAt ?? null, folder: row?.folder ?? null, updatedAt: row?.updatedAt ?? null,
+            dedupe: o.key, aliasKeys: o.aliasKeys, evidenceIds: o.events.map((e) => e.recordId), statusSource: o.events.length ? "evidence" : "sheet",
+            employerKey: o.employerKey, reqId: o.reqId, identityBasis: o.identityBasis, contact: o.contact, firstEvidenceAt: o.firstEvidenceAt, lastEvidenceAt: o.lastEvidenceAt, appliedAt: o.appliedAt,
+            events: o.events.map((e) => ({ at: e.at, kind: e.kind, transition: e.transition, sourceId: e.recordId, subject: e.subject })), anomalies: o.anomalies, sourceIds: o.sourceIds
+        });
     }
-    const applied = new Set(); // orgKeys whose status landed on at least one sheet row
-    const opportunities = sheet.rows.map((r) => {
-        const o = orgs.get(normOrg(r.org));
-        const rowsOfOrg = o ? sheet.rows.filter((x) => orgs.get(normOrg(x.org)) === o).length : 0;
-        // Org-level evidence updates a sheet row only when it is the org's only row or the evidence names that role.
-        const hit = !!o && o.ids.length > 0 && (rowsOfOrg === 1 || o.titles.some((t) => titleMatch(t, r.title)));
-        if (hit)
-            applied.add(o.orgKey);
-        return { ...r, status: hit ? o.status : r.status, statusSource: hit ? "evidence" : "sheet", dedupe: dedupeKey(r.org, r.title, r.url), aliasKeys: [dedupeKey(r.org, r.title, r.url)], evidenceIds: hit ? o.ids : [] };
-    });
-    // Organizations whose evidence matched no sheet row get one evidence opportunity (stable key org:<canonical>, all aliases).
-    for (const o of interp.traces.orgs) {
-        if (applied.has(o.orgKey) || !o.records.length)
+    for (const r of sheet.rows) {
+        if (linked.has(r.sourceId))
             continue;
-        const info = orgs.get(o.orgKey);
-        opportunities.push({ sourceId: `evidence:${o.orgKey}`, org: o.org, title: info.titles[0] ?? "(role from email evidence)", url: null, location: null, workMode: null, salary: null, eligibility: null,
-            status: o.status, fitScore: null, fitNotes: null, resume: null, nextAction: null, nextActionAt: null, folder: null, updatedAt: null,
-            statusSource: "evidence", dedupe: `org:${o.orgKey}`, aliasKeys: o.aliases.map((a) => `org:${a}`).sort(), evidenceIds: info.ids });
+        const key = dedupeKey(r.org, r.title, r.url);
+        opportunities.push({ ...r, dedupe: key, aliasKeys: [key, `sheet:${r.sourceId}`].sort(), evidenceIds: [], statusSource: "sheet", employerKey: empKeyOf(r.org), reqId: null, identityBasis: "sheet-row",
+            contact: null, firstEvidenceAt: null, lastEvidenceAt: null, appliedAt: null, events: [], anomalies: [], sourceIds: [`sheet:${r.sourceId}`] });
     }
-    const projKeys = new Map(projects.map((p) => [normOrg(p), p]));
+    opportunities.sort((a, b) => (a.dedupe < b.dedupe ? -1 : a.dedupe > b.dedupe ? 1 : 0));
+    const projKeys = new Map(projects.map((p) => [p.toLowerCase(), p]));
     const asOf = Date.parse(interp.asOf);
-    const engaged = interp.active.filter((a) => a.status !== "applied" || (a.lastEvidenceAt !== null && asOf - Date.parse(a.lastEvidenceAt.slice(0, 10)) <= PROJECT_RECENT_DAYS * 86_400_000));
-    const activeProjects = engaged.map((a) => ({
-        org: a.org, orgKey: a.orgKey, aliases: a.aliases, status: a.status, titles: orgs.get(a.orgKey)?.titles.length ? orgs.get(a.orgKey).titles : a.titles.slice(0, 3),
-        evidence: a.evidence.slice(-6).map((e) => `${e.kind} ${e.at.slice(0, 10)}: ${e.subject}`), evidenceIds: a.evidence.map((e) => e.recordId),
-        lastContact: a.lastEvidenceAt, contact: a.contact, proposedFollowup: a.followup, followupDue: a.followupDue,
-        existingProject: a.aliases.map((k) => projKeys.get(k)).find(Boolean) ?? null
-    }));
-    const pipelineOnly = interp.active.filter((a) => !engaged.includes(a)).map((a) => `${a.org} (applied, last evidence ${a.lastEvidenceAt?.slice(0, 10) ?? "?"})`);
+    const engaged = interp.active.filter((a) => a.status === "interviewing" || a.status === "offer" ||
+        (a.status === "applied" && a.lastEvidenceAt !== null && asOf - Date.parse(a.lastEvidenceAt.slice(0, 10)) <= PROJECT_RECENT_DAYS * 86_400_000));
+    const activeProjects = engaged.map((a) => {
+        const name = jobLabel(a);
+        return { name, opportunityKey: a.key, employer: a.employer, title: a.title, reqId: a.reqId, status: a.status,
+            evidence: a.events.slice(-6).map((e) => `${e.kind} ${e.at.slice(0, 10)}: ${e.subject}`), evidenceIds: a.events.map((e) => e.recordId),
+            lastContact: a.lastEvidenceAt, contact: a.contact, proposedFollowup: a.followup, followupDue: a.followupDue,
+            existingProject: projKeys.get(name.toLowerCase()) ?? null };
+    });
+    const pipelineOnly = interp.active.filter((a) => !engaged.includes(a)).map((a) => `${jobLabel(a)}: ${a.status}, last evidence ${a.lastEvidenceAt?.slice(0, 10) ?? "?"}`);
     const byStatus = {};
     for (const o of opportunities)
         byStatus[o.status] = (byStatus[o.status] ?? 0) + 1;
     return {
-        area: "Career", objective: { proposed: "Secure a strong Financial / Pricing Analyst role", needsConfirmation: true },
-        source: { sheet: snapshot.sheet.name ?? null, sheetId: snapshot.sheet.id ?? null, account: snapshot.sheet.account ?? null, rows: sheet.rows.length, dropped: sheet.dropped, duplicates: sheet.duplicates },
+        area: "Career", objective: { proposed: CAREER_OBJECTIVE, needsConfirmation: true },
+        source: { sheet: snapshot.sheet.name ?? null, sheetId: snapshot.sheet.id ?? null, account: snapshot.sheet.account ?? null, rows: sheet.rows.length, dropped: sheet.dropped, duplicates: sheet.duplicates, duplicateRows: sheet.duplicateRows },
         pipeline: { total: opportunities.length, byStatus, shortlist: interp.pipeline.shortlist },
-        activeProjects, pipelineOnly, closed: interp.closed.map((c) => ({ org: c.org, status: c.status, lastEvidence: c.lastEvidenceAt, evidenceIds: c.evidenceIds })),
+        employers: interp.employers.map((e) => ({ key: e.key, name: e.name, aliases: e.aliases, party: e.party, partyReason: e.partyReason, jobs: e.opportunityKeys.length })),
+        activeProjects, pipelineOnly,
+        closed: interp.closed.map((c) => ({ job: jobLabel(c), status: c.status, lastEvidence: c.lastEvidenceAt, evidenceIds: c.events.map((e) => e.recordId) })),
+        unassigned: interp.unassigned.map((u) => ({ employer: u.employer, recordId: u.recordId, at: u.at, kind: u.kind, reason: u.reason })),
         conflicts: interp.conflicts, opportunities,
     };
+}
+export const CAREER_OBJECTIVE = "Secure a strong Financial / Pricing Analyst role";
+/** What Julian reads (bounded size): the decision-relevant parts of a proposal; the full job list stays in the payload. */
+export function compactProposal(code, s) {
+    return { proposalCode: code, objective: s.objective, provenance: s.provenance, applicable: s.applicable,
+        jobs: { total: s.pipeline.total, byStatus: s.pipeline.byStatus }, employers: s.employers?.length ?? 0,
+        recruitersOrJobBoards: (s.employers ?? []).filter((e) => e.party !== "employer").map((e) => `${e.name} (${e.party}: ${e.partyReason})`),
+        activeProjects: s.activeProjects.map((a) => ({ project: a.name, status: a.status, last: a.lastContact?.slice(0, 10) ?? null, contact: a.contact, followup: a.proposedFollowup })),
+        pipelineOnly: s.pipelineOnly, closed: (s.closed ?? []).map((c) => `${c.job}: ${c.status} (${c.lastEvidence?.slice(0, 10) ?? "?"})`),
+        unassigned: s.unassigned, duplicatesMerged: s.source.duplicateRows, conflicts: s.conflicts.map((c) => c.slice(0, 600)), shortlist: s.pipeline.shortlist,
+        delta: s.delta ? { sameInput: s.delta.sameInput, sameOpportunitySet: s.delta.sameOpportunitySet, oppAdded: s.delta.oppAdded.slice(0, 20), oppRemoved: s.delta.oppRemoved.slice(0, 20), statusChanged: s.delta.statusChanged.slice(0, 20), unexplained: s.delta.unexplained } : null };
 }
 /**
  * ADR-080: acquisition → frozen snapshot → pure interpretation → proposal with full provenance and a delta against the
@@ -258,8 +273,36 @@ export async function proposeCareerBootstrap(pool, google, now = new Date()) {
     const { opportunities: _omit, ...summary } = payload;
     return { code: Number(r.rows[0].code), summary, interp };
 }
-/** Apply an approved proposal: area, (confirmed) objective, pipeline records, engaged projects + follow-ups. Idempotent.
- *  Stable identity: an opportunity is matched by ANY of its alias keys; nothing is ever deleted. */
+/**
+ * Re-interpret an existing proposal's FROZEN inputs with the current interpreter and stage a NEW proposal (no acquisition,
+ * no Career writes). The superseded proposal is marked discarded. Same snapshot + same as-of ⇒ same result.
+ */
+export async function reinterpretProposal(pool, code) {
+    const r = (await pool.query(`SELECT p.id, p.status, p.payload, p.snapshot_id, p.acquisition_id, s.payload AS snapshot, s.digest FROM bootstrap_proposal p JOIN evidence_snapshot s ON s.id = p.snapshot_id WHERE p.code = $1`, [code])).rows[0];
+    if (!r)
+        return { error: `No bootstrap proposal ${code} with a frozen snapshot.` };
+    const old = r.payload;
+    const snapshot = r.snapshot;
+    const asOf = old.provenance?.asOf ?? snapshot.acquiredAt.slice(0, 10);
+    const interp = interpretCareer(snapshot, { asOf });
+    const projects = (await pool.query(`SELECT name FROM project WHERE archived_at IS NULL AND NOT is_unassigned_holding`)).rows.map((x) => String(x.name));
+    const why = snapshot.completeness.complete ? [] : [`incomplete snapshot: ${snapshot.completeness.problems.join("; ")}`];
+    const provenance = { ...(old.provenance ?? {}), snapshotId: r.snapshot_id, acquisitionId: r.acquisition_id, snapshotDigest: r.digest,
+        interpretationDigest: interpretationDigest(interp), opportunitySetDigest: opportunitySetDigest(interp), interpreterVersion: INTERPRETER_VERSION, asOf: interp.asOf, reinterpretedFrom: code };
+    const payload = { ...buildCareerPayload(interp, snapshot, projects), provenance, applicable: { ok: why.length === 0, why }, delta: null };
+    const ins = await pool.query(`INSERT INTO bootstrap_proposal (area, payload, snapshot_id, acquisition_id, snapshot_digest, interpretation_digest, opportunity_set_digest, interpreter_version)
+    VALUES ('Career', $1::jsonb, $2, $3, $4, $5, $6, $7) RETURNING code`, [JSON.stringify(payload), r.snapshot_id, r.acquisition_id, r.digest, provenance.interpretationDigest, provenance.opportunitySetDigest, INTERPRETER_VERSION]);
+    if (r.status === "pending")
+        await pool.query(`UPDATE bootstrap_proposal SET status = 'discarded' WHERE id = $1`, [r.id]);
+    const { opportunities: _o, ...summary } = payload;
+    void _o;
+    return { code: Number(ins.rows[0].code), supersedes: code, summary, interp };
+}
+/**
+ * Apply an approved proposal (the ONLY writer of Career state; never called by propose/replay/stability). Idempotent.
+ * Employers are shared entities; each JOB opportunity is matched by ANY of its alias keys, keeps its own status, event
+ * history (opportunity_event), evidence, contact, dates, source ids, project and follow-up. Nothing is ever deleted.
+ */
 export async function applyBootstrap(pool, code, opts = {}) {
     const p = (await pool.query(`SELECT id, status, payload FROM bootstrap_proposal WHERE code = $1`, [code])).rows[0];
     if (!p)
@@ -269,52 +312,80 @@ export async function applyBootstrap(pool, code, opts = {}) {
     const pl = p.payload;
     if (pl.applicable && !pl.applicable.ok)
         return { error: `Bootstrap proposal ${code} is not applicable: ${pl.applicable.why.join("; ")}` };
+    if (!pl.employers)
+        return { error: `Bootstrap proposal ${code} uses the retired employer-level model; create a new proposal.` };
     const area = await ensureArea(pool, pl.area);
     return withTransaction(pool, async (tx) => {
-        let objectiveId = null;
         const objName = opts.objective ?? pl.objective.proposed;
         const ob = await tx.query(`SELECT id FROM objective WHERE area_id = $1 AND lower(name) = lower($2)`, [area.id, objName]);
-        objectiveId = ob.rows[0]?.id ?? (await tx.query(`INSERT INTO objective (area_id, name) VALUES ($1, $2) RETURNING id`, [area.id, objName])).rows[0].id;
-        let upserted = 0;
-        for (const raw of pl.opportunities) {
-            const o = raw;
-            const key = o.dedupe ?? dedupeKey(o.org, o.title, o.url);
-            const aliases = o.aliasKeys?.length ? o.aliasKeys : [key];
-            const details = JSON.stringify({ folder: o.folder, sheetUpdatedAt: o.updatedAt, aliasKeys: aliases, evidenceIds: o.evidenceIds ?? [], statusSource: o.statusSource ?? "sheet" });
-            const existing = await tx.query(`SELECT id FROM opportunity WHERE kind = 'job' AND archived_at IS NULL AND dedupe_key = ANY($1::text[]) ORDER BY created_at LIMIT 1`, [[key, ...aliases]]);
-            if (existing.rows[0]) {
-                await tx.query(`UPDATE opportunity SET status = $2, fit_score = COALESCE($3, fit_score), details = details || $4::jsonb, updated_at = now() WHERE id = $1`, [existing.rows[0].id, o.status, o.fitScore, details]);
+        const objectiveId = ob.rows[0]?.id ?? (await tx.query(`INSERT INTO objective (area_id, name) VALUES ($1, $2) RETURNING id`, [area.id, objName])).rows[0].id;
+        const empId = new Map();
+        for (const e of pl.employers) {
+            const r = await tx.query(`INSERT INTO employer (key, name, aliases, party, details) VALUES ($1, $2, $3, $4, $5::jsonb)
+        ON CONFLICT (key) DO UPDATE SET aliases = (SELECT array_agg(DISTINCT x ORDER BY x) FROM unnest(employer.aliases || EXCLUDED.aliases) x), party = EXCLUDED.party, updated_at = now() RETURNING id`, [e.key, e.name, e.aliases, e.party, JSON.stringify({ partyReason: e.partyReason })]);
+            empId.set(e.key, r.rows[0].id);
+        }
+        const oppId = new Map();
+        let inserted = 0, updated = 0, events = 0;
+        for (const o of pl.opportunities) {
+            const aliases = [...new Set([o.dedupe, ...o.aliasKeys])];
+            const details = JSON.stringify({ folder: o.folder, sheetUpdatedAt: o.updatedAt, statusSource: o.statusSource, anomalies: o.anomalies });
+            let employerId = empId.get(o.employerKey) ?? null;
+            if (!employerId) {
+                const r = await tx.query(`INSERT INTO employer (key, name, aliases) VALUES ($1, $2, ARRAY[$1]) ON CONFLICT (key) DO UPDATE SET updated_at = now() RETURNING id`, [o.employerKey, o.org]);
+                employerId = r.rows[0].id;
+                empId.set(o.employerKey, employerId);
+            }
+            // Exact identity first; an alias match must be unambiguous (two candidates = never merge, insert a new job instead).
+            const ex0 = await tx.query(`SELECT id FROM opportunity WHERE kind = 'job' AND archived_at IS NULL AND dedupe_key = $1`, [o.dedupe]);
+            const exA = ex0.rows[0] ? ex0 : await tx.query(`SELECT id FROM opportunity WHERE kind = 'job' AND archived_at IS NULL AND (dedupe_key = ANY($1::text[]) OR alias_keys && $1::text[]) AND NOT (id = ANY($2::uuid[]))`, [aliases, [...oppId.values()]]);
+            const ex = { rows: exA.rows.length === 1 ? exA.rows : [] };
+            let id;
+            if (ex.rows[0]) {
+                id = ex.rows[0].id;
+                updated++;
+                await tx.query(`UPDATE opportunity SET status = $2, fit_score = COALESCE($3, fit_score), employer_id = $4, requisition_id = COALESCE($5, requisition_id), identity_basis = $6,
+          alias_keys = (SELECT array_agg(DISTINCT x ORDER BY x) FROM unnest(alias_keys || $7::text[]) x), source_ids = (SELECT array_agg(DISTINCT x ORDER BY x) FROM unnest(source_ids || $8::text[]) x),
+          contact = COALESCE($9, contact), first_evidence_at = COALESCE($10, first_evidence_at), last_evidence_at = COALESCE($11, last_evidence_at), applied_at = COALESCE(applied_at, $12),
+          details = details || $13::jsonb, updated_at = now() WHERE id = $1`, [id, o.status, o.fitScore, employerId, o.reqId, o.identityBasis, aliases, o.sourceIds, o.contact, o.firstEvidenceAt, o.lastEvidenceAt, o.appliedAt, details]);
             }
             else {
-                await tx.query(`INSERT INTO opportunity (kind, area_id, org, title, url, location, work_mode, salary, eligibility, status, fit_score, fit_notes, resume_ref, next_action, next_action_at, source, dedupe_key, details)
-           VALUES ('job', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb)`, [area.id, o.org, o.title, o.url, o.location, o.workMode, o.salary, o.eligibility, o.status, o.fitScore, o.fitNotes, o.resume, o.nextAction,
-                    o.nextActionAt && !Number.isNaN(Date.parse(o.nextActionAt)) ? o.nextActionAt : null, o.sourceId.startsWith("evidence:") ? "gmail" : `career_copilot:${o.sourceId}`, key, details]);
+                inserted++;
+                id = (await tx.query(`INSERT INTO opportunity (kind, area_id, org, title, url, location, work_mode, salary, eligibility, status, fit_score, fit_notes, resume_ref, next_action, next_action_at, source, dedupe_key, details,
+             employer_id, requisition_id, identity_basis, alias_keys, source_ids, contact, first_evidence_at, last_evidence_at, applied_at)
+           VALUES ('job', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18, $19, $20, $21, $22, $23, $24, $25, $26) RETURNING id`, [area.id, o.org, o.title, o.url, o.location, o.workMode, o.salary, o.eligibility, o.status, o.fitScore, o.fitNotes, o.resume, o.nextAction,
+                    o.nextActionAt && !Number.isNaN(Date.parse(o.nextActionAt)) ? o.nextActionAt : null, o.statusSource === "evidence" ? "gmail" : `career_copilot:${o.sourceId}`, o.dedupe, details,
+                    employerId, o.reqId, o.identityBasis, aliases, o.sourceIds, o.contact, o.firstEvidenceAt, o.lastEvidenceAt, o.appliedAt])).rows[0].id;
             }
-            upserted++;
+            oppId.set(o.dedupe, id);
+            for (const e of o.events) {
+                const r = await tx.query(`INSERT INTO opportunity_event (opportunity_id, at, kind, source, source_id, summary, transition) VALUES ($1, $2, $3, 'gmail', $4, $5, $6) ON CONFLICT DO NOTHING`, [id, e.at, e.kind, e.sourceId, e.subject, e.transition]);
+                events += r.rowCount ?? 0;
+            }
         }
         const created = [];
         for (const a of pl.activeProjects) {
+            const ex = await tx.query(`SELECT id FROM project WHERE archived_at IS NULL AND lower(name) = lower($1) LIMIT 1`, [a.existingProject ?? a.name]);
             let pid;
-            const names = [a.existingProject, a.org].filter((x) => !!x);
-            const ex = await tx.query(`SELECT id FROM project WHERE archived_at IS NULL AND lower(name) = ANY($1::text[]) ORDER BY created_at LIMIT 1`, [names.map((n) => n.toLowerCase())]);
             if (ex.rows[0])
                 pid = ex.rows[0].id;
             else {
-                pid = (await tx.query(`INSERT INTO project (name, description, last_activity_at) VALUES ($1, $2, now()) RETURNING id`, [a.org, `Job opportunity (${a.status}; ${a.evidence.slice(0, 3).join("; ")})`.slice(0, 500)])).rows[0].id;
-                created.push(a.org);
+                pid = (await tx.query(`INSERT INTO project (name, description, last_activity_at) VALUES ($1, $2, now()) RETURNING id`, [a.name, `Job opportunity (${a.status}; ${a.evidence.slice(-3).join("; ")})`.slice(0, 500)])).rows[0].id;
+                created.push(a.name);
             }
             await tx.query(`UPDATE project SET area_id = $2, objective_id = $3, updated_at = now() WHERE id = $1`, [pid, area.id, objectiveId]);
-            const keys = (a.aliases ?? [normOrg(a.org)]);
-            await tx.query(`UPDATE opportunity SET project_id = $2, contact = COALESCE(contact, $3) WHERE area_id = $4 AND archived_at IS NULL AND (lower(org) = lower($1) OR details->'aliasKeys' ?| $5::text[] OR dedupe_key = ANY($5::text[]))`, [a.org, pid, a.contact, area.id, keys.map((k) => `org:${k}`)]);
+            const oid = oppId.get(a.opportunityKey);
+            if (oid)
+                await tx.query(`UPDATE opportunity SET project_id = $2, contact = COALESCE(contact, $3) WHERE id = $1`, [oid, pid, a.contact]);
             if (a.proposedFollowup && !opts.skipFollowups) {
                 const dup = await tx.query(`SELECT 1 FROM followup WHERE project_id = $1 AND state IN ('open','waiting','overdue')`, [pid]);
                 if (!dup.rowCount)
-                    await tx.query(`INSERT INTO followup (summary, counterparty, state, due_at, last_action_at, area_id, project_id) VALUES ($1, $2, 'waiting', now() + interval '3 days', $3, $4, $5)`, [a.proposedFollowup, a.contact ?? a.org, a.lastContact ?? new Date().toISOString(), area.id, pid]);
+                    await tx.query(`INSERT INTO followup (summary, counterparty, state, due_at, last_action_at, area_id, project_id) VALUES ($1, $2, 'waiting', now() + interval '3 days', $3, $4, $5)`, [a.proposedFollowup, a.contact ?? a.employer, a.lastContact ?? new Date().toISOString(), area.id, pid]);
             }
         }
         await tx.query(`UPDATE bootstrap_proposal SET status = 'applied', applied_at = now() WHERE id = $1`, [p.id]);
-        await appendEvent(tx, { actor: "julian", action: "bootstrap_applied", entityType: "area", entityId: area.id, after: { code, opportunities: upserted, projectsCreated: created, snapshot: pl.provenance?.snapshotDigest ?? null } });
-        return { area: area.name, objective: objName, opportunities: upserted, activeProjects: pl.activeProjects.map((a) => a.org), projectsCreated: created };
+        await appendEvent(tx, { actor: "julian", action: "bootstrap_applied", entityType: "area", entityId: area.id, after: { code, inserted, updated, events, projectsCreated: created, snapshot: pl.provenance?.snapshotDigest ?? null } });
+        return { area: area.name, objective: objName, employers: pl.employers.length, opportunities: pl.opportunities.length, inserted, updated, events, activeProjects: pl.activeProjects.map((a) => a.name), projectsCreated: created };
     });
 }
 //# sourceMappingURL=bootstrap.js.map

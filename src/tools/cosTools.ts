@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
 import type pg from "pg";
 import type { ToolHelpers } from "./server.js";
-import { applyBootstrap, proposeCareerBootstrap } from "../cos/bootstrap.js";
+import { applyBootstrap, compactProposal, proposeCareerBootstrap } from "../cos/bootstrap.js";
 import { diagnosticResult, replayProposal, startStabilityJob, traceProposal } from "../cos/career-diagnostics.js";
 import type { GoogleSearch } from "../resources/retrieve.js";
 import { addWaiting, areaStatus, ensureArea, executiveBriefV2, placeUnderArea, resolveWaiting, setObjective, waitingOn } from "../cos/operating.js";
@@ -59,7 +59,7 @@ export function registerCosTools(server: McpServer, { ok, fail }: ToolHelpers, p
     if (!google?.sheetCsv) return fail("bootstrap_area", "Google is not connected, so the Career sources can't be read.");
     const r = await proposeCareerBootstrap(pool, google);
     const s = r.summary;
-    return ok("bootstrap_area", { proposalCode: r.code, ...s, instruction: s.applicable?.ok === false
+    return ok("bootstrap_area", { ...compactProposal(r.code, s), instruction: s.applicable?.ok === false
       ? `This proposal is NOT applicable (${s.applicable.why.join("; ")}). Tell Julian plainly; do not offer to apply it.`
       : `Show Julian this proposal concisely (objective to confirm, active opportunities, closed ones, conflicts, and what changed since the previous snapshot with the records that explain it). Apply only after he approves: apply_bootstrap {code:${r.code}}.` });
   });

@@ -11,6 +11,31 @@ import { proposeCareerBootstrap, type BootstrapPayload } from "./bootstrap.js";
 import { interpretCareer, interpretationDigest, opportunitySetDigest, snapshotDigest, traceOrg, type CareerSnapshot } from "./career-evidence.js";
 import type { GoogleSearch } from "../resources/retrieve.js";
 
+const countBy = (xs: string[]) => { const m: Record<string, number> = {}; for (const x of [...xs].sort()) m[x] = (m[x] ?? 0) + 1; return m; };
+
+/** Jobs at one employer in a proposal's frozen inputs, re-interpreted with the current code (compact). */
+export async function jobsAtEmployer(pool: pg.Pool, code: number, employer: string) {
+  const p = await loadProposal(pool, code);
+  if ("error" in p) return p;
+  const asOf = p.payload.provenance?.asOf;
+  const i = interpretCareer(p.snapshot, asOf ? { asOf } : {});
+  const t = traceOrg(p.snapshot, i, employer);
+  return { code, interpreterVersion: i.interpreterVersion, snapshotDigest: i.snapshotDigest, employer: t.employer, jobs: t.jobs,
+    unassigned: i.unassigned.filter((u) => u.employerKey === t.employer?.key), sheetRowsNotLinked: t.sheetRows.filter((r) => !t.jobs.some((j) => j.sheetRows.includes(r.id))).length };
+}
+
+/** Proof that proposing never wrote Career state: counts of authoritative Career tables and proposal statuses. */
+export async function careerState(pool: pg.Pool) {
+  const q = async (sql: string) => (await pool.query(sql)).rows;
+  return {
+    opportunities: Number((await q(`SELECT count(*)::int AS n FROM opportunity`))[0].n), employers: Number((await q(`SELECT count(*)::int AS n FROM employer`))[0].n),
+    opportunityEvents: Number((await q(`SELECT count(*)::int AS n FROM opportunity_event`))[0].n),
+    careerArea: (await q(`SELECT name FROM area WHERE lower(name) = 'career'`)).length > 0,
+    proposals: Object.fromEntries((await q(`SELECT status, count(*)::int AS n FROM bootstrap_proposal GROUP BY status ORDER BY status`)).map((r) => [r.status, r.n])),
+    bootstrapAppliedEvents: Number((await q(`SELECT count(*)::int AS n FROM event WHERE action = 'bootstrap_applied'`))[0].n),
+  };
+}
+
 async function loadProposal(pool: pg.Pool, code: number) {
   const r = await pool.query(`SELECT p.code, p.payload, p.snapshot_digest, p.interpretation_digest, p.opportunity_set_digest, p.interpreter_version, s.payload AS snapshot,
       a.stats AS acq_stats, a.acquired_at AS acq_at, a.search_misses AS acq_misses, a.problems AS acq_problems
@@ -48,7 +73,7 @@ export async function replayProposal(pool: pg.Pool, code: number, runs = 10) {
     distinctSnapshotDigests: distinct("snapshotDigest"), distinctInterpretationDigests: distinct("interpretationDigest"), distinctOpportunitySets: distinct("opportunitySetDigest"),
     identical: distinct("interpretationDigest").length === 1 && distinct("snapshotDigest").length === 1,
     matchesStoredProposal: distinct("interpretationDigest")[0] === p.row.interpretation_digest,
-    opportunities: [...i0.active.map((o) => `${o.org}: ${o.status}`), ...i0.closed.map((o) => `${o.org}: ${o.status} (closed)`)],
+    jobsByStatus: countBy(i0.opportunities.map((o) => o.status)), jobs: i0.opportunities.length, employers: i0.employers.length, unassignedEvents: i0.unassigned.length,
     perRun: out,
   };
 }
@@ -93,7 +118,7 @@ export async function startStabilityJob(pool: pg.Pool, google: GoogleSearch | un
         const pv = r.summary.provenance!; const d = r.summary.delta;
         progress.push({ run: k, proposal: r.code, ms: Date.now() - t0, acquiredAt: pv.acquiredAt, snapshotDigest: pv.snapshotDigest, interpretationDigest: pv.interpretationDigest,
           opportunitySetDigest: pv.opportunitySetDigest, complete: pv.complete, problems: pv.problems, records: pv.records, searchMisses: pv.searchMisses,
-          opportunities: [...r.interp.active.map((o) => `${o.org}: ${o.status}`), ...r.interp.closed.map((o) => `${o.org}: ${o.status} (closed)`)],
+          jobsByStatus: countBy(r.interp.opportunities.map((o) => o.status)), jobs: r.interp.opportunities.length,
           vsPrevious: d ? { sameInput: d.sameInput, sameOpportunitySet: d.sameOpportunitySet, addedCount: d.addedRecords.length, removedCount: d.removedRecords.length,
             addedRecords: d.addedRecords.slice(0, 25), removedRecords: d.removedRecords.slice(0, 25), sheet: { ...d.sheet, rowsAdded: d.sheet.rowsAdded.slice(0, 25), rowsRemoved: d.sheet.rowsRemoved.slice(0, 25) },
             oppAdded: d.oppAdded, oppRemoved: d.oppRemoved, statusChanged: d.statusChanged, unexplained: d.unexplained } : null });
