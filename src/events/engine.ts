@@ -68,7 +68,9 @@ async function tick(ctx: EngineCtx, deps: EngineDeps, result: TickResult) {
   for (const w of watchers) {
     const mine = cursorRows.filter((c) => c.watcher === w.name);
     const last = mine.length ? Math.max(...mine.map((c) => new Date(c.updated_at).getTime())) : 0;
-    if (w.everyMs > 0 && last && ctx.now.getTime() - last < w.everyMs && !ctx.dryRun) { result.watchers.push({ name: w.name, polled: false, events: 0, newEvents: 0, problems: [] }); continue; }
+    // Live (first ticks 2026-10-09): ticks are 5 min apart but not aligned with the watcher's own clock, so a strict
+    // "≥ everyMs" made the 5-min mail watcher poll every 10 min. A watcher is due within one minute of its interval.
+    if (w.everyMs > 0 && last && ctx.now.getTime() - last < w.everyMs - 60_000 && !ctx.dryRun) { result.watchers.push({ name: w.name, polled: false, events: 0, newEvents: 0, problems: [] }); continue; }
     let polled: { events: RawEvent[]; cursors: Array<{ scope: string; cursor: string }>; problems: string[] };
     try { polled = await w.poll(ctx, new Map(mine.map((c) => [String(c.scope), String(c.cursor)]))); }
     catch (e) { result.watchers.push({ name: w.name, polled: true, events: 0, newEvents: 0, problems: [String((e as Error)?.message ?? e).slice(0, 200)] }); continue; }

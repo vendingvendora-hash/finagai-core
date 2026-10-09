@@ -74,7 +74,7 @@ describe.skipIf(!admin || !migT || !appT)("event-driven proactivity (Phase 5, AD
     expect(r.workflows.filter((w) => w.name === "career.sync")).toEqual([expect.objectContaining({ ok: true })]);   // batched: ONE sync
     expect(r.escalations.opened).toEqual([]);                                                       // nothing here needs Julian
     // The same mail is never an event twice; a quiet tick does nothing.
-    const again = await tick(new Date("2026-10-09T18:06:00Z"));
+    const again = await tick(new Date("2026-10-09T18:04:30Z"));                                     // a tick slightly early still polls
     expect(again.events).toEqual([]);
     expect(again.watchers.find((w) => w.name === "gmail")).toEqual(expect.objectContaining({ polled: true, newEvents: 0 }));
   });
