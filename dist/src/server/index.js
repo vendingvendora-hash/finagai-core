@@ -74,11 +74,16 @@ async function main() {
     // ADR-083: build the tool surface once at startup so /health publishes the live manifest before any client connects.
     buildMcpServer({ pool, cfg, client: "startup", j2: { pool, model, cfg }, ...(sharedGoogle ? { google: sharedGoogle } : {}), extend: registerJ3Tools(pool, j3) });
     const toolNames = () => new Set(liveManifest()?.names ?? []);
+    const handshakeSeen = new Map();
     const server = http.createServer(createHandler(cfg, { version: VERSION, startedAt: new Date(), tools: () => liveManifest() }, log, { keys: remoteKeys(cfg.OAUTH_JWKS_URL), mcp, approval, concierge, control,
         onMcpTraffic: async (msgs, clientId) => {
             for (const m of msgs) {
-                if (m.method === "initialize") {
-                    await appendEvent(pool, { actor: "system", action: "mcp_initialize", client: "claude_ai", after: { clientId, clientInfo: m.params?.clientInfo ?? null, protocolVersion: m.params?.protocolVersion ?? null, serverTools: liveManifest()?.digest ?? null } });
+                if (m.method === "initialize" || m.method === "server/discover") { // server/discover: the 2026-07-28 revision's stateless handshake
+                    const last = handshakeSeen.get(clientId) ?? 0; // at most one recorded handshake per client per 15 min
+                    if (Date.now() - last < 15 * 60_000)
+                        continue;
+                    handshakeSeen.set(clientId, Date.now());
+                    await appendEvent(pool, { actor: "system", action: "mcp_initialize", client: "claude_ai", after: { method: m.method, clientId, clientInfo: m.params?.clientInfo ?? null, protocolVersion: m.params?.protocolVersion ?? null, serverTools: liveManifest()?.digest ?? null } });
                 }
                 else if (m.method === "tools/list") {
                     await appendEvent(pool, { actor: "system", action: "mcp_tools_listed", client: "claude_ai", after: { clientId, served: liveManifest()?.digest ?? null, count: liveManifest()?.count ?? null, cursor: m.params?.cursor ?? null } });

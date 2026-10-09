@@ -213,8 +213,12 @@ export async function pipelineSummary(pool: pg.Pool, areaName = "Career", now = 
   const a = (await pool.query(`SELECT id, name FROM area WHERE archived_at IS NULL AND lower(name) = lower($1)`, [areaName])).rows[0];
   if (!a) return { error: `There is no "${areaName}" area yet.` };
   const by = Object.fromEntries((await pool.query(`SELECT status, count(*)::int AS n FROM opportunity WHERE archived_at IS NULL AND area_id = $1 GROUP BY status ORDER BY status`, [a.id])).rows.map((r) => [r.status, r.n]));
-  const engagedRows = (await pool.query(`${JOB_SELECT} WHERE o.archived_at IS NULL AND o.area_id = $1 AND o.status IN ('offer','interviewing','preparing','ready_for_review')
+  const engagedAll = (await pool.query(`${JOB_SELECT} WHERE o.archived_at IS NULL AND o.area_id = $1 AND o.status IN ('offer','interviewing','preparing','ready_for_review')
     ORDER BY o.last_evidence_at DESC NULLS LAST, o.id`, [a.id])).rows as JobRow[];
+  // Live (sync chat 2026-10-09): an application started 60 days ago and never submitted was listed as "engaged", and the
+  // chat told Julian "finish it or drop it". The lifecycle already closed it; it is dormant, not his task.
+  const dormantRows: JobRow[] = []; const engagedRows: JobRow[] = [];
+  for (const r of engagedAll) (nextStepFor(await factsOf(pool, r), now).kind === "close" ? dormantRows : engagedRows).push(r);
   const appliedRows = (await pool.query(`${JOB_SELECT} WHERE o.archived_at IS NULL AND o.area_id = $1 AND o.status = 'applied' ORDER BY o.last_evidence_at DESC NULLS LAST, o.id`, [a.id])).rows as JobRow[];
   const live = (t: Date | null) => !!t && now.getTime() - new Date(t).getTime() < CAREER_POLICY.responseDays * DAY;
   const fmt = async (r: JobRow) => { const v = await view(pool, r, now, false); return `${v.job} — ${v.status}, last contact ${v.lastContact ?? "?"}${v.nextStep ? `; next: ${v.nextStep}` : ""}`; };
@@ -230,6 +234,9 @@ export async function pipelineSummary(pool: pg.Pool, areaName = "Career", now = 
     totals: { jobs: Object.values(by).reduce((s: number, n) => s + Number(n), 0), byStatus: by },
     headline: `${engagedRows.filter((r) => r.status === "offer").length} offer(s), ${engagedRows.filter((r) => r.status === "interviewing").length} interviewing, ${engagedRows.filter((r) => r.status !== "offer" && r.status !== "interviewing").length} being prepared, ${awaiting.length} applications awaiting a response (< ${CAREER_POLICY.responseDays} days), ${silent.length} older applications with no response.`,
     engaged: await Promise.all(engagedRows.map(fmt)),
+    dormant: { jobs: await Promise.all(dormantRows.map(async (r) => (await view(pool, r, now, false)).job)),
+      note: "started long ago and never submitted — Finagai closed these; nothing is needed from Julian unless he wants to resume one" },
+    ownership: "Finagai owns every next step here (watching for responses, closing silent or abandoned ones). Only items whose next step says it needs Julian (an offer, a submit, a message sent as him) are his.",
     awaitingResponse: await Promise.all(awaiting.map(fmt)),
     noResponse: { count: silent.length, oldest: silent.length ? iso(silent[silent.length - 1]!.last_evidence_at ?? silent[silent.length - 1]!.applied_at)?.slice(0, 10) ?? null : null,
       note: "applications with no response for 14+ days stay in the pipeline as applied; any new email brings them back" },

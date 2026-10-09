@@ -156,6 +156,8 @@ export async function waitingOn(pool: pg.Pool, areaName?: string | null, now = n
     count: rows.length,
     items: rows.map((r) => ({
       waitingOn: r.counterparty, about: r.summary, project: r.project, area: r.area, state: r.state,
+      // Authority model: a wait is Finagai's to watch; Julian acts only on overdue items or ones that need his decision.
+      watchedBy: "Finagai",
       sinceDays: Math.floor((now.getTime() - new Date(r.last_action_at ?? r.created_at).getTime()) / day),
       due: r.due_at ? new Date(r.due_at).toISOString().slice(0, 10) : null,
       overdueDays: r.state === "overdue" && r.due_at ? Math.floor((now.getTime() - new Date(r.due_at).getTime()) / day) : 0,
