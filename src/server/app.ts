@@ -21,6 +21,8 @@ import { existsSync, readFileSync } from "node:fs";
 const FIXTURES: Record<string, string> = { "apply.html": "text/html; charset=utf-8", "complex.html": "text/html; charset=utf-8",
   "frame.html": "text/html; charset=utf-8", "Julian_Perez_Resume_TEST.pdf": "application/pdf" };
 
+import { TRAFFIC, countTraffic } from "../tools/manifest.js";
+
 export interface AppInfo {
   version: string;
   startedAt: Date;
@@ -176,12 +178,16 @@ export function createHandler(cfg: Config, info: AppInfo, log: LogFn, deps: AppD
           }
           try {
             const webReq = await toWebRequest(req, new URL(req.url ?? "/", cfg.FINAGAI_PUBLIC_BASE_URL).toString());
-            if (deps.onMcpTraffic && req.method === "POST") {
-              // Observability only: never blocks or alters the request (ADR-083).
-              webReq.clone().json().then((body: unknown) => {
+            if (req.method === "POST") {
+              // Observability only: never blocks or alters the request (ADR-083). Counted in memory first, then recorded.
+              TRAFFIC.posts++;
+              webReq.clone().text().then((raw) => {
+                let body: unknown;
+                try { body = JSON.parse(raw); } catch (e) { TRAFFIC.parseErrors++; TRAFFIC.lastError = `parse: ${String((e as Error)?.message ?? e).slice(0, 120)} (content-type ${req.headers["content-type"] ?? "?"}, encoding ${req.headers["content-encoding"] ?? "none"}, ${raw.length} chars)`; return; }
                 const msgs = (Array.isArray(body) ? body : [body]).filter((m): m is { method: string; params?: Record<string, unknown> } => !!m && typeof (m as { method?: unknown }).method === "string");
-                if (msgs.length) return deps.onMcpTraffic!(msgs, principal.clientId ?? "unknown");
-              }).catch(() => {});
+                countTraffic(msgs);
+                if (msgs.length && deps.onMcpTraffic) return deps.onMcpTraffic(msgs, principal.clientId ?? "unknown").catch((e) => { TRAFFIC.recordErrors++; TRAFFIC.lastError = `record: ${String((e as Error)?.message ?? e).slice(0, 160)}`; });
+              }).catch((e) => { TRAFFIC.parseErrors++; TRAFFIC.lastError = `read: ${String((e as Error)?.message ?? e).slice(0, 160)}`; });
             }
             const token = extractBearer(req.headers.authorization);
             const response = await deps.mcp.fetch(webReq, { authInfo: {

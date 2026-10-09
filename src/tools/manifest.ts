@@ -57,3 +57,15 @@ export function toolRef(tool: string, args: Record<string, unknown> = {}): strin
 }
 
 export const SERVER_INSTRUCTIONS = "Finagai's tool list in your client may be cached and older than the server. If Julian, a Finagai result or an instruction names a Finagai tool you do not have, do not conclude it does not exist: call list_tools to see the live tools (with schemas) and call_tool to run one by name.";
+
+/** In-process MCP traffic counters (since this process started): proves what clients actually send, even if recording fails. */
+export const TRAFFIC = { since: new Date().toISOString(), posts: 0, parsed: 0, parseErrors: 0, recordErrors: 0, lastError: null as string | null,
+  methods: {} as Record<string, number>, last: [] as Array<{ at: string; method: string; tool?: string }> };
+export function countTraffic(msgs: Array<{ method: string; params?: Record<string, unknown> }>) {
+  TRAFFIC.parsed++;
+  for (const m of msgs) {
+    TRAFFIC.methods[m.method] = (TRAFFIC.methods[m.method] ?? 0) + 1;
+    TRAFFIC.last.unshift({ at: new Date().toISOString(), method: m.method, ...(m.method === "tools/call" ? { tool: String(m.params?.name ?? "") } : {}) });
+  }
+  TRAFFIC.last.length = Math.min(TRAFFIC.last.length, 30);
+}

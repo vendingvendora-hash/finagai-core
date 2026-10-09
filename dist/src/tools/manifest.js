@@ -53,4 +53,15 @@ export function toolRef(tool, args = {}) {
     return `call ${tool} ${a} — if ${tool} is not in your tool list (connector tool lists can be cached for hours), call call_tool {"tool":"${tool}","arguments":${a}} instead`;
 }
 export const SERVER_INSTRUCTIONS = "Finagai's tool list in your client may be cached and older than the server. If Julian, a Finagai result or an instruction names a Finagai tool you do not have, do not conclude it does not exist: call list_tools to see the live tools (with schemas) and call_tool to run one by name.";
+/** In-process MCP traffic counters (since this process started): proves what clients actually send, even if recording fails. */
+export const TRAFFIC = { since: new Date().toISOString(), posts: 0, parsed: 0, parseErrors: 0, recordErrors: 0, lastError: null,
+    methods: {}, last: [] };
+export function countTraffic(msgs) {
+    TRAFFIC.parsed++;
+    for (const m of msgs) {
+        TRAFFIC.methods[m.method] = (TRAFFIC.methods[m.method] ?? 0) + 1;
+        TRAFFIC.last.unshift({ at: new Date().toISOString(), method: m.method, ...(m.method === "tools/call" ? { tool: String(m.params?.name ?? "") } : {}) });
+    }
+    TRAFFIC.last.length = Math.min(TRAFFIC.last.length, 30);
+}
 //# sourceMappingURL=manifest.js.map

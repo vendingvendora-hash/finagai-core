@@ -5,6 +5,7 @@ import { readCookie, SESSION_COOKIE, verifySession } from "../approval/session.j
 import { existsSync, readFileSync } from "node:fs";
 const FIXTURES = { "apply.html": "text/html; charset=utf-8", "complex.html": "text/html; charset=utf-8",
     "frame.html": "text/html; charset=utf-8", "Julian_Perez_Resume_TEST.pdf": "application/pdf" };
+import { TRAFFIC, countTraffic } from "../tools/manifest.js";
 const MAX_MCP_BODY_BYTES = 1_000_000;
 async function toWebRequest(req, url) {
     const chunks = [];
@@ -133,13 +134,24 @@ export function createHandler(cfg, info, log, deps) {
                 }
                 try {
                     const webReq = await toWebRequest(req, new URL(req.url ?? "/", cfg.FINAGAI_PUBLIC_BASE_URL).toString());
-                    if (deps.onMcpTraffic && req.method === "POST") {
-                        // Observability only: never blocks or alters the request (ADR-083).
-                        webReq.clone().json().then((body) => {
+                    if (req.method === "POST") {
+                        // Observability only: never blocks or alters the request (ADR-083). Counted in memory first, then recorded.
+                        TRAFFIC.posts++;
+                        webReq.clone().text().then((raw) => {
+                            let body;
+                            try {
+                                body = JSON.parse(raw);
+                            }
+                            catch (e) {
+                                TRAFFIC.parseErrors++;
+                                TRAFFIC.lastError = `parse: ${String(e?.message ?? e).slice(0, 120)} (content-type ${req.headers["content-type"] ?? "?"}, encoding ${req.headers["content-encoding"] ?? "none"}, ${raw.length} chars)`;
+                                return;
+                            }
                             const msgs = (Array.isArray(body) ? body : [body]).filter((m) => !!m && typeof m.method === "string");
-                            if (msgs.length)
-                                return deps.onMcpTraffic(msgs, principal.clientId ?? "unknown");
-                        }).catch(() => { });
+                            countTraffic(msgs);
+                            if (msgs.length && deps.onMcpTraffic)
+                                return deps.onMcpTraffic(msgs, principal.clientId ?? "unknown").catch((e) => { TRAFFIC.recordErrors++; TRAFFIC.lastError = `record: ${String(e?.message ?? e).slice(0, 160)}`; });
+                        }).catch((e) => { TRAFFIC.parseErrors++; TRAFFIC.lastError = `read: ${String(e?.message ?? e).slice(0, 160)}`; });
                     }
                     const token = extractBearer(req.headers.authorization);
                     const response = await deps.mcp.fetch(webReq, { authInfo: {
