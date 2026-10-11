@@ -1,4 +1,5 @@
 import { policyFor } from "./apply.js";
+import { answeredByCI, kaplanMeier, responseWindow } from "./survival.js";
 /** Wilson score lower bound (95%) — a rate we can trust given its sample size. */
 export function wilsonLow(pos, n, z = 1.96) {
     if (n <= 0)
@@ -7,7 +8,21 @@ export function wilsonLow(pos, n, z = 1.96) {
     const d = 1 + (z * z) / n;
     return Math.max(0, (p + (z * z) / (2 * n) - z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / d);
 }
+/** 95% Wilson interval of a rate, rounded — stored with every rate lesson. */
+export function wilsonInterval(pos, n, z = 1.96) {
+    if (n <= 0)
+        return [0, 1];
+    const p = pos / n, d = 1 + (z * z) / n, c = p + (z * z) / (2 * n), h = z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n));
+    return [Math.round(1000 * Math.max(0, (c - h) / d)) / 1000, Math.round(1000 * Math.min(1, (c + h) / d)) / 1000];
+}
+/** Confidence in what a rate lesson CLAIMS (ADR-085 rev.): the 95% lower bound of the proportion the statement rests
+ *  on — "fails often" rests on the failures, "reliable" on the successes. (The first version always used the success
+ *  bound, so "ax_click verified 0/5" showed confidence 0 although 5/5 failures make the claim fairly certain.) */
+export const claimConfidence = (k, n) => wilsonLow(Math.max(k, n - k), n);
 const pct = (a, b) => (b ? `${Math.round((100 * a) / b)}%` : "n/a");
+/** The newest of a set of timestamps, by TIME. (The first version sorted Date objects as strings — "Fri…" < "Wed…" —
+ *  so a lesson's last-evidence date, and therefore its freshness, could be wrong.) */
+export const latest = (ds) => { const ms = ds.filter(Boolean).map((d) => new Date(d).getTime()).filter(Number.isFinite); return ms.length ? new Date(Math.max(...ms)) : null; };
 const iso = (d) => (d ? new Date(d).toISOString() : new Date(0).toISOString());
 const VERIFIABLE = /^(browser_(fill|fill_form|select|check|click|upload|navigate|open_tab|switch_tab)|ax_click|ax_set_value|move_file|trash_file)$/;
 /** How reliable each tool/step/workflow actually is (the planner and the brief use these; nothing is disabled). */
@@ -21,9 +36,9 @@ export async function resourcePerformance(db, now) {
         if (!VERIFIABLE.test(s.kind) || s.n < 5)
             continue;
         const rate = s.ok / s.n;
-        out.push({ key: `perf:j6.step:${s.kind}`, kind: "resource_performance", basis: "observed", scope: `j6.step:${s.kind}`, support: s.n, positives: s.ok, confidence: wilsonLow(s.ok, s.n),
+        out.push({ key: `perf:j6.step:${s.kind}`, kind: "resource_performance", basis: "observed", scope: `j6.step:${s.kind}`, support: s.n, positives: s.ok, confidence: claimConfidence(s.ok, s.n),
             statement: `Mac step "${s.kind}" was verified ${s.ok}/${s.n} times in the last 60 days (${pct(s.ok, s.n)}).`, lastEvidenceAt: iso(s.last),
-            evidence: { source: "control_step", window: "60 days", sampleIds: s.ids },
+            evidence: { source: "control_step", window: "60 days", sampleIds: s.ids, verifiedRate95: wilsonInterval(s.ok, s.n) },
             effect: rate < 0.6 ? { type: "planner_hint", match: [s.kind], text: `"${s.kind}" was verified only ${s.ok}/${s.n} times recently: after it, re-read the page or window and check the expected change before moving on.` } : null });
     }
     const flows = (await db.query(`SELECT w->>'name' AS name, count(*)::int AS n, count(*) FILTER (WHERE (w->>'ok')::boolean)::int AS ok, max(t.started_at) AS last
@@ -31,13 +46,13 @@ export async function resourcePerformance(db, now) {
     for (const f of flows)
         if (f.n >= 3)
             out.push({ key: `perf:workflow:${f.name}`, kind: "resource_performance", basis: "observed", scope: `workflow:${f.name}`, support: f.n, positives: f.ok,
-                confidence: wilsonLow(f.ok, f.n), statement: `Workflow ${f.name} succeeded ${f.ok}/${f.n} runs in the last 30 days (${pct(f.ok, f.n)}).`, lastEvidenceAt: iso(f.last), evidence: { source: "event_tick.stats", window: "30 days" } });
+                confidence: claimConfidence(f.ok, f.n), statement: `Workflow ${f.name} succeeded ${f.ok}/${f.n} runs in the last 30 days (${pct(f.ok, f.n)}).`, lastEvidenceAt: iso(f.last), evidence: { source: "event_tick.stats", window: "30 days", successRate95: wilsonInterval(f.ok, f.n) } });
     const tools = (await db.query(`SELECT reason AS tool, count(*)::int AS n, count(*) FILTER (WHERE after->>'outcome' = 'ok')::int AS ok, max(occurred_at) AS last
     FROM event WHERE action = 'tool_called' AND reason IS NOT NULL AND reason <> 'call_tool' AND occurred_at > $1::timestamptz - interval '30 days' GROUP BY reason`, [now])).rows;
     for (const t of tools)
         if (t.n >= 5)
             out.push({ key: `perf:tool:${t.tool}`, kind: "resource_performance", basis: "observed", scope: `tool:${t.tool}`, support: t.n, positives: t.ok,
-                confidence: wilsonLow(t.ok, t.n), statement: `Tool ${t.tool} answered without error ${t.ok}/${t.n} times in the last 30 days (${pct(t.ok, t.n)}).`, lastEvidenceAt: iso(t.last), evidence: { source: "event(tool_called)", window: "30 days" } });
+                confidence: claimConfidence(t.ok, t.n), statement: `Tool ${t.tool} answered without error ${t.ok}/${t.n} times in the last 30 days (${pct(t.ok, t.n)}).`, lastEvidenceAt: iso(t.last), evidence: { source: "event(tool_called)", window: "30 days", okRate95: wilsonInterval(t.ok, t.n) } });
     return out;
 }
 /** After a step fails to verify, which next step actually worked (same task, within the next 3 steps)? */
@@ -84,9 +99,12 @@ export async function procedures(db, now) {
         const rep = g.sort((a, b) => Number(b.code) - Number(a.code))[0];
         const steps = rep.kinds.map((k, i) => [k, String(rep.summaries[i])]).filter(([k]) => !NOISE.has(k)).map(([k, s]) => `${k}: ${s}`.slice(0, 200));
         const name = `${common.slice(0, 4).join(" ")} (${rep.seq.length} steps)`;
-        out.push({ key: `procedure:${sig}:${common.slice(0, 4).sort().join("+")}`, kind: "procedure", basis: "inferred", scope: `j6.request:${common.join(" ")}`, support: g.length, positives: g.length,
-            confidence: Math.min(0.95, 1 - 1 / (g.length + 1)), lastEvidenceAt: iso(g.map((t) => t.updated_at).sort().pop()),
-            statement: `Requests about "${common.join(" ")}" were completed and verified the same way ${g.length} times (tasks ${g.map((t) => t.code).join(", ")}): ${rep.seq.join(" → ")}.`,
+        // Confidence: how often requests like these (all the shared words) ended verified THIS way, over every attempt.
+        const attempted = Number((await db.query(`SELECT count(*)::int AS n FROM control_task WHERE requester IS NULL AND updated_at > $1::timestamptz - interval '120 days'
+        AND status IN ('done','failed','cancelled','expired') AND ${common.map((_, i) => `lower(request) LIKE '%' || $${i + 2} || '%'`).join(" AND ")}`, [now, ...common])).rows[0].n);
+        out.push({ key: `procedure:${sig}:${common.slice(0, 4).sort().join("+")}`, kind: "procedure", basis: "inferred", scope: `j6.request:${common.join(" ")}`, support: Math.max(attempted, g.length), positives: g.length,
+            confidence: wilsonLow(g.length, Math.max(attempted, g.length)), lastEvidenceAt: iso(latest(g.map((t) => t.updated_at))),
+            statement: `Requests about "${common.join(" ")}" were completed and verified the same way ${g.length} times of ${Math.max(attempted, g.length)} such requests (tasks ${g.map((t) => t.code).join(", ")}): ${rep.seq.join(" → ")}.`,
             evidence: { source: "control_task (verified)", tasks: g.map((t) => Number(t.code)), representative: Number(rep.code) },
             effect: { type: "procedure", name, when: common.slice(0, 6), steps } });
     }
@@ -108,10 +126,10 @@ export async function decisionPatterns(db, _now) {
         const ride = g.filter((r) => r.state === "cancelled" || LET_RIDE.test(String(r.outcome ?? ""))).length;
         const [areaId, rule] = k.split("|");
         const area = g[0].area ?? "Career";
-        const last = iso(g.map((r) => r.resolved_at).sort().pop());
+        const last = iso(latest(g.map((r) => r.resolved_at)));
         const base = { kind: "decision_pattern", areaId: areaId === "null" ? null : areaId, scope: `decision:${rule}`, support: g.length, positives: ride, lastEvidenceAt: last,
             evidence: { source: "escalation + followup outcomes", rule, resolved: g.length, letRide: ride } };
-        out.push({ ...base, key: `decision:${areaId}:${rule}`, basis: "observed", confidence: wilsonLow(ride, g.length),
+        out.push({ ...base, key: `decision:${areaId}:${rule}`, basis: "observed", confidence: claimConfidence(ride, g.length),
             statement: `${area}: when Finagai asked about "${rule}", Julian let it ride ${ride}/${g.length} times.`, effect: null });
         if (rule === "applied.nudge_or_let_go" && g.length >= 5 && ride / g.length >= 0.8 && (await policyFor(db, areaId === "null" ? null : areaId)).nudgeWithContact)
             out.push({ ...base, key: `decision:${areaId}:${rule}:policy`, basis: "inferred", confidence: wilsonLow(ride, g.length),
@@ -121,14 +139,14 @@ export async function decisionPatterns(db, _now) {
     return out;
 }
 const RESPONSE_KINDS = ["screen", "interview", "rejection", "offer"];
-const quant = (xs, q) => { const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(q * (s.length - 1)))]; };
 /** What actually happens after an application / submission, per Area (any opportunity kind). */
-export async function outcomes(db, _now) {
+export async function outcomes(db, now) {
     const rows = (await db.query(`SELECT o.id, o.area_id, a.name AS area, o.kind,
       (SELECT min(at) FROM opportunity_event e WHERE e.opportunity_id = o.id AND e.kind = 'application') AS applied,
       (SELECT summary FROM opportunity_event e WHERE e.opportunity_id = o.id AND e.kind = 'application' ORDER BY at LIMIT 1) AS app_summary,
       (SELECT min(at) FROM opportunity_event e WHERE e.opportunity_id = o.id AND e.kind = ANY($1::text[])) AS responded,
       (SELECT kind FROM opportunity_event e WHERE e.opportunity_id = o.id AND e.kind = ANY($1::text[]) ORDER BY at LIMIT 1) AS first_answer,
+      (SELECT min(at) FROM opportunity_event e WHERE e.opportunity_id = o.id AND e.kind IN ('withdrawal','posting_closed')) AS ended,
       (SELECT bool_or(e.kind IN ('screen','interview','offer')) FROM opportunity_event e WHERE e.opportunity_id = o.id) AS advanced,
       (SELECT max(at) FROM opportunity_event e WHERE e.opportunity_id = o.id) AS last
     FROM opportunity o LEFT JOIN area a ON a.id = o.area_id WHERE o.archived_at IS NULL`, [RESPONSE_KINDS])).rows.filter((r) => r.applied);
@@ -138,22 +156,45 @@ export async function outcomes(db, _now) {
         byArea.set(String(r.area_id), [...(byArea.get(String(r.area_id)) ?? []), r]);
     for (const [areaId, g] of byArea) {
         const area = g[0].area ?? "?";
-        const last = iso(g.map((r) => r.last).sort().pop());
-        const answered = g.filter((r) => r.responded && new Date(r.responded) >= new Date(r.applied));
-        const lat = answered.map((r) => (new Date(r.responded).getTime() - new Date(r.applied).getTime()) / 86_400_000);
-        const rejections = answered.filter((r) => r.first_answer === "rejection").length;
-        const mix = `${rejections} of the ${lat.length} answers were rejections`;
-        if (lat.length >= 3) {
-            const med = Math.round(quant(lat, 0.5)), p80 = Math.round(quant(lat, 0.8));
-            out.push({ key: `outcome:${areaId}:response_days`, kind: "outcome", basis: "observed", areaId, scope: `area:${area}`, support: lat.length, confidence: Math.min(0.95, 1 - 1 / (lat.length + 1)),
-                statement: `${area}: employers who answered did so in a median of ${med} days (80% within ${p80} days; ${lat.length} answers of ${g.length} applications; ${mix}).`,
-                lastEvidenceAt: last, evidence: { source: "opportunity_event", applications: g.length, answers: lat.length, rejections, medianDays: med, p80Days: p80 } });
+        const last = iso(latest(g.map((r) => r.last)));
+        // Every application counts (censoring, ADR-085 rev.): answered → event at its first answer; not (yet) answered →
+        // censored at today, or earlier if Julian withdrew / the posting closed before any answer.
+        const days = (a, b) => (new Date(b).getTime() - new Date(a).getTime()) / 86_400_000;
+        const obs = [];
+        let rejections = 0, answers = 0;
+        for (const r of g) {
+            const answeredAt = r.responded && new Date(r.responded) >= new Date(r.applied) ? r.responded : null;
+            const endedAt = r.ended && new Date(r.ended) >= new Date(r.applied) ? r.ended : null;
+            if (answeredAt && (!endedAt || new Date(answeredAt) <= new Date(endedAt))) {
+                obs.push({ t: days(r.applied, answeredAt), event: true });
+                answers++;
+                if (r.first_answer === "rejection")
+                    rejections++;
+            }
+            else
+                obs.push({ t: Math.max(0, days(r.applied, endedAt ?? now)), event: false });
+        }
+        if (answers >= 3) {
             const current = (await policyFor(db, areaId === "null" ? null : areaId)).responseDays; // what is in effect now (defaults + approvals)
-            if (lat.length >= 8 && Math.abs(p80 - current) >= 5) {
-                const value = Math.min(45, Math.max(7, p80));
-                out.push({ key: `outcome:${areaId}:response_days:policy`, kind: "outcome", basis: "inferred", areaId, scope: `area:${area}`, support: lat.length, confidence: Math.min(0.9, 1 - 1 / (lat.length + 1)),
-                    statement: `${area}: wait ${value} days (not ${current}) before treating an application as unanswered — 80% of answers came within ${p80} days (${lat.length} answers of ${g.length} applications; ${mix}; applications never answered are not in this figure).`,
-                    lastEvidenceAt: last, evidence: { source: "opportunity_event", p80Days: p80, answers: lat.length, applications: g.length, rejections }, effect: { type: "policy_param", area, param: "responseDays", value } });
+            const w = responseWindow(obs, current);
+            const by = (d) => w.answeredBy[`${d}d`];
+            const at = (d) => (by(d) ? `${Math.round(100 * by(d).pct)}% by day ${d} (95% CI ${Math.round(100 * by(d).lo)}–${Math.round(100 * by(d).hi)}%)` : null);
+            const curve = [7, 14, 30].map(at).filter(Boolean).join(", ");
+            const ci14 = by(14) ?? by(7);
+            out.push({ key: `outcome:${areaId}:response_days`, kind: "outcome", basis: "observed", areaId, scope: `area:${area}`, support: g.length, positives: answers,
+                confidence: ci14 ? Math.max(0, 1 - (ci14.hi - ci14.lo)) : 0, // precision of the estimate
+                statement: `${area}: of ${g.length} applications, ${answers} were answered (${rejections} of them rejections) and ${g.length - answers} are still unanswered or ended without an answer. `
+                    + `Counting the unanswered ones as still waiting (Kaplan–Meier), the chance of any answer is ${curve || "not estimable yet"}; follow-up reaches day ${w.horizonDays}.`
+                    + (w.residualAtCurrent !== null ? ` An application still silent on day ${current} was later answered ${Math.round(100 * w.residualAtCurrent)}% of the time.` : ""),
+                lastEvidenceAt: last, evidence: { source: "opportunity_event", method: "Kaplan–Meier, unanswered applications censored at today / withdrawal / posting closed", applications: g.length, answers, rejections,
+                    censored: g.length - answers, horizonDays: w.horizonDays, answeredBy: w.answeredBy, residualAtCurrent: w.residualAtCurrent, currentWindow: current, window: w.window, windowWhy: w.why } });
+            if (w.window !== null && Math.abs(w.window - current) >= 5) {
+                const cw = answeredByCI(kaplanMeier(obs), w.window);
+                out.push({ key: `outcome:${areaId}:response_days:policy`, kind: "outcome", basis: "inferred", areaId, scope: `area:${area}`, support: g.length, positives: answers,
+                    confidence: Math.max(0, 1 - (cw.hi - cw.lo)),
+                    statement: `${area}: wait ${w.window} days (not ${current}) before treating an application as unanswered — ${w.why}. Based on ${g.length} applications (${answers} answered, ${rejections} of them rejections; the ${g.length - answers} unanswered ones counted as still waiting). Answers later than day ${w.horizonDays} cannot be seen yet.`,
+                    lastEvidenceAt: last, evidence: { source: "opportunity_event", method: "Kaplan–Meier (censored)", applications: g.length, answers, rejections, horizonDays: w.horizonDays, answeredBy: w.answeredBy, window: w.window, why: w.why },
+                    effect: { type: "policy_param", area, param: "responseDays", value: w.window } });
             }
         }
         const channel = (s) => (/application was sent to|application to .+ at /i.test(s) ? "LinkedIn" : "direct (employer site / ATS)");
@@ -171,7 +212,7 @@ export async function outcomes(db, _now) {
         for (const [c, v] of ch)
             if (v.n >= 5)
                 out.push({ key: `outcome:${areaId}:channel:${c}`, kind: "outcome", basis: "observed", areaId, scope: `area:${area}`, support: v.n, positives: v.adv,
-                    confidence: wilsonLow(v.adv, v.n), lastEvidenceAt: last, evidence: { source: "opportunity_event", channel: c, ...v },
+                    confidence: claimConfidence(v.adv, v.n), lastEvidenceAt: last, evidence: { source: "opportunity_event", channel: c, ...v, advancedRate95: wilsonInterval(v.adv, v.n), answeredRate95: wilsonInterval(v.ans, v.n) },
                     statement: `${area}: ${c} applications — ${v.ans}/${v.n} got any answer, ${v.adv}/${v.n} advanced to a screen or interview.` });
     }
     return out;
@@ -185,7 +226,7 @@ export async function corrections(db, now) {
     for (const s of steps)
         if (s.rejected >= 3)
             out.push({ key: `correction:step:${s.kind}`, kind: "correction", basis: "observed", scope: `j6.step:${s.kind}`, support: s.n, positives: s.rejected,
-                confidence: wilsonLow(s.rejected, s.n), lastEvidenceAt: iso(s.last), evidence: { source: "control_step (Julian's decisions)", window: "90 days", rejectedSteps: s.codes },
+                confidence: claimConfidence(s.rejected, s.n), lastEvidenceAt: iso(s.last), evidence: { source: "control_step (Julian's decisions)", window: "90 days", rejectedSteps: s.codes, declinedRate95: wilsonInterval(s.rejected, s.n) },
                 statement: `Julian declined ${s.rejected} of ${s.n} proposed "${s.kind}" write steps in the last 90 days.`,
                 effect: s.rejected / s.n >= 0.5 ? { type: "planner_hint", match: [s.kind], text: `Julian declined ${s.rejected}/${s.n} proposed "${s.kind}" steps recently: say exactly what the step changes and why, and prefer a read-only check first.` } : null });
     const conflicts = (await db.query(`SELECT existing_type, field, count(*)::int AS n, count(*) FILTER (WHERE status = 'keep_existing')::int AS kept, max(resolved_at) AS last
@@ -193,7 +234,7 @@ export async function corrections(db, now) {
     for (const c of conflicts)
         if (c.n >= 3)
             out.push({ key: `correction:conflict:${c.existing_type}.${c.field}`, kind: "correction", basis: "observed", scope: `conflict:${c.existing_type}.${c.field}`,
-                support: c.n, positives: c.kept, confidence: wilsonLow(Math.max(c.kept, c.n - c.kept), c.n), lastEvidenceAt: iso(c.last), evidence: { source: "conflict resolutions", window: "180 days", kept: c.kept, total: c.n },
+                support: c.n, positives: c.kept, confidence: claimConfidence(c.kept, c.n), lastEvidenceAt: iso(c.last), evidence: { source: "conflict resolutions", window: "180 days", kept: c.kept, total: c.n },
                 statement: `When a new capture conflicted with a stored ${c.existing_type} ${c.field}, Julian kept the stored value ${c.kept}/${c.n} times.`, effect: null });
     return out;
 }

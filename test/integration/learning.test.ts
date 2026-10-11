@@ -16,6 +16,9 @@ import { stateNeeds } from "../../src/events/engine.js";
 import type { AreaModule } from "../../src/events/types.js";
 import { guidanceFor, listLessons, policyFor, routingOverride, runLearning } from "../../src/learning/index.js";
 import { forgetLesson, teachFinagai } from "../../src/learning/teach.js";
+import { claimConfidence, wilsonInterval} from "../../src/learning/learners.js";
+import { encodeEffect } from "../../src/learning/guard.js";
+import { freshness } from "../../src/learning/apply.js";
 
 const admin = process.env.INTEGRATION_ADMIN_URL, migT = process.env.INTEGRATION_MIGRATOR_TEMPLATE, appT = process.env.INTEGRATION_APP_TEMPLATE;
 const NOW = new Date("2026-10-09T17:00:00Z");
@@ -72,6 +75,12 @@ describe.skipIf(!admin || !migT || !appT)("learning (Phase 6, ADR-085)", () => {
       await q(`INSERT INTO opportunity_event (opportunity_id, at, kind, source, source_id, summary) VALUES ($1, $2, 'application', 'gmail', $3, 'Thank you for applying'), ($1, $4, 'rejection', 'gmail', $5, 'Unfortunately')`,
         [o.id, ago(60 + i), `a${i}`, ago(60 + i - (24 + (i % 7))), `r${i}`]);
     }
+    // …and 15 applications never answered (applied 60–74 days ago): they are censored observations, not missing data.
+    for (let i = 0; i < 15; i++) {
+      const o = (await q(`INSERT INTO opportunity (kind, area_id, org, title, status, source, dedupe_key, applied_at) VALUES ('job', $1, $2, 'FP&A Analyst', 'applied', 'test', $3, $4) RETURNING id`,
+        [careerId, `Silent ${i}`, `silent-${i}|fpa`, ago(60 + i)]))[0];
+      await q(`INSERT INTO opportunity_event (opportunity_id, at, kind, source, source_id, summary) VALUES ($1, $2, 'application', 'gmail', $3, 'Thank you for applying')`, [o.id, ago(60 + i), `s${i}`]);
+    }
     // Decisions: 5 "nudge or let it ride" escalations — Julian let every one ride.
     for (let i = 0; i < 5; i++) {
       const f = (await q(`INSERT INTO followup (area_id, summary, counterparty, state, closed_at, outcome, origin, rule) VALUES ($1, $2, 'Recruiter', 'cancelled', $3, 'Julian: let it ride', 'lifecycle', 'applied.nudge_or_let_go') RETURNING id`,
@@ -84,7 +93,7 @@ describe.skipIf(!admin || !migT || !appT)("learning (Phase 6, ADR-085)", () => {
   it("a preview computes the lessons and writes nothing", async () => {
     const before = await counts();
     const r = await runLearning(pool, { dryRun: true, now: NOW });
-    expect(r.preview).toBe(true);
+    expect(r.preview).toBe(true); 
     expect(r.learnerProblems).toEqual([]);
     expect(r.learned.length).toBeGreaterThan(3);
     expect(r.proposed.length).toBe(3);
@@ -96,18 +105,29 @@ describe.skipIf(!admin || !migT || !appT)("learning (Phase 6, ADR-085)", () => {
     expect(r.learnerProblems).toEqual([]);
     const perf = await lesson("perf:j6.step:browser_click");
     expect(perf).toEqual(expect.objectContaining({ basis: "observed", status: "active", support: 10, positives: 4 }));
-    expect(Number(perf.confidence)).toBeGreaterThan(0.1); expect(Number(perf.confidence)).toBeLessThan(0.4);
     expect(perf.effect).toEqual(expect.objectContaining({ type: "planner_hint" }));
     expect(perf.evidence).toEqual(expect.objectContaining({ source: "control_step", sampleIds: expect.any(Array) }));
     expect(await lesson("recovery:browser_click->ax_click")).toEqual(expect.objectContaining({ basis: "observed", status: "active", support: 6 }));
     expect(await lesson("correction:step:trash_file")).toEqual(expect.objectContaining({ basis: "observed", kind: "correction", support: 5, positives: 4 }));
-    expect(await lesson(`outcome:${careerId}:response_days`)).toEqual(expect.objectContaining({ basis: "observed", effect: null }));
+    const resp = await lesson(`outcome:${careerId}:response_days`);
+    expect(resp).toEqual(expect.objectContaining({ basis: "observed", effect: null, support: 24, positives: 9 }));
+    // Censored analysis: all 24 applications count; the 15 never answered are censored, not dropped.
+    expect(resp.evidence).toEqual(expect.objectContaining({ method: expect.stringMatching(/Kaplan–Meier/), applications: 24, answers: 9, censored: 15, window: 29 }));
+    expect(resp.evidence.answeredBy["14d"].pct).toBe(0);
+    expect(resp.evidence.answeredBy["30d"].pct).toBeCloseTo(9 / 24, 3);
+    expect(resp.statement).toMatch(/15 are still unanswered or ended without an answer/);
+    // Provenance and confidence are exact: the step ids, the claim's lower bound, the interval.
+    const ids = (await q(`SELECT id::text FROM control_step WHERE kind = 'browser_click' ORDER BY ran_at DESC`)).map((r) => r.id);
+    expect([...perf.evidence.sampleIds].sort()).toEqual(ids.slice(0, 10).sort());
+    expect(Number(perf.confidence)).toBeCloseTo(Number(claimConfidence(4, 10).toFixed(3)), 3);
+    expect(perf.evidence.verifiedRate95).toEqual(wilsonInterval(4, 10));
 
     // Inferred: a procedure, a longer response wait, and "stop asking about nudges" — each a PENDING proposal, not applied.
     const inferred = await q(`SELECT l.key, l.status, l.effect, p.status AS pstatus, p.kind, p.target_type, p.proposed_text FROM lesson l JOIN proposal p ON p.id = l.proposal_id WHERE l.basis = 'inferred' ORDER BY l.key`);
     expect(inferred.map((x) => [x.effect.type, x.status, x.pstatus, x.target_type])).toEqual(expect.arrayContaining([
       ["policy_param", "proposed", "pending", "lesson"], ["policy_param", "proposed", "pending", "lesson"], ["procedure", "proposed", "pending", "lesson"]]));
-    expect(inferred.find((x) => x.effect.param === "responseDays").effect.value).toBeGreaterThanOrEqual(26);
+    expect(inferred.find((x) => x.effect.param === "responseDays").effect.value).toBe(29);
+    expect(inferred.find((x) => x.effect.param === "responseDays").proposed_text).toMatch(/15 unanswered ones counted as still waiting/);
     expect(inferred.find((x) => x.effect.param === "nudgeWithContact").effect.value).toBe(false);
     expect(inferred.every((x) => /\[finagai-effect\]/.test(x.proposed_text))).toBe(true);
     expect(await policyFor(pool, careerId)).toEqual(CAREER_POLICY);                     // nothing applies before approval
@@ -209,12 +229,47 @@ describe.skipIf(!admin || !migT || !appT)("learning (Phase 6, ADR-085)", () => {
     expect(ran).toEqual([["Quick question"]]);
   });
 
+  it("nothing applies without Julian's governed approval: a tampered lesson row or an out-of-bounds governed row is ignored", async () => {
+    const lab = (await ensureArea(pool, "Lab")).id;
+    // (a) a lesson row marked 'approved' by hand, with an effect — but no approved proposal / governed row behind it
+    await q(`INSERT INTO lesson (key, kind, basis, area_id, scope, statement, effect, confidence, last_evidence_at, status) VALUES ('tamper:a', 'outcome', 'inferred', $1, 'area:Lab', 'x', $2::jsonb, 1, now(), 'approved')`,
+      [lab, JSON.stringify({ type: "policy_param", area: "Lab", param: "responseDays", value: 40 })]);
+    expect((await policyFor(pool, lab)).responseDays).toBe(CAREER_POLICY.responseDays);
+    // (b) a governed row whose text carries an out-of-bounds value (e.g. edited after approval) — re-validated at use
+    const l = (await q(`INSERT INTO lesson (key, kind, basis, area_id, scope, statement, confidence, last_evidence_at, status) VALUES ('tamper:b', 'outcome', 'inferred', $1, 'area:Lab', 'y', 1, now(), 'approved') RETURNING id`, [lab]))[0];
+    const p = (await q(`INSERT INTO proposal (kind, target_type, target_id, proposed_text, rationale, status, decided_at) VALUES ('preference_change', 'lesson', $1, $2, 'test', 'approved', now()) RETURNING id`,
+      [l.id, `y\n\n${encodeEffect({ type: "policy_param", area: "Lab", param: "responseDays", value: 400 })}`]))[0];
+    await q(`INSERT INTO preference (key, statement, version, approved_proposal_id) VALUES ('tamper-b', (SELECT proposed_text FROM proposal WHERE id = $1), 1, $1)`, [p.id]);
+    expect((await policyFor(pool, lab)).responseDays).toBe(CAREER_POLICY.responseDays);
+    // (c) a non-whitelisted parameter in a governed row never applies either
+    await q(`UPDATE preference SET statement = $2 WHERE approved_proposal_id = $1`, [p.id, `y\n\n${JSON.stringify("x")} [finagai-effect] {"type":"policy_param","area":"Lab","param":"requireApproval","value":false}`]);
+    expect(await policyFor(pool, lab)).toEqual(CAREER_POLICY);
+  });
+
+  it("a forgotten observed lesson never comes back, even while its evidence is fresh", async () => {
+    expect((await guidanceFor(pool, "Update the vendor tracker", NOW)).keys).toContain("recovery:browser_click->ax_click");
+    await forgetLesson(pool, "recovery:browser_click->ax_click", "not true for my setup");
+    const r = await runLearning(pool, { now: new Date(NOW.getTime() + 5 * 3_600_000) });
+    expect(r.learned.join(" ")).not.toMatch(/ax_click/);
+    expect(await lesson("recovery:browser_click->ax_click")).toEqual(expect.objectContaining({ status: "retired", retired_reason: expect.stringMatching(/^forgotten by Julian/) }));
+    expect((await guidanceFor(pool, "Update the vendor tracker", NOW)).keys).not.toContain("recovery:browser_click->ax_click");
+  });
+
+  it("freshness is the 30-day half-life of the newest evidence, as shown to Julian", async () => {
+    const at = new Date(NOW.getTime() + 10 * DAY);
+    const v = await listLessons(pool, {}, at);
+    const row = await lesson("perf:j6.step:browser_click");
+    const shown = v.lessons.find((x) => x.key === "perf:j6.step:browser_click")!;
+    expect(shown.freshness).toBeCloseTo(Number(freshness(row.last_evidence_at, at).toFixed(2)), 2);
+    expect(new Date(row.last_evidence_at).getTime()).toBe(Math.max(...(await q(`SELECT ran_at FROM control_step WHERE kind = 'browser_click' AND status IN ('done','failed')`)).map((r) => new Date(r.ran_at).getTime())));
+  });
+
   it("freshness: observed lessons whose evidence is ~2+ months old retire; stated and approved ones do not", async () => {
     const r = await runLearning(pool, { now: new Date(NOW.getTime() + 75 * DAY) });
     expect(r.retired.length).toBeGreaterThan(0);
     expect(await lesson("perf:j6.step:browser_click")).toEqual(expect.objectContaining({ status: "retired", retired_reason: expect.stringMatching(/^stale|no longer supported/) }));
     expect((await lesson("stated:route:digest@jobs.example")).status).toBe("active");
-    expect((await q(`SELECT count(*)::int AS n FROM lesson WHERE status = 'approved'`))[0].n).toBe(2);
+    expect((await q(`SELECT count(*)::int AS n FROM lesson WHERE status = 'approved' AND key NOT LIKE 'tamper:%'`))[0].n).toBe(2);
     expect((await guidanceFor(pool, "Download the monthly bank statement PDF", new Date(NOW.getTime() + 75 * DAY))).keys.some((k) => k.startsWith("perf:"))).toBe(false);
   });
 

@@ -118,3 +118,42 @@ Julian's decisions stand:
 
 On the real 2026-10-09 evidence fixture, the first pass proposes a Career response window from observed answer
 latencies. That is the intended behaviour: a proposal for Julian, not a change.
+
+## Revision 2026-10-11 (after the first live passes; hotfix 23)
+Julian rejected the outcome-selected response-time estimate: it dropped applications that were never answered, so it
+could only shorten the window. Three defects found in the live acceptance were fixed.
+
+1. **Censoring.** Time-to-answer now uses a Kaplan–Meier estimate (`src/learning/survival.ts`). Every application
+   counts:
+   - An answered application is an event at its first answer.
+   - An unanswered one is censored at today, or earlier at a withdrawal or posting closure.
+
+   The lesson reports the chance of any answer by day 7, 14 and 30 (95% Greenwood log-log intervals), how far follow-up
+   reaches, and how often an application still silent at the current window was answered later.
+   A window is proposed only when all of these hold:
+   - ≥ 20 applications and ≥ 8 answers.
+   - The smallest day d in 7–45 at which **≤ 10% of still-silent applications were answered later** (up to the
+     follow-up horizon).
+   - ≥ 10 applications still waiting at d, and ≥ 14 days of follow-up after d.
+   - The result differs from the window in effect by ≥ 5 days.
+
+   Otherwise there is no proposal, and the lesson says why. Answers later than the horizon cannot be seen, and the
+   statement says so. The method assumes censoring is not informative; Julian's withdrawals are censored at their date.
+2. **Confidence semantics.** Confidence is the 95% lower bound of the proportion the lesson's *claim* rests on. Every
+   rate lesson also stores its 95% Wilson interval. Before the fix, a step verified 0/5 times showed confidence 0
+   although its "unreliable" claim is fairly certain. Procedures count every attempt at similar requests, not only the
+   successes.
+3. **Freshness provenance.** Last-evidence timestamps were taken by sorting Date objects as strings ("Fri…" < "Wed…").
+   They are now the true maximum, so freshness is correct.
+
+The guard also refuses wording that overrides rules, authority or limits, touches budgets or step and token limits, or
+asserts an outcome ("mark as verified") instead of checking it. Procedure names and triggers are checked too.
+
+New acceptance tests:
+- A lesson row hand-marked "approved" applies nothing.
+- A governed row edited out of bounds, or naming a non-whitelisted parameter, applies nothing.
+- A forgotten observed lesson is not revived while its evidence is fresh.
+- Exact provenance (the step ids), confidence (the claim bound and interval) and freshness (half-life of the true newest
+  evidence).
+- A hand-computed Kaplan–Meier example.
+- A case where dropping unanswered applications understates the window and censoring does not.

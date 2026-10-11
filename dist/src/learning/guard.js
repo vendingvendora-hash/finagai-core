@@ -21,7 +21,27 @@ export const POLICY_BOUNDS = {
 };
 const SECURITY = /\b(password|passcode|one[- ]time code|2fa|otp|secret|token|api key|credential|ssn|social security|bank account|card number|cvv)\b/i;
 const GOVERNANCE = /\b(skip|bypass|without|no need for|don'?t (?:ask|wait for)|auto[- ]?approve|ignore)\b[^.]{0,40}\b(approval|confirmation|julian|authori[sz]ation|review|verification|verify)\b/i;
+/** Overriding the rules themselves, budgets/limits, or asserting an outcome instead of checking it. */
+const OVERRIDE = /\b(ignore|disregard|override|forget|bypass|relax|raise|increase|exceed|lift)\b[^.]{0,40}\b(instructions?|rules?|system prompt|polic(?:y|ies)|guardrails?|limits?|budgets?|caps?|authority|envelope|permissions?)\b/i;
+const BUDGET = /\b(budget|spend(?:ing)? limit|cost limit|token limit|step limit|max(?:imum)? steps|rate limit)\b/i;
+const ASSERTS_OUTCOME = /\b(mark|treat|report|consider|assume|declare)\b[^.]{0,30}\b(as )?(verified|approved|authori[sz]ed|complete[d]?|successful|done)\b/i;
 export class EffectRejected extends Error {
+}
+/** Wording no learned text may carry, whoever it comes from. Returns the reason, or null. */
+export function forbiddenWording(text, opts = {}) {
+    if (!opts.allowCommitmentStop && COMMITMENT.test(stripNegations(text)))
+        return "mentions an external commitment";
+    if (SECURITY.test(text))
+        return "touches secrets/credentials";
+    if (GOVERNANCE.test(text))
+        return "tries to relax approval/verification";
+    if (OVERRIDE.test(text))
+        return "tries to override rules, authority or limits";
+    if (BUDGET.test(text))
+        return "touches budgets or limits";
+    if (ASSERTS_OUTCOME.test(text))
+        return "asserts an outcome instead of verifying it";
+    return null;
 }
 /** Validate an effect against the whitelist and bounds. `basis` decides which effect types are even possible. */
 export function validateEffect(e, basis) {
@@ -32,13 +52,10 @@ export function validateEffect(e, basis) {
             const text = String(e.text ?? "").replace(/\s+/g, " ").trim();
             if (!text || text.length > 240)
                 throw new EffectRejected("hint must be 1–240 characters");
-            // A hint may never tell the planner to commit, or to get around approval, verification or secrets.
-            if (COMMITMENT.test(stripNegations(text)))
-                throw new EffectRejected("hint mentions an external commitment");
-            if (SECURITY.test(text))
-                throw new EffectRejected("hint touches secrets/credentials");
-            if (GOVERNANCE.test(text))
-                throw new EffectRejected("hint tries to relax approval/verification");
+            // A hint may never tell the planner to commit, get around approval / verification / limits, or touch secrets.
+            const bad = forbiddenWording(text);
+            if (bad)
+                throw new EffectRejected(`hint ${bad}`);
             return { type: "planner_hint", match: (e.match ?? []).map(String).filter(Boolean).slice(0, 6), text };
         }
         case "routing_override": {
@@ -60,9 +77,16 @@ export function validateEffect(e, basis) {
             // per step by the unchanged authority rules), and secrets / approval-skipping wording rejects the whole procedure.
             const steps = (e.steps ?? []).map((s) => String(s).slice(0, 200)).slice(0, 15)
                 .map((s) => (COMMITMENT.test(stripNegations(s)) ? `STOP — "${s.split(":")[0]}" commits Julian externally: it stays his, approved per step` : s));
-            for (const s of steps)
-                if (SECURITY.test(s) || GOVERNANCE.test(s))
-                    throw new EffectRejected(`step not allowed: ${s}`);
+            for (const s of steps) {
+                const bad = forbiddenWording(s, { allowCommitmentStop: true });
+                if (bad)
+                    throw new EffectRejected(`step not allowed (${bad}): ${s}`);
+            }
+            for (const w of [e.name, ...(e.when ?? [])]) {
+                const bad = forbiddenWording(String(w));
+                if (bad)
+                    throw new EffectRejected(`procedure name/trigger not allowed (${bad})`);
+            }
             return { type: "procedure", name: String(e.name).slice(0, 120), when: (e.when ?? []).map(String).slice(0, 8), steps };
         }
         case "policy_param": {
