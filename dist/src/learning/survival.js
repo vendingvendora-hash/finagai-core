@@ -47,20 +47,48 @@ export function atRiskAt(steps, t) {
 }
 /** 95% interval for F(t) = 1 − S(t) (Greenwood, log-log transform), clipped to [0, 1]. */
 export function answeredByCI(steps, t) {
-    let S = 1, v = 0;
+    let S = 1, v = 0, n = steps[0]?.atRisk ?? 0;
     for (const s of steps) {
         if (s.t > t)
             break;
         S = s.S;
         v = s.varSum;
     }
-    if (S >= 1 || S <= 0 || v === 0)
+    for (const s of steps) {
+        if (s.t > t)
+            break;
+        if (s.events === 0)
+            continue;
+        n = s.atRisk;
+    } // at risk at the last answer by t
+    // No answer yet by t: the estimate is 0 but not certain — exact binomial 95% upper bound with the n still waiting.
+    if (S >= 1) {
+        const m = atRiskAt(steps, t) || n;
+        return { F: 0, lo: 0, hi: m > 0 ? 1 - Math.pow(0.05, 1 / m) : 1 };
+    }
+    if (S <= 0 || v === 0)
         return { F: 1 - S, lo: 1 - S, hi: 1 - S };
     const se = Math.sqrt(v) / Math.abs(Math.log(S));
     const loS = Math.pow(S, Math.exp(1.96 * se)), hiS = Math.pow(S, Math.exp(-1.96 * se));
     return { F: 1 - S, lo: Math.max(0, 1 - hiS), hi: Math.min(1, 1 - loS) };
 }
-export const WINDOW_RULE = { minApplications: 20, minAnswers: 8, minAtRisk: 10, minTailDays: 14, maxResidual: 0.1, tailAtRisk: 5, minDay: 7, maxDay: 45 };
+/** maxResidualUpper: the 95% upper bound of the later-answer chance must also be small — a point estimate from a
+ *  handful of late answers is not enough to tell Julian that silence means "no answer". */
+export const WINDOW_RULE = { minApplications: 20, minAnswers: 8, minAtRisk: 10, minTailDays: 14, maxResidual: 0.1, maxResidualUpper: 0.2, tailAtRisk: 5, minDay: 7, maxDay: 45 };
+/** Later answers after day d (up to the horizon h) as a life-table proportion: k answers in (d, h] among the n still
+ *  waiting at d, with those censored strictly inside (d, h) counted as half-exposed (actuarial adjustment). Returns the
+ *  proportion and its 95% Wilson upper bound. */
+export function lateAnswers(obs, d, h) {
+    const waiting = obs.filter((o) => o.t > d);
+    const k = waiting.filter((o) => o.event && o.t <= h).length;
+    const cIn = waiting.filter((o) => !o.event && o.t < h).length;
+    const nEff = Math.max(0, waiting.length - cIn / 2);
+    if (nEff <= 0)
+        return { k, nEff, p: 0, upper: 1 };
+    const z = 1.96, p = Math.min(1, k / nEff), dd = 1 + (z * z) / nEff;
+    const upper = Math.min(1, (p + (z * z) / (2 * nEff) + z * Math.sqrt((p * (1 - p)) / nEff + (z * z) / (4 * nEff * nEff))) / dd);
+    return { k, nEff, p, upper };
+}
 /** The response window supported by the data: after it, an application still silent rarely gets answered. */
 export function responseWindow(obs, currentDays, rule = WINDOW_RULE) {
     const steps = kaplanMeier(obs);
@@ -79,15 +107,19 @@ export function responseWindow(obs, currentDays, rule = WINDOW_RULE) {
         residualAtCurrent: currentDays + rule.minTailDays <= horizon && atRiskAt(steps, currentDays) >= rule.minAtRisk ? round(residual(currentDays)) : null };
     if (obs.length < rule.minApplications || answers < rule.minAnswers)
         return { ...base, window: null, why: `not enough data (${obs.length} applications, ${answers} answers; need ≥ ${rule.minApplications} and ≥ ${rule.minAnswers})` };
+    const rejectedDays = [];
     for (let d = rule.minDay; d <= rule.maxDay; d++) {
         if (d + rule.minTailDays > horizon)
             break; // cannot see late answers past day d yet
         if (atRiskAt(steps, d) < rule.minAtRisk)
             break;
-        if (residual(d) <= rule.maxResidual)
-            return { ...base, window: d, why: `after day ${d}, only ${pct(residual(d))} of still-silent applications were answered by day ${Math.floor(horizon)} (${atRiskAt(steps, d)} still waiting at day ${d})` };
+        const late = lateAnswers(obs, d, horizon);
+        if (residual(d) <= rule.maxResidual && late.upper <= rule.maxResidualUpper)
+            return { ...base, window: d, lateAnswers: late, why: `of the applications still silent after day ${d} (${Math.round(late.nEff)} effective), ${late.k} were answered later, by day ${Math.floor(horizon)} (${pct(residual(d))}; 95% upper bound ${pct(late.upper)})` };
+        if (residual(d) <= rule.maxResidual && rejectedDays.length < 3)
+            rejectedDays.push(`day ${d}: ${late.k} later answers of ${Math.round(late.nEff)} — ${pct(late.p)}, but could be up to ${pct(late.upper)}`);
     }
-    return { ...base, window: null, why: `no day in ${rule.minDay}–${rule.maxDay} has ≤ ${pct(rule.maxResidual)} chance of a later answer with ≥ ${rule.minAtRisk} applications still waiting and ≥ ${rule.minTailDays} days of follow-up after it (follow-up reaches day ${Math.floor(horizon)})` };
+    return { ...base, window: null, why: `no day in ${rule.minDay}–${rule.maxDay} where later answers are ≤ ${pct(rule.maxResidual)} AND their 95% upper bound ≤ ${pct(rule.maxResidualUpper)}, with ≥ ${rule.minAtRisk} still waiting and ≥ ${rule.minTailDays} days of follow-up after it (follow-up reaches day ${Math.floor(horizon)})${rejectedDays.length ? `; too uncertain: ${rejectedDays.join("; ")}` : ""}` };
 }
 const round = (x) => Math.round(x * 1000) / 1000;
 const pct = (x) => `${Math.round(100 * x)}%`;

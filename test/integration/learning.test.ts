@@ -75,11 +75,11 @@ describe.skipIf(!admin || !migT || !appT)("learning (Phase 6, ADR-085)", () => {
       await q(`INSERT INTO opportunity_event (opportunity_id, at, kind, source, source_id, summary) VALUES ($1, $2, 'application', 'gmail', $3, 'Thank you for applying'), ($1, $4, 'rejection', 'gmail', $5, 'Unfortunately')`,
         [o.id, ago(60 + i), `a${i}`, ago(60 + i - (24 + (i % 7))), `r${i}`]);
     }
-    // …and 15 applications never answered (applied 60–74 days ago): they are censored observations, not missing data.
-    for (let i = 0; i < 15; i++) {
+    // …and 40 applications never answered (applied 80 days ago): censored observations, not missing data.
+    for (let i = 0; i < 40; i++) {
       const o = (await q(`INSERT INTO opportunity (kind, area_id, org, title, status, source, dedupe_key, applied_at) VALUES ('job', $1, $2, 'FP&A Analyst', 'applied', 'test', $3, $4) RETURNING id`,
-        [careerId, `Silent ${i}`, `silent-${i}|fpa`, ago(60 + i)]))[0];
-      await q(`INSERT INTO opportunity_event (opportunity_id, at, kind, source, source_id, summary) VALUES ($1, $2, 'application', 'gmail', $3, 'Thank you for applying')`, [o.id, ago(60 + i), `s${i}`]);
+        [careerId, `Silent ${i}`, `silent-${i}|fpa`, ago(80)]))[0];
+      await q(`INSERT INTO opportunity_event (opportunity_id, at, kind, source, source_id, summary) VALUES ($1, $2, 'application', 'gmail', $3, 'Thank you for applying')`, [o.id, ago(80), `s${i}`]);
     }
     // Decisions: 5 "nudge or let it ride" escalations — Julian let every one ride.
     for (let i = 0; i < 5; i++) {
@@ -97,6 +97,10 @@ describe.skipIf(!admin || !migT || !appT)("learning (Phase 6, ADR-085)", () => {
     expect(r.learnerProblems).toEqual([]);
     expect(r.learned.length).toBeGreaterThan(3);
     expect(r.proposed.length).toBe(3);
+    // The preview shows every recomputed lesson with its provenance, confidence and freshness.
+    expect(r.lessons).toHaveLength(r.candidates);
+    expect(r.lessons!.find((l) => l.key.endsWith(":response_days"))).toEqual(expect.objectContaining({ area: "Career", basis: "observed", status: "active",
+      provenance: expect.objectContaining({ censored: 40 }), freshness: expect.any(Number), confidence: expect.any(Number) }));
     expect(await counts()).toEqual(before);
   });
 
@@ -110,12 +114,15 @@ describe.skipIf(!admin || !migT || !appT)("learning (Phase 6, ADR-085)", () => {
     expect(await lesson("recovery:browser_click->ax_click")).toEqual(expect.objectContaining({ basis: "observed", status: "active", support: 6 }));
     expect(await lesson("correction:step:trash_file")).toEqual(expect.objectContaining({ basis: "observed", kind: "correction", support: 5, positives: 4 }));
     const resp = await lesson(`outcome:${careerId}:response_days`);
-    expect(resp).toEqual(expect.objectContaining({ basis: "observed", effect: null, support: 24, positives: 9 }));
-    // Censored analysis: all 24 applications count; the 15 never answered are censored, not dropped.
-    expect(resp.evidence).toEqual(expect.objectContaining({ method: expect.stringMatching(/Kaplan–Meier/), applications: 24, answers: 9, censored: 15, window: 29 }));
-    expect(resp.evidence.answeredBy["14d"].pct).toBe(0);
-    expect(resp.evidence.answeredBy["30d"].pct).toBeCloseTo(9 / 24, 3);
-    expect(resp.statement).toMatch(/15 are still unanswered or ended without an answer/);
+    expect(resp).toEqual(expect.objectContaining({ basis: "observed", effect: null, support: 49, positives: 9 }));
+    // Censored analysis: all 49 applications count; the 40 never answered are censored, not dropped. Window: day 27 —
+    // day 26 has 4 later answers of 44 (9%, but the 95% upper bound is ~21% > 20%); day 27 has 3 of 43 (upper ~19%).
+    expect(resp.evidence).toEqual(expect.objectContaining({ method: expect.stringMatching(/Kaplan–Meier/), applications: 49, answers: 9, censored: 40, window: 27 }));
+    expect(resp.evidence.answeredBy["14d"]).toEqual(expect.objectContaining({ pct: 0, lo: 0 }));
+    expect(resp.evidence.answeredBy["14d"].hi).toBeCloseTo(1 - Math.pow(0.05, 1 / 49), 3);      // no answer yet ≠ certainly none
+    expect(Number(resp.confidence)).toBeCloseTo(1 - (resp.evidence.answeredBy["45d"].hi - resp.evidence.answeredBy["45d"].lo), 2);
+    expect(resp.evidence.answeredBy["30d"].pct).toBeCloseTo(9 / 49, 3);
+    expect(resp.statement).toMatch(/40 are still unanswered or ended without an answer/);
     // Provenance and confidence are exact: the step ids, the claim's lower bound, the interval.
     const ids = (await q(`SELECT id::text FROM control_step WHERE kind = 'browser_click' ORDER BY ran_at DESC`)).map((r) => r.id);
     expect([...perf.evidence.sampleIds].sort()).toEqual(ids.slice(0, 10).sort());
@@ -126,8 +133,8 @@ describe.skipIf(!admin || !migT || !appT)("learning (Phase 6, ADR-085)", () => {
     const inferred = await q(`SELECT l.key, l.status, l.effect, p.status AS pstatus, p.kind, p.target_type, p.proposed_text FROM lesson l JOIN proposal p ON p.id = l.proposal_id WHERE l.basis = 'inferred' ORDER BY l.key`);
     expect(inferred.map((x) => [x.effect.type, x.status, x.pstatus, x.target_type])).toEqual(expect.arrayContaining([
       ["policy_param", "proposed", "pending", "lesson"], ["policy_param", "proposed", "pending", "lesson"], ["procedure", "proposed", "pending", "lesson"]]));
-    expect(inferred.find((x) => x.effect.param === "responseDays").effect.value).toBe(29);
-    expect(inferred.find((x) => x.effect.param === "responseDays").proposed_text).toMatch(/15 unanswered ones counted as still waiting/);
+    expect(inferred.find((x) => x.effect.param === "responseDays").effect.value).toBe(27);
+    expect(inferred.find((x) => x.effect.param === "responseDays").proposed_text).toMatch(/95% upper bound[\s\S]*40 unanswered ones counted as still waiting/);
     expect(inferred.find((x) => x.effect.param === "nudgeWithContact").effect.value).toBe(false);
     expect(inferred.every((x) => /\[finagai-effect\]/.test(x.proposed_text))).toBe(true);
     expect(await policyFor(pool, careerId)).toEqual(CAREER_POLICY);                     // nothing applies before approval

@@ -180,9 +180,10 @@ export async function outcomes(db, now) {
             const by = (d) => w.answeredBy[`${d}d`];
             const at = (d) => (by(d) ? `${Math.round(100 * by(d).pct)}% by day ${d} (95% CI ${Math.round(100 * by(d).lo)}–${Math.round(100 * by(d).hi)}%)` : null);
             const curve = [7, 14, 30].map(at).filter(Boolean).join(", ");
-            const ci14 = by(14) ?? by(7);
+            // Confidence of the descriptive estimate: precision (1 − width of the 95% interval) at the latest day reported.
+            const ciLast = [45, 30, 21, 14, 7].map(by).find(Boolean);
             out.push({ key: `outcome:${areaId}:response_days`, kind: "outcome", basis: "observed", areaId, scope: `area:${area}`, support: g.length, positives: answers,
-                confidence: ci14 ? Math.max(0, 1 - (ci14.hi - ci14.lo)) : 0, // precision of the estimate
+                confidence: ciLast ? Math.max(0, 1 - (ciLast.hi - ciLast.lo)) : 0,
                 statement: `${area}: of ${g.length} applications, ${answers} were answered (${rejections} of them rejections) and ${g.length - answers} are still unanswered or ended without an answer. `
                     + `Counting the unanswered ones as still waiting (Kaplan–Meier), the chance of any answer is ${curve || "not estimable yet"}; follow-up reaches day ${w.horizonDays}.`
                     + (w.residualAtCurrent !== null ? ` An application still silent on day ${current} was later answered ${Math.round(100 * w.residualAtCurrent)}% of the time.` : ""),

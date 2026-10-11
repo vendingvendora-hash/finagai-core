@@ -157,3 +157,22 @@ New acceptance tests:
   evidence).
 - A hand-computed Kaplan–Meier example.
 - A case where dropping unanswered applications understates the window and censoring does not.
+
+## Revision 2026-10-11b (hotfix 24): a window needs statistical support, not a point estimate
+The first live censored preview proposed 7 days: after day 7, 9% of still-silent applications were answered later
+(about 4 of 49). That met the 10% point rule, but a handful of late answers cannot rule out a much higher rate.
+
+The rule is now:
+- The point estimate must be ≤ 10%.
+- **The 95% upper bound must be ≤ 20%.** The bound is a Wilson interval on k later answers among the applications
+  still silent after day d. Applications censored inside (d, horizon) count as half-exposed (actuarial life-table
+  adjustment).
+
+Days rejected as too uncertain are named in the lesson.
+
+Two more corrections:
+- **"No answer yet by day t"** is reported as 0% with an exact 95% upper bound of 1 − 0.05^(1/n), not as a certain 0%.
+- **The descriptive lesson's confidence** is the precision of its widest-horizon estimate.
+
+**Previews** (`run_learning preview`, `learning-preview`) now return every recomputed lesson, with its statement,
+provenance, confidence, freshness and resulting status. The transaction is then rolled back.

@@ -123,7 +123,7 @@ describe("learning cannot reach the guardrails (structural)", () => {
 });
 
 // ------------------------------------------------------------------------------------------------- ADR-085 revision
-import { answeredByCI, kaplanMeier, responseWindow, survivalAt, type Obs } from "../../src/learning/survival.js";
+import { answeredByCI, kaplanMeier, lateAnswers, responseWindow, survivalAt, type Obs } from "../../src/learning/survival.js";
 import { claimConfidence, wilsonInterval } from "../../src/learning/learners.js";
 import { forbiddenWording } from "../../src/learning/guard.js";
 
@@ -171,8 +171,21 @@ describe("time to answer with censoring (Kaplan–Meier)", () => {
     expect(naiveP80).toBeLessThanOrEqual(20);
     const w = responseWindow(data, 14);
     expect(w.residualAtCurrent).toBeCloseTo(6 / 40, 3);                              // silent at day 14: 6 of the 40 still waiting were answered later
-    expect(w.window).toBe(24);                                                       // after day 24 only 3 of 37 still-silent ones got an answer (≤ 10%)
+    // Day 24: 3 of 37 still-silent were answered later (8%) but the 95% upper bound is ~21% → not yet; day 26: 2 of 36
+    // (6%, upper bound < 20%) → the window.
+    expect(w.window).toBe(26);
+    expect(w.lateAnswers).toEqual(expect.objectContaining({ k: 2, nEff: 36 }));
     expect(w.answeredBy["14d"]!.pct).toBeCloseTo(20 / 60, 3);
+  });
+  it("a point estimate under 10% from a handful of late answers is NOT enough: the 95% upper bound must be ≤ 20%", () => {
+    // 30 applications: 5 early answers, then 2 late answers (days 20, 25) among 23 still silent on day 7, follow-up to 50.
+    const data: Obs[] = [...Array.from({ length: 5 }, (_, i) => ({ t: 1 + i, event: true })), { t: 20, event: true }, { t: 25, event: true },
+      ...Array.from({ length: 23 }, () => ({ t: 50, event: false })), { t: 60, event: true }, { t: 60, event: true }, { t: 60, event: true }];
+    const w = responseWindow(data, 14);
+    expect(w.window).toBe(20);                                                       // not day 7 (2 of 28 later = 7%, upper bound 23%); day 20: 1 of 27, upper bound 18%
+    expect(lateAnswers(data, 7, 50)).toEqual(expect.objectContaining({ k: 2 }));
+    expect(lateAnswers(data, 7, 50).upper).toBeGreaterThan(0.2);
+    expect(lateAnswers(data, 20, 50)).toEqual(expect.objectContaining({ k: 1, nEff: 27 }));
   });
   it("too little follow-up or too few answers → no window (no proposal), with the reason", () => {
     expect(responseWindow([{ t: 3, event: true }, { t: 4, event: false }], 14)).toEqual(expect.objectContaining({ window: null, why: expect.stringMatching(/not enough data/) }));

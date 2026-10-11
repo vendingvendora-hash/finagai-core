@@ -27,9 +27,19 @@ export async function runLearning(pool, opts = {}) {
             }
         }
         const r = await storeLessons(tx, candidates, now);
+        // A preview shows every recomputed lesson exactly as it would be stored (then the transaction is rolled back).
+        let lessons;
+        if (dryRun) {
+            const areas = new Map((await tx.query(`SELECT id::text, name FROM area`)).rows.map((a) => [a.id, a.name]));
+            const status = new Map((await tx.query(`SELECT key, status FROM lesson`)).rows.map((l) => [l.key, l.status]));
+            lessons = candidates.map((c) => ({ key: c.key, kind: c.kind, basis: c.basis, area: c.areaId ? areas.get(String(c.areaId)) ?? null : null, statement: c.statement, effect: c.effect ?? null,
+                support: c.support, positives: c.positives ?? null, confidence: Number(c.confidence.toFixed(3)), lastEvidenceAt: c.lastEvidenceAt,
+                freshness: Number(freshness(c.lastEvidenceAt, now).toFixed(2)), status: status.get(c.key) ?? null, provenance: c.evidence }))
+                .sort((a, b) => (a.area ?? "~").localeCompare(b.area ?? "~") || a.kind.localeCompare(b.kind) || b.confidence - a.confidence);
+        }
         if (!dryRun)
             await appendEvent(tx, { actor: "cos", action: "learning_ran", after: { candidates: candidates.length, learned: r.learned.length, updated: r.updated, proposed: r.proposed.length, retired: r.retired.length, decided: r.decided.length, problems: learnerProblems } });
-        return { ...r, preview: dryRun, candidates: candidates.length, learnerProblems };
+        return { ...r, preview: dryRun, candidates: candidates.length, learnerProblems, ...(lessons ? { lessons } : {}) };
     });
 }
 /** Read-only view of what Finagai has learned: by basis, with provenance, confidence and freshness. */
