@@ -48,6 +48,8 @@ export interface EscalationNeed {
   areaId?: string | null;
   followupId?: string | null;
   dueAt?: string | null;
+  /** ADR-087: the stored events that caused this need (resolved from the source item when omitted). */
+  causeIds?: number[];
 }
 
 export interface WorkflowResult { changes: string[]; escalations: EscalationNeed[] }

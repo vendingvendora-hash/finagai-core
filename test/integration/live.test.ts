@@ -17,6 +17,7 @@ import { runTick } from "../../src/events/index.js";
 import type { AreaModule } from "../../src/events/types.js";
 import { liveHandler } from "../../src/live/http.js";
 import { causalChain, history, publish, readAfter, snapshot, type LiveEvent } from "../../src/live/stream.js";
+import { liveAcceptance } from "../../src/live/acceptance.js";
 import type { EmailMessage, EmailSender } from "../../src/notify/delivery.js";
 import { createHandler } from "../../src/server/app.js";
 import { createLogger } from "../../src/server/log.js";
@@ -126,6 +127,11 @@ describe.skipIf(!admin || !migT || !appT)("Live State Stream (ADR-087)", () => {
     expect(status).toEqual(expect.objectContaining({ class: "entity.state_changed", before: { status: "applied" }, after: { status: "interviewing", org: "Altarum" } }));
     const chain = await causalChain(pool, status.eventId);
     expect(chain.map((e) => e.action)).toEqual(["evidence_observed", "evidence_routed", "workflow_started", "opportunity_status"]);
+    // the escalation is caused by the workflow run that raised it, the notification by the escalations it carried
+    expect(esc.cause.eventIds).toEqual([done.eventId]);
+    expect(told.cause.eventIds).toContain(esc.eventId);
+    expect((await causalChain(pool, told.eventId)).map((e) => e.action))
+      .toEqual(expect.arrayContaining(["evidence_observed", "evidence_routed", "workflow_started", "workflow_completed", "escalation_opened", "notification_delivered"]));
     expect(byAction("area_health_changed").map((e) => e.after)).toEqual([expect.objectContaining({ color: "green", area: "Career" })]);   // baseline recorded once
   });
 
@@ -207,4 +213,12 @@ describe.skipIf(!admin || !migT || !appT)("Live State Stream (ADR-087)", () => {
     expect(rows.map((r) => r.action)).toEqual(["workflow_started", "workflow_completed"]);
     expect(rows[1].cause_ids.map(Number)).toEqual([Number((await q(`SELECT id FROM event WHERE correlation_id = '11111111-1111-4111-8111-111111111111' AND action = 'workflow_started'`))[0].id)]);
   });
+
+  it("the live acceptance self-check passes every property it can prove on this database (and never changes state)", async () => {
+    const r = await liveAcceptance(pool, { version: "test", port: Number(new URL(base).port) });
+    const c = r.checks as Record<string, { pass: boolean | null } & Record<string, unknown>>;
+    for (const k of ["noDeletePrivilege", "ordering", "snapshotCorrespondsToStream", "needsMeAgreement", "causalChain", "resume", "expiredCursor", "protections"]) expect({ k, pass: c[k]!.pass, detail: c[k]!.pass ? null : c[k] }).toEqual({ k, pass: true, detail: null });
+    expect((c.protections!.redaction as { storedEventsWithSecretShapedFields: number }).storedEventsWithSecretShapedFields).toBeGreaterThan(0);   // there was something to redact
+    expect((c.causalChain!.stages as Record<string, boolean>)).toEqual(expect.objectContaining({ input: true, routing: true, workflow: true, stateChange: true, escalation: true, notification: true }));
+  }, 30_000);
 });

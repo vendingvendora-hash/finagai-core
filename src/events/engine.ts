@@ -150,13 +150,16 @@ async function tick(ctx: EngineCtx, deps: EngineDeps, result: TickResult) {
       causeIds: causes, after: { workflow: name, events: evs.length, inbound: evs.slice(0, 20).map((e) => e.id) } });
     try {
       const r = await withCause({ causeIds: startedId ? [startedId] : [] }, () => wf.run(ctx, evs));
-      needs.push(...r.escalations.map((x) => ({ ...x, detail: x.detail ?? `from ${evs.length} event(s): ${evs.slice(0, 3).map((e) => e.summary).join(" | ")}` })));
       result.workflows.push({ name, events: evs.length, ok: true, changes: r.changes });
+      let completedId = 0;
       if (!ctx.dryRun) {
         await pool.query(`UPDATE inbound_event SET status = 'handled', handled_at = now(), attempts = attempts + 1, reason = NULL WHERE id = ANY($1::uuid[]) AND status IN ('routed','failed')`, [evs.map((e) => e.id)]);
-        await appendEvent(pool, { actor: "cos", action: "workflow_completed", entityType: "event_tick", ...(result.tickId ? { entityId: result.tickId } : {}), causeIds: [startedId],
+        completedId = await appendEvent(pool, { actor: "cos", action: "workflow_completed", entityType: "event_tick", ...(result.tickId ? { entityId: result.tickId } : {}), causeIds: [startedId],
           after: { workflow: name, events: evs.length, changes: r.changes.slice(0, 30), escalations: r.escalations.length } });
       }
+      // ADR-087: a judgment the workflow raised is caused by that workflow run.
+      needs.push(...r.escalations.map((x) => ({ ...x, detail: x.detail ?? `from ${evs.length} event(s): ${evs.slice(0, 3).map((e) => e.summary).join(" | ")}`,
+        ...(x.causeIds?.length ? {} : completedId ? { causeIds: [completedId] } : {}) })));
     } catch (e) {
       const msg = String((e as Error)?.message ?? e).slice(0, 300);
       result.workflows.push({ name, events: evs.length, ok: false, changes: [], error: msg });
@@ -226,7 +229,9 @@ async function reconcileEscalations(ctx: EngineCtx, needs: EscalationNeed[], res
       if (!ctx.dryRun) {
         const resolution = o.fstate === "done" || o.fstate === "cancelled" ? `follow-up ${o.fstate}` : "no longer needed";
         await pool.query(`UPDATE escalation SET status = 'resolved', resolved_at = now(), resolution = $2 WHERE id = $1`, [o.id, resolution]);
-        await appendEvent(pool, { actor: "cos", action: "escalation_resolved", entityType: "escalation", entityId: o.id, after: { key: o.key, needs: o.needs, resolution, summary: o.summary } });
+        const cause = o.followup_id ? await lastEventOn(pool, "followup", o.followup_id) : [];
+        await appendEvent(pool, { actor: "cos", action: "escalation_resolved", entityType: "escalation", entityId: o.id, ...(cause.length ? { causeIds: cause } : {}),
+          after: { key: o.key, needs: o.needs, resolution, summary: o.summary } });
       }
     }
   }
@@ -239,12 +244,35 @@ async function reconcileEscalations(ctx: EngineCtx, needs: EscalationNeed[], res
     if (!ctx.dryRun) {
       const ins = await pool.query(`INSERT INTO escalation (key, area_id, needs, summary, detail, due_at, followup_id) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (key) DO NOTHING RETURNING id`,
         [n.key, n.areaId ?? null, n.needs, n.summary.slice(0, 500), n.detail?.slice(0, 1000) ?? null, n.dueAt ?? null, n.followupId ?? null]);
+      const cause = ins.rowCount ? await needCause(pool, n) : [];
       if (ins.rowCount) await appendEvent(pool, { actor: "cos", action: "escalation_opened", entityType: "escalation", entityId: String(ins.rows[0].id), areaId: n.areaId ?? null,
-        after: { key: n.key, needs: n.needs, summary: n.summary.slice(0, 300), dueAt: n.dueAt ?? null } });
+        ...(cause.length ? { causeIds: cause } : {}), after: { key: n.key, needs: n.needs, summary: n.summary.slice(0, 300), dueAt: n.dueAt ?? null } });
     }
   }
   result.escalations.open = ctx.dryRun ? open.length - result.escalations.resolved.length + result.escalations.opened.length
     : Number((await pool.query(`SELECT count(*)::int AS n FROM escalation WHERE status = 'open'`)).rows[0].n);
+}
+
+/** ADR-087: the latest stored event about one entity (the cause of what follows from it). */
+async function lastEventOn(pool: pg.Pool, entityType: string, entityId: string): Promise<number[]> {
+  const r = (await pool.query(`SELECT id FROM event WHERE entity_type = $1 AND entity_id = $2::uuid ORDER BY id DESC LIMIT 1`, [entityType, entityId])).rows[0];
+  return r ? [Number(r.id)] : [];
+}
+/** ADR-087: what caused a need — given by its producer, else read from its source item (follow-up, exception, rule, lesson). */
+async function needCause(pool: pg.Pool, n: EscalationNeed): Promise<number[]> {
+  if (n.causeIds?.length) return n.causeIds;
+  if (n.followupId) return lastEventOn(pool, "followup", n.followupId);
+  const rule = /^rule:[^:]+:ev(\d+)$/.exec(n.key);
+  if (rule) return [Number(rule[1])];
+  const by = async (action: string, key: string) => { const r = (await pool.query(`SELECT id FROM event WHERE action = $1 AND after->>'key' = $2 ORDER BY id DESC LIMIT 1`, [action, key])).rows[0]; return r ? [Number(r.id)] : []; };
+  if (n.key.startsWith("exception:")) return by("exception_opened", n.key.slice("exception:".length).replace(/:\d+$/, ""));
+  if (n.key.startsWith("lesson:")) return by("lesson_proposed", n.key.slice("lesson:".length).replace(/:[^:]+$/, ""));
+  return [];
+}
+/** ADR-087: a notification is caused by the escalations it carries. */
+async function escalationEvents(pool: pg.Pool, ids: string[]): Promise<number[]> {
+  if (!ids.length) return [];
+  return (await pool.query(`SELECT max(id) AS id FROM event WHERE action = 'escalation_opened' AND entity_type = 'escalation' AND entity_id = ANY($1::uuid[]) GROUP BY entity_id ORDER BY 1`, [ids])).rows.map((r) => Number(r.id));
 }
 
 const NEEDS_LABEL = { judgment: "your decision", authorization: "your authorization", principal_reserved: "only you can do this", requested: "you asked to be told" } as const;
@@ -262,7 +290,7 @@ async function notifyDigest(ctx: EngineCtx, n: NonNullable<EngineDeps["notify"]>
     if (!ctx.dryRun && rows.length) {
       const k = sha(rows.map((r) => r.key).sort().join("|"));
       const seen = await ctx.pool.query(`SELECT 1 FROM event WHERE action = 'notification_suppressed' AND after->>'digest' = $1 LIMIT 1`, [k]);
-      if (!seen.rowCount) await appendEvent(ctx.pool, { actor: "cos", action: "notification_suppressed", after: { digest: k, reason: "quiet hours", items: rows.length, keys: rows.map((r) => r.key).slice(0, 20) } });
+      if (!seen.rowCount) await appendEvent(ctx.pool, { actor: "cos", action: "notification_suppressed", causeIds: await escalationEvents(ctx.pool, rows.map((r) => String(r.id))), after: { digest: k, reason: "quiet hours", items: rows.length, keys: rows.map((r) => r.key).slice(0, 20) } });
     }
     return;
   }
@@ -280,10 +308,10 @@ async function notifyDigest(ctx: EngineCtx, n: NonNullable<EngineDeps["notify"]>
   if (r === "sent" || r === "already_sent") {
     await ctx.pool.query(`UPDATE escalation SET notified_at = now() WHERE id = ANY($1::uuid[])`, [rows.map((x) => x.id)]);
     result.escalations.notified = rows.map((x) => x.summary);
-    await appendEvent(ctx.pool, { actor: "cos", action: "notification_delivered", after: { channel: "email", purpose: "escalation_digest", items: rows.length, keys: rows.map((x) => x.key).slice(0, 20), result: r } });
+    await appendEvent(ctx.pool, { actor: "cos", action: "notification_delivered", causeIds: await escalationEvents(ctx.pool, rows.map((x) => String(x.id))), after: { channel: "email", purpose: "escalation_digest", items: rows.length, keys: rows.map((x) => x.key).slice(0, 20), result: r } });
   } else {
     result.escalations.held = `digest not sent: ${r}`;
-    await appendEvent(ctx.pool, { actor: "cos", action: "notification_suppressed", after: { reason: `delivery ${r}`, items: rows.length, keys: rows.map((x) => x.key).slice(0, 20) } });
+    await appendEvent(ctx.pool, { actor: "cos", action: "notification_suppressed", causeIds: await escalationEvents(ctx.pool, rows.map((x) => String(x.id))), after: { reason: `delivery ${r}`, items: rows.length, keys: rows.map((x) => x.key).slice(0, 20) } });
   }
 }
 

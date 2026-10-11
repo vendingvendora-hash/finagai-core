@@ -141,3 +141,36 @@ The fix:
   fresh subscriber (cursor 0) starts at the beginning of the window.
 - **A new integration test** asserts the app role holds no DELETE on any table. It would have caught this.
 - **The structural test** now allows only INSERT on `live_event`.
+
+## Live acceptance support (2026-10-11, hotfix 33)
+Two changes came out of preparing the live acceptance.
+
+**1. Escalations and notifications were linked only by correlation, not by cause.** Before this fix:
+- An escalation opened by a workflow shared the tick's correlation id but cited no cause.
+- The digest that notified Julian cited no cause either.
+
+So `/live/chain/<notification>` could not walk back to the input. Now the causes are:
+- **A workflow's escalation:** the `workflow_completed` event of the run that raised it.
+- **A state-derived escalation:** the latest event on its follow-up, its `exception_opened`, its watch rule's
+  triggering event, or its `lesson_proposed`.
+- **`escalation_resolved`:** the follow-up event that closed it.
+- **`notification_delivered` / `notification_suppressed`:** the `escalation_opened` events of the items they carried.
+
+The chain is now one connected graph: input → routing → workflow → state change / escalation → notification. Separately,
+`followup_cancelled` was written through a ternary and was unclassified; it is now `wait.cancelled`.
+
+**2. A read-only live self-check, `finagai-job: live-acceptance`** (`src/live/acceptance.ts`). It runs inside the live
+Core against the production database and reports every acceptance property with its evidence:
+- **Privileges:** checks DELETE, TRUNCATE, and UPDATE on the event log, using `has_table_privilege` for every table.
+- **Health:** checks Core and the scheduler.
+- **Ordering:** checks that sequence numbers are gap-free and that there is one row per event.
+- **Snapshot vs stream:** replaying the stream up to the snapshot's cursor reproduces the snapshot's exceptions and
+  "needs Julian" set.
+- **The latest real causal chain.**
+- **Disconnect/reconnect:** runs through the real SSE handler with `Last-Event-ID`.
+- **Expired cursor:** uses a clock 31 days ahead.
+- **Authentication:** makes real HTTP calls to the process's own port with no token and with a forged token.
+- **Read-only:** checks every non-GET method, and that operational state is unchanged after every route.
+- **Redaction:** scans every envelope in the window.
+
+An integration test runs the same self-check on a fresh database.

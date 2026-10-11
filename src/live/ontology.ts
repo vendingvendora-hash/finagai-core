@@ -44,6 +44,7 @@ const RULES: Record<string, Rule> = {
   followup_waiting: () => F("wait", "started", { nextOwner: "finagai" }),
   followup_done: () => F("wait", "resolved"),
   followup_overdue: () => F("wait", "expired"),
+  followup_cancelled: () => F("wait", "cancelled"),
   // Mac tasks (J6) and their authority boundary
   control_task_created: () => F("task", "created", { nextOwner: "finagai" }),
   control_step_proposed: (r) => F(r.after?.needsApproval || r.after?.risk === "write" ? "authority" : "task", r.after?.needsApproval || r.after?.risk === "write" ? "boundary_encountered" : "step_proposed",

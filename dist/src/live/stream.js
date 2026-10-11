@@ -67,7 +67,7 @@ function summaryOf(row, c) {
     const pick = (a.summary ?? a.statement ?? a.outcome ?? a.name ?? a.key ?? a.tool ?? a.workflow ?? a.status ?? "");
     return `${c.class}${pick ? `: ${String(pick).slice(0, 200)}` : ""}`;
 }
-async function toEnvelopes(db, rows) {
+export async function toEnvelopes(db, rows) {
     const areaNames = new Map((await db.query(`SELECT id::text, name FROM area`)).rows.map((r) => [r.id, r.name]));
     const out = [];
     for (const row of rows) {

@@ -82,7 +82,7 @@ function summaryOf(row: Record<string, unknown>, c: Classified): string {
   return `${c.class}${pick ? `: ${String(pick).slice(0, 200)}` : ""}`;
 }
 
-async function toEnvelopes(db: Db, rows: Array<Record<string, unknown>>): Promise<LiveEvent[]> {
+export async function toEnvelopes(db: Db, rows: Array<Record<string, unknown>>): Promise<LiveEvent[]> {
   const areaNames = new Map((await db.query(`SELECT id::text, name FROM area`)).rows.map((r) => [r.id, r.name as string]));
   const out: LiveEvent[] = [];
   for (const row of rows) {
