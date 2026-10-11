@@ -4,3 +4,4 @@ export { PgLlmCallRecorder } from "./llmCalls.js";
 export { PgJobLedger } from "./jobRuns.js";
 export { getUnassignedProject, type ProjectRow } from "./projects.js";
 export { PgDeliveryStore } from "./deliveries.js";
+export { withCause, currentCause, type CauseContext } from "./live-context.js";

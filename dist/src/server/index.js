@@ -9,6 +9,8 @@ import { liveManifest } from "../tools/manifest.js";
 import { appendEvent, createPool, PgDeliveryStore, PgLlmCallRecorder } from "../db/index.js";
 import { ResendSender } from "../notify/resend.js";
 import { startEventLoop } from "../events/index.js";
+import { liveHandler } from "../live/http.js";
+import { startLivePublisher } from "../live/stream.js";
 import { setBudgetReader } from "../exceptions/detectors.js";
 import { AnthropicProvider } from "../llm/anthropic.js";
 import { MeteredModelClient } from "../llm/metered.js";
@@ -78,7 +80,7 @@ async function main() {
     buildMcpServer({ pool, cfg, client: "startup", j2: { pool, model, cfg }, ...(sharedGoogle ? { google: sharedGoogle } : {}), extend: registerJ3Tools(pool, j3) });
     const toolNames = () => new Set(liveManifest()?.names ?? []);
     const handshakeSeen = new Map();
-    const server = http.createServer(createHandler(cfg, { version: VERSION, startedAt: new Date(), tools: () => liveManifest() }, log, { keys: remoteKeys(cfg.OAUTH_JWKS_URL), mcp, approval, concierge, control,
+    const server = http.createServer(createHandler(cfg, { version: VERSION, startedAt: new Date(), tools: () => liveManifest() }, log, { keys: remoteKeys(cfg.OAUTH_JWKS_URL), mcp, approval, concierge, control, live: liveHandler(pool),
         onMcpTraffic: async (msgs, clientId) => {
             for (const m of msgs) {
                 if (m.method === "initialize" || m.method === "server/discover") { // server/discover: the 2026-07-28 revision's stateless handshake
@@ -111,6 +113,8 @@ async function main() {
         startEventLoop(pool, sharedGoogle, { store: new PgDeliveryStore(pool), timezone: cfg.FINAGAI_TIMEZONE,
             sender: new ResendSender({ apiKey: cfg.RESEND_API_KEY, from: cfg.NOTIFY_FROM, to: cfg.NOTIFY_TO, replyTo: cfg.NOTIFY_REPLY_TO }) }, log);
         log("event loop started", { everyMinutes: 5 });
+        // ADR-087: keep the Live State Stream's ordering index current (and pruned) even with nobody watching.
+        startLivePublisher(pool, log);
     }
     const shutdown = () => server.close(() => process.exit(0));
     process.on("SIGTERM", shutdown);

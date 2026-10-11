@@ -8,9 +8,10 @@
  *   5. notify Julian of new escalations in one digest (outside quiet hours)
  * Single runner (advisory lock); a preview computes the same tick and writes nothing (no cursors, no events, no sends).
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
-import { appendEvent } from "../db/index.js";
+import { appendEvent, withCause } from "../db/index.js";
+import { areaHealth } from "../cos/areas.js";
 import { deliverOnce, type DeliveryStore, type EmailSender } from "../notify/delivery.js";
 import { RULE_NEEDS } from "../cos/lifecycle.js";
 import { routingOverride } from "../learning/apply.js";
@@ -49,7 +50,8 @@ export async function runTick(pool: pg.Pool, ctxIn: Omit<EngineCtx, "pool">, dep
     try {
       if (!ctx.dryRun) result.tickId = String((await pool.query(`INSERT INTO event_tick (trigger) VALUES ($1) RETURNING id`, [trigger])).rows[0].id);
       try {
-        await tick(ctx, deps, result);
+        // ADR-087: one tick = one unit of work; every event it causes carries this correlation id.
+        await withCause({ correlationId: result.tickId ?? randomUUID(), causeIds: [] }, () => tick(ctx, deps, result));
         if (result.tickId) await pool.query(`UPDATE event_tick SET status = 'done', finished_at = now(), stats = $2::jsonb WHERE id = $1`, [result.tickId, JSON.stringify(statsOf(result))]);
       } catch (e) {
         if (result.tickId) await pool.query(`UPDATE event_tick SET status = 'failed', finished_at = now(), error = $2, stats = $3::jsonb WHERE id = $1`, [result.tickId, String((e as Error)?.stack ?? e).slice(0, 2000), JSON.stringify(statsOf(result))]);
@@ -69,6 +71,8 @@ async function tick(ctx: EngineCtx, deps: EngineDeps, result: TickResult) {
   const subs = deps.modules.flatMap((m) => m.subscriptions);
   const flows = new Map(deps.modules.flatMap((m) => m.workflows).map((w) => [w.name, w] as const));
 
+  const observedEvent = new Map<string, number>();     // inbound_event id → its evidence_observed event id (ADR-087)
+  const routedEvent = new Map<string, number>();       // inbound_event id → its evidence_routed event id
   // 1) watchers → recorded events (idempotent)
   const cursorRows = (await pool.query(`SELECT watcher, scope, cursor, updated_at FROM event_cursor`)).rows;
   const inMemory: StoredEvent[] = [];      // preview: events are routed without being stored
@@ -91,6 +95,9 @@ async function tick(ctx: EngineCtx, deps: EngineDeps, result: TickResult) {
       const ins = await pool.query(`INSERT INTO inbound_event (occurred_at, source, kind, external_id, summary, payload, tick_id) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
         ON CONFLICT (source, external_id) DO NOTHING RETURNING id`, [ev.occurredAt, ev.source, ev.kind, ev.externalId, ev.summary.slice(0, 300), JSON.stringify(ev.payload), result.tickId]);
       fresh += ins.rowCount ?? 0;
+      // ADR-087: the real-world input enters the live record (the head of every causal chain it starts).
+      if (ins.rowCount) observedEvent.set(String(ins.rows[0].id), await appendEvent(pool, { actor: "system", action: "evidence_observed", entityType: "inbound_event", entityId: String(ins.rows[0].id),
+        after: { source: ev.source, kind: ev.kind, summary: ev.summary.slice(0, 200), occurredAt: ev.occurredAt } }));
     }
     if (!ctx.dryRun) for (const c of polled.cursors)
       await pool.query(`INSERT INTO event_cursor (watcher, scope, cursor, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT (watcher, scope) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = EXCLUDED.updated_at`, [w.name, c.scope, c.cursor, ctx.now]);
@@ -121,8 +128,15 @@ async function tick(ctx: EngineCtx, deps: EngineDeps, result: TickResult) {
     }
     routesOf.set(e.id, routes);
     const reason = routes.length ? null : override?.action === "ignore" ? `Julian said mail from ${override.sender} is not for any Area` : "no Area subscribes to this event";
-    if (!ctx.dryRun) await pool.query(`UPDATE inbound_event SET status = $2, routes = $3::jsonb, reason = $4, handled_at = CASE WHEN $2 = 'ignored' THEN now() ELSE handled_at END WHERE id = $1`,
-      [e.id, routes.length ? "routed" : "ignored", JSON.stringify(routes), reason]);
+    if (!ctx.dryRun) {
+      await pool.query(`UPDATE inbound_event SET status = $2, routes = $3::jsonb, reason = $4, handled_at = CASE WHEN $2 = 'ignored' THEN now() ELSE handled_at END WHERE id = $1`,
+        [e.id, routes.length ? "routed" : "ignored", JSON.stringify(routes), reason]);
+      const observed = observedEvent.get(e.id) ?? Number((await pool.query(`SELECT id FROM event WHERE action = 'evidence_observed' AND entity_id = $1 ORDER BY id DESC LIMIT 1`, [e.id])).rows[0]?.id ?? 0);
+      const areaName = routes.find((r) => r.area !== "*")?.area;
+      const areaId = areaName ? ((await pool.query(`SELECT id FROM area WHERE lower(name) = lower($1)`, [areaName])).rows[0]?.id as string | undefined) ?? null : null;
+      routedEvent.set(e.id, await appendEvent(pool, { actor: "system", action: "evidence_routed", entityType: "inbound_event", entityId: e.id, areaId,
+        ...(observed ? { causeIds: [observed] } : {}), after: { summary: e.summary.slice(0, 200), routes: routes.map((r) => ({ area: r.area, workflow: r.workflow, why: r.why.slice(0, 160) })), reason } }));
+    }
     result.events.push({ summary: e.summary, kind: e.kind, status: routes.length ? "routed" : "ignored", routes, reason });
   }
 
@@ -131,18 +145,25 @@ async function tick(ctx: EngineCtx, deps: EngineDeps, result: TickResult) {
   for (const [name, evs] of byFlow) {
     const wf = flows.get(name) as Workflow | undefined;
     if (!wf) { result.workflows.push({ name, events: evs.length, ok: false, changes: [], error: "no such workflow" }); continue; }
+    const causes = evs.map((e) => routedEvent.get(e.id)).filter((x): x is number => !!x);
+    const startedId = ctx.dryRun ? 0 : await appendEvent(pool, { actor: "cos", action: "workflow_started", entityType: "event_tick", ...(result.tickId ? { entityId: result.tickId } : {}),
+      causeIds: causes, after: { workflow: name, events: evs.length, inbound: evs.slice(0, 20).map((e) => e.id) } });
     try {
-      const r = await wf.run(ctx, evs);
+      const r = await withCause({ causeIds: startedId ? [startedId] : [] }, () => wf.run(ctx, evs));
       needs.push(...r.escalations.map((x) => ({ ...x, detail: x.detail ?? `from ${evs.length} event(s): ${evs.slice(0, 3).map((e) => e.summary).join(" | ")}` })));
       result.workflows.push({ name, events: evs.length, ok: true, changes: r.changes });
       if (!ctx.dryRun) {
         await pool.query(`UPDATE inbound_event SET status = 'handled', handled_at = now(), attempts = attempts + 1, reason = NULL WHERE id = ANY($1::uuid[]) AND status IN ('routed','failed')`, [evs.map((e) => e.id)]);
-        if (r.changes.length) await appendEvent(pool, { actor: "cos", action: "workflow_ran", entityType: "event_tick", ...(result.tickId ? { entityId: result.tickId } : {}), after: { workflow: name, events: evs.length, changes: r.changes.slice(0, 30) } });
+        await appendEvent(pool, { actor: "cos", action: "workflow_completed", entityType: "event_tick", ...(result.tickId ? { entityId: result.tickId } : {}), causeIds: [startedId],
+          after: { workflow: name, events: evs.length, changes: r.changes.slice(0, 30), escalations: r.escalations.length } });
       }
     } catch (e) {
       const msg = String((e as Error)?.message ?? e).slice(0, 300);
       result.workflows.push({ name, events: evs.length, ok: false, changes: [], error: msg });
-      if (!ctx.dryRun) await pool.query(`UPDATE inbound_event SET status = 'failed', attempts = attempts + 1, reason = $2 WHERE id = ANY($1::uuid[])`, [evs.map((x) => x.id), `${name} failed: ${msg}`.slice(0, 500)]);
+      if (!ctx.dryRun) {
+        await pool.query(`UPDATE inbound_event SET status = 'failed', attempts = attempts + 1, reason = $2 WHERE id = ANY($1::uuid[])`, [evs.map((x) => x.id), `${name} failed: ${msg}`.slice(0, 500)]);
+        await appendEvent(pool, { actor: "cos", action: "workflow_failed", entityType: "event_tick", ...(result.tickId ? { entityId: result.tickId } : {}), causeIds: [startedId], after: { workflow: name, events: evs.length, error: msg } });
+      }
     }
   }
 
@@ -158,6 +179,9 @@ async function tick(ctx: EngineCtx, deps: EngineDeps, result: TickResult) {
   // 5) escalations: derived from state (the single source of truth) + workflow judgments
   needs.push(...await stateNeeds(pool, ctx.now));
   await reconcileEscalations(ctx, needs, result);
+
+  // ADR-087: Area health is state — a change of colour is an event.
+  if (!ctx.dryRun) await recordAreaHealth(pool);
 
   // 6) one digest for new escalations
   if (deps.notify) await notifyDigest(ctx, deps.notify, result);
@@ -192,13 +216,18 @@ async function reconcileEscalations(ctx: EngineCtx, needs: EscalationNeed[], res
   for (const o of open) {
     // A notification Julian asked for is done once it has been delivered.
     if (o.needs === "requested") {
-      if (o.notified_at) { result.escalations.resolved.push(o.summary); if (!ctx.dryRun) await pool.query(`UPDATE escalation SET status = 'resolved', resolved_at = now(), resolution = 'told' WHERE id = $1`, [o.id]); }
+      if (o.notified_at) { result.escalations.resolved.push(o.summary); if (!ctx.dryRun) { await pool.query(`UPDATE escalation SET status = 'resolved', resolved_at = now(), resolution = 'told' WHERE id = $1`, [o.id]);
+        await appendEvent(pool, { actor: "cos", action: "escalation_resolved", entityType: "escalation", entityId: o.id, after: { key: o.key, needs: o.needs, resolution: "told" } }); } }
       continue;
     }
     const stateDerived = /^(followup|overdue|lesson|exception):/.test(o.key);
     if ((o.followup_id && (o.fstate === "done" || o.fstate === "cancelled")) || (stateDerived && !want.has(o.key))) {
       result.escalations.resolved.push(o.summary);
-      if (!ctx.dryRun) await pool.query(`UPDATE escalation SET status = 'resolved', resolved_at = now(), resolution = $2 WHERE id = $1`, [o.id, o.fstate === "done" || o.fstate === "cancelled" ? `follow-up ${o.fstate}` : "no longer needed"]);
+      if (!ctx.dryRun) {
+        const resolution = o.fstate === "done" || o.fstate === "cancelled" ? `follow-up ${o.fstate}` : "no longer needed";
+        await pool.query(`UPDATE escalation SET status = 'resolved', resolved_at = now(), resolution = $2 WHERE id = $1`, [o.id, resolution]);
+        await appendEvent(pool, { actor: "cos", action: "escalation_resolved", entityType: "escalation", entityId: o.id, after: { key: o.key, needs: o.needs, resolution, summary: o.summary } });
+      }
     }
   }
   const openKeys = new Set(open.map((o) => o.key));
@@ -207,8 +236,12 @@ async function reconcileEscalations(ctx: EngineCtx, needs: EscalationNeed[], res
     const seen = await pool.query(`SELECT status FROM escalation WHERE key = $1`, [n.key]);
     if (seen.rowCount) continue;                    // resolved before: never re-escalated for the same key
     result.escalations.opened.push(`[${n.needs}] ${n.summary}`);
-    if (!ctx.dryRun) await pool.query(`INSERT INTO escalation (key, area_id, needs, summary, detail, due_at, followup_id) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (key) DO NOTHING`,
-      [n.key, n.areaId ?? null, n.needs, n.summary.slice(0, 500), n.detail?.slice(0, 1000) ?? null, n.dueAt ?? null, n.followupId ?? null]);
+    if (!ctx.dryRun) {
+      const ins = await pool.query(`INSERT INTO escalation (key, area_id, needs, summary, detail, due_at, followup_id) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (key) DO NOTHING RETURNING id`,
+        [n.key, n.areaId ?? null, n.needs, n.summary.slice(0, 500), n.detail?.slice(0, 1000) ?? null, n.dueAt ?? null, n.followupId ?? null]);
+      if (ins.rowCount) await appendEvent(pool, { actor: "cos", action: "escalation_opened", entityType: "escalation", entityId: String(ins.rows[0].id), areaId: n.areaId ?? null,
+        after: { key: n.key, needs: n.needs, summary: n.summary.slice(0, 300), dueAt: n.dueAt ?? null } });
+    }
   }
   result.escalations.open = ctx.dryRun ? open.length - result.escalations.resolved.length + result.escalations.opened.length
     : Number((await pool.query(`SELECT count(*)::int AS n FROM escalation WHERE status = 'open'`)).rows[0].n);
@@ -223,7 +256,16 @@ async function notifyDigest(ctx: EngineCtx, n: NonNullable<EngineDeps["notify"]>
   if (!rows.length && !pendingPreview.length) return;
   const [qs, qe] = n.quietHours ?? [22, 7];
   const h = localHour(ctx.now, n.timezone);
-  if (h >= qs || h < qe) { result.escalations.held = `quiet hours (${qs}:00–${qe}:00 ${n.timezone}); sent at ${qe}:00`; return; }
+  if (h >= qs || h < qe) {
+    result.escalations.held = `quiet hours (${qs}:00–${qe}:00 ${n.timezone}); sent at ${qe}:00`;
+    // ADR-087: a held digest is recorded once per set of items (not every 5 minutes through the night).
+    if (!ctx.dryRun && rows.length) {
+      const k = sha(rows.map((r) => r.key).sort().join("|"));
+      const seen = await ctx.pool.query(`SELECT 1 FROM event WHERE action = 'notification_suppressed' AND after->>'digest' = $1 LIMIT 1`, [k]);
+      if (!seen.rowCount) await appendEvent(ctx.pool, { actor: "cos", action: "notification_suppressed", after: { digest: k, reason: "quiet hours", items: rows.length, keys: rows.map((r) => r.key).slice(0, 20) } });
+    }
+    return;
+  }
   if (ctx.dryRun) { result.escalations.notified = pendingPreview; return; }
   const lines = rows.map((r) => `• ${r.area ? `[${r.area}] ` : ""}${r.summary}${r.due_at ? ` (by ${new Date(r.due_at).toISOString().slice(0, 10)})` : ""} — ${NEEDS_LABEL[r.needs as keyof typeof NEEDS_LABEL]}`);
   const key = `escalations:${sha(rows.map((r) => r.key).sort().join("|"))}`;
@@ -238,7 +280,11 @@ async function notifyDigest(ctx: EngineCtx, n: NonNullable<EngineDeps["notify"]>
   if (r === "sent" || r === "already_sent") {
     await ctx.pool.query(`UPDATE escalation SET notified_at = now() WHERE id = ANY($1::uuid[])`, [rows.map((x) => x.id)]);
     result.escalations.notified = rows.map((x) => x.summary);
-  } else result.escalations.held = `digest not sent: ${r}`;
+    await appendEvent(ctx.pool, { actor: "cos", action: "notification_delivered", after: { channel: "email", purpose: "escalation_digest", items: rows.length, keys: rows.map((x) => x.key).slice(0, 20), result: r } });
+  } else {
+    result.escalations.held = `digest not sent: ${r}`;
+    await appendEvent(ctx.pool, { actor: "cos", action: "notification_suppressed", after: { reason: `delivery ${r}`, items: rows.length, keys: rows.map((x) => x.key).slice(0, 20) } });
+  }
 }
 
 /** Read-only status for tools: the engine's heartbeat, cursors, recent events and open escalations. */
@@ -258,4 +304,17 @@ export async function proactivityStatus(pool: pg.Pool, limit = 25) {
     recentlyResolved: escalations.filter((e) => e.status === "resolved").map((e) => e.summary),
     recentEvents: events, watchers: cursors, ticks,
   };
+}
+
+/** Append area_health_changed when an Area's health differs from the last recorded one (first time: a baseline). */
+async function recordAreaHealth(pool: pg.Pool) {
+  for (const a of (await pool.query(`SELECT id FROM area WHERE archived_at IS NULL AND status = 'active'`)).rows) {
+    const h = await areaHealth(pool, a.id);
+    if (!h) continue;
+    const color = h.healthy ? "green" : "red";
+    const last = (await pool.query(`SELECT after->>'color' AS color FROM event WHERE action = 'area_health_changed' AND entity_id = $1 ORDER BY id DESC LIMIT 1`, [a.id])).rows[0]?.color;
+    if (last === color) continue;
+    await appendEvent(pool, { actor: "cos", action: "area_health_changed", entityType: "area", entityId: a.id, areaId: a.id,
+      before: last ? { color: last } : null, after: { color, area: h.name, breaches: h.breaches } });
+  }
 }

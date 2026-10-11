@@ -10,7 +10,9 @@ import { writeTrace, routeTraceRows } from "../resources/trace.js";
 import { planAndTrace } from "../resources/planner.js";
 import { retrieve, traceRetrieval, effectiveAuthority } from "../resources/retrieve.js";
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/server";
+import { withCause } from "../db/live-context.js";
 import { appendEvent } from "../db/index.js";
 import { getTaskResult, latestTask, createTask } from "../pipelines/j6/control.js";
 import { capResponse, filterByTier } from "../guards/output.js";
@@ -45,9 +47,11 @@ export function buildMcpServer(deps) {
     server.registerTool = (name, config, cb) => {
         if (catalog.has(name))
             throw new Error(`MCP tool "${name}" registered twice`);
+        // ADR-087: each tool call is one unit of work — every event it appends shares one correlation id.
+        const traced = (args, extra) => withCause({ correlationId: randomUUID(), causeIds: [] }, async () => cb(args, extra));
         catalog.set(name, { name, description: String(config.description ?? ""), inputSchema: config.inputSchema,
-            readOnly: config.annotations?.readOnlyHint === true, handler: cb });
-        return register(name, config, cb);
+            readOnly: config.annotations?.readOnlyHint === true, handler: traced });
+        return register(name, config, traced);
     };
     const audit = (tool, outcome) => appendEvent(deps.pool, {
         actor: "system", action: "tool_called", entityType: "tool", reason: tool, after: { tool, outcome }, client: deps.client

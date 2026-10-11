@@ -18,7 +18,9 @@ import { writeTrace, routeTraceRows } from "../resources/trace.js";
 import { planAndTrace } from "../resources/planner.js";
 import { retrieve, traceRetrieval, effectiveAuthority } from "../resources/retrieve.js";
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
+import { withCause } from "../db/live-context.js";
 import { appendEvent } from "../db/index.js";
 import { getTaskResult, latestTask, createTask } from "../pipelines/j6/control.js";
 import { capResponse, filterByTier, type Tier } from "../guards/output.js";
@@ -82,9 +84,11 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
   const register = server.registerTool.bind(server) as (name: string, config: Record<string, unknown>, cb: (args: unknown, extra: unknown) => unknown) => unknown;
   (server as unknown as { registerTool: typeof register }).registerTool = (name, config, cb) => {
     if (catalog.has(name)) throw new Error(`MCP tool "${name}" registered twice`);
+    // ADR-087: each tool call is one unit of work — every event it appends shares one correlation id.
+    const traced = (args: unknown, extra: unknown) => withCause({ correlationId: randomUUID(), causeIds: [] }, async () => cb(args, extra));
     catalog.set(name, { name, description: String(config.description ?? ""), inputSchema: config.inputSchema as z.ZodType | undefined,
-      readOnly: (config.annotations as { readOnlyHint?: boolean } | undefined)?.readOnlyHint === true, handler: cb });
-    return register(name, config, cb);
+      readOnly: (config.annotations as { readOnlyHint?: boolean } | undefined)?.readOnlyHint === true, handler: traced });
+    return register(name, config, traced);
   };
 
   const audit = (tool: string, outcome: string) => appendEvent(deps.pool, {

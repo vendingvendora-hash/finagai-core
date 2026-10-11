@@ -188,6 +188,19 @@ export function createHandler(cfg, info, log, deps) {
             // Session valid. Sign-in, WebAuthn ceremony, and execution are implemented in M5.
             return send(res, 501, { error: "not_implemented" });
         }
+        // ADR-087: the Live State Stream — observational only (GET), Julian's bearer token as for /mcp.
+        if (path.startsWith("/live/") && deps.live) {
+            authenticateMcp(req).then((principal) => {
+                if (cfg.ALLOWED_MCP_CLIENT_IDS.length && principal.clientId && !cfg.ALLOWED_MCP_CLIENT_IDS.includes(principal.clientId))
+                    return send(res, 401, { error: "unauthorized" });
+                return deps.live(req, res, new URL(req.url ?? "/", cfg.FINAGAI_PUBLIC_BASE_URL));
+            }, (err) => {
+                const code = err instanceof AuthError ? err.code : "malformed_token";
+                const status = code === "keys_unavailable" ? 503 : 401;
+                send(res, status, { error: status === 503 ? "temporarily_unavailable" : "unauthorized" }, status === 401 ? { "www-authenticate": challenge(code === "missing_token" ? "unauthorized" : "invalid_token") } : {});
+            });
+            return;
+        }
         if (path.startsWith("/concierge/") && deps.concierge) {
             void deps.concierge(req, res, path);
             return;

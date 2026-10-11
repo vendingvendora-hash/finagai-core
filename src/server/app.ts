@@ -4,6 +4,7 @@
  *   GET  /.well-known/oauth-protected-resource[/mcp]  RFC 9728 metadata for claude.ai discovery
  *   ANY  /mcp                                         bearer token required (M3); tools arrive in M3/M4
  *   ANY  /approve/*                                   approval-page session cookie only; bearer tokens refused
+ *   GET  /live/*                                      Live State Stream (ADR-087): read-only, bearer token as /mcp
  * Authentication failures always return 401 with the resource_metadata challenge on /mcp, as
  * Anthropic's connector client requires. Responses never include configuration or secrets.
  */
@@ -43,6 +44,8 @@ export interface AppDeps {
   approval?: (req: http.IncomingMessage, res: http.ServerResponse, url: URL) => Promise<void>;
   /** J5 helper API (ADR-044); its own bearer secret, checked inside the handler. */
   concierge?: (req: http.IncomingMessage, res: http.ServerResponse, path: string) => Promise<void>;
+  /** ADR-087 Live State Stream: read-only, authenticated exactly like /mcp. */
+  live?: (req: http.IncomingMessage, res: http.ServerResponse, url: URL) => Promise<void>;
   /** J6 control API (ADR-050); same helper secret. */
   control?: (req: http.IncomingMessage, res: http.ServerResponse, path: string) => Promise<void>;
 }
@@ -224,6 +227,21 @@ export function createHandler(cfg: Config, info: AppInfo, log: LogFn, deps: AppD
       if (!session) return send(res, 401, { error: "sign_in_required" });
       // Session valid. Sign-in, WebAuthn ceremony, and execution are implemented in M5.
       return send(res, 501, { error: "not_implemented" });
+    }
+
+    // ADR-087: the Live State Stream — observational only (GET), Julian's bearer token as for /mcp.
+    if (path.startsWith("/live/") && deps.live) {
+      authenticateMcp(req).then(
+        (principal) => {
+          if (cfg.ALLOWED_MCP_CLIENT_IDS.length && principal.clientId && !cfg.ALLOWED_MCP_CLIENT_IDS.includes(principal.clientId)) return send(res, 401, { error: "unauthorized" });
+          return deps.live!(req, res, new URL(req.url ?? "/", cfg.FINAGAI_PUBLIC_BASE_URL));
+        },
+        (err: unknown) => {
+          const code = err instanceof AuthError ? err.code : "malformed_token";
+          const status = code === "keys_unavailable" ? 503 : 401;
+          send(res, status, { error: status === 503 ? "temporarily_unavailable" : "unauthorized" }, status === 401 ? { "www-authenticate": challenge(code === "missing_token" ? "unauthorized" : "invalid_token") } : {});
+        });
+      return;
     }
 
     if (path.startsWith("/concierge/") && deps.concierge) {

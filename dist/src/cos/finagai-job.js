@@ -8,6 +8,7 @@ import { AREA_MODULES, proactivityStatus, runTick } from "../events/index.js";
 import { listLessons, runLearning } from "../learning/index.js";
 import { exceptionsStatus } from "../exceptions/index.js";
 import { listRules } from "../exceptions/rules.js";
+import { causalChain, publish, readAfter, streamBounds } from "../live/stream.js";
 export function parseFinagaiJob(request) {
     const m = /^\s*finagai-job:\s*(.*)$/is.exec(request);
     if (!m)
@@ -66,6 +67,8 @@ export function parseFinagaiJob(request) {
         return { kind: "learning-preview" };
     if (c === "exceptions")
         return { kind: "exceptions" };
+    if (c === "live")
+        return { kind: "live", limit: Math.min(int(rest[0], 20), 100) };
     return { kind: "unknown", text: t.slice(0, 100) };
 }
 export async function runFinagaiJob(pool, google, job) {
@@ -109,6 +112,15 @@ export async function runFinagaiJob(pool, google, job) {
         case "events": return proactivityStatus(pool, job.limit);
         case "lessons": return listLessons(pool, { limit: job.limit });
         case "learning-preview": return runLearning(pool, { dryRun: true });
+        case "live": {
+            // ADR-087 read-only view of the Live State Stream (the same envelopes /live/* serves), for live verification.
+            await publish(pool);
+            const b = await streamBounds(pool);
+            const r = await readAfter(pool, Math.max(0, b.newest - job.limit), {}, job.limit);
+            const lastChange = (await pool.query(`SELECT id FROM event WHERE action IN ('opportunity_status','followup_done','workflow_completed','escalation_opened') ORDER BY id DESC LIMIT 1`)).rows[0]?.id;
+            const lag = (await pool.query(`SELECT count(*)::int AS n FROM event e WHERE e.occurred_at > now() - interval '1 day' AND NOT EXISTS (SELECT 1 FROM live_event l WHERE l.event_id = e.id)`)).rows[0].n;
+            return { bounds: b, unpublishedLast24h: lag, latest: r.reset ? r : r.events, latestChain: lastChange ? await causalChain(pool, Number(lastChange)) : [] };
+        }
         case "exceptions": return { ...(await exceptionsStatus(pool)), rules: await listRules(pool) };
         case "tick-preview": return runTick(pool, { google, now: new Date(), dryRun: true }, { modules: AREA_MODULES }, "preview");
         case "mcp-manifest": {
@@ -119,7 +131,7 @@ export async function runFinagaiJob(pool, google, job) {
             const lastList = traffic.find((t) => t.action === "mcp_tools_listed");
             return { live: m, inProcess: TRAFFIC, lastToolsListServed: lastList ? { at: lastList.occurred_at, digest: lastList.after?.served, count: lastList.after?.count } : null, recentTraffic: traffic };
         }
-        case "unknown": return { error: `Unknown finagai-job "${job.text}". Allowed: stability [runs] [org,org], result <code>, trace <proposal> <org>, replay <proposal> [runs], jobs <proposal> <employer>, proposal <code>, reinterpret <code>, career-state, propose, acquisitions [n], pipeline [area], find <text>, sync-preview, lifecycle-preview, brief, area-status [area], waiting, mcp-manifest, events [n], tick-preview, lessons [n], learning-preview, exceptions.` };
+        case "unknown": return { error: `Unknown finagai-job "${job.text}". Allowed: stability [runs] [org,org], result <code>, trace <proposal> <org>, replay <proposal> [runs], jobs <proposal> <employer>, proposal <code>, reinterpret <code>, career-state, propose, acquisitions [n], pipeline [area], find <text>, sync-preview, lifecycle-preview, brief, area-status [area], waiting, mcp-manifest, events [n], tick-preview, lessons [n], learning-preview, exceptions, live [n].` };
     }
 }
 //# sourceMappingURL=finagai-job.js.map

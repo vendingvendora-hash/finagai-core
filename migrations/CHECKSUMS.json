@@ -31,5 +31,6 @@
  "0030_opportunity_lifecycle.sql": "5ef8320849d573fae08da7dd345f91b819e1ed69557595a21c76152afd5fd50c",
  "0031_event_engine.sql": "8bfc68d0887944fb8ee9c08ddc166dd5aab5d73a10fe33b339b98a276e942e6e",
  "0032_learning.sql": "e5c6984b9fb7affa2a0978ef3d191eb8b2d70d4f7ce5bb70226f07016b9edbe5",
- "0033_management_by_exception.sql": "c04fd6dbe407d058b322412c5aa2b6f2b6c32c2c0ee469ad6edee3eb18ca6afb"
+ "0033_management_by_exception.sql": "c04fd6dbe407d058b322412c5aa2b6f2b6c32c2c0ee469ad6edee3eb18ca6afb",
+ "0034_live_state_stream.sql": "fba393515c95fe18e63dae03baac46fafc5eee8466c10763a99059426d6958b4"
 }
