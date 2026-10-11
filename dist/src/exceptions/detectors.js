@@ -133,12 +133,12 @@ export const stuckTasks = async (db, now) => {
  *  moved, typed, ran…): only he can accept that change. An unverified answer to a read-only question changed nothing —
  *  that is Finagai's verifier problem, noted but never put on his plate (live 2026-10-11: task 129, "have I received an
  *  update from Beth?", would otherwise have been escalated as "your review decides whether it counts"). */
-const CHANGES = ["browser_fill", "browser_fill_form", "browser_select", "browser_check", "browser_upload", "browser_download", "ax_set_value", "type", "key", "hotkey", "move_file", "trash_file", "run", "drag"];
+export const STATE_CHANGING_KINDS = ["browser_fill", "browser_fill_form", "browser_select", "browser_check", "browser_upload", "browser_download", "ax_set_value", "type", "key", "hotkey", "move_file", "trash_file", "run", "drag"];
 export const reviewBacklog = async (db, now) => {
     const rows = (await db.query(`SELECT t.code, t.result_summary, t.updated_at,
       EXISTS (SELECT 1 FROM control_step s WHERE s.task_id = t.id AND s.status = 'done' AND s.kind = ANY($2::text[])) AS changed
     FROM control_task t WHERE t.verification_status = 'needs_review' AND t.status IN ('done','failed')
-      AND t.updated_at < $1::timestamptz - interval '24 hours' AND t.updated_at > $1::timestamptz - interval '14 days' ORDER BY t.code LIMIT 10`, [now, CHANGES])).rows;
+      AND t.updated_at < $1::timestamptz - interval '24 hours' AND t.updated_at > $1::timestamptz - interval '14 days' ORDER BY t.code LIMIT 10`, [now, STATE_CHANGING_KINDS])).rows;
     // A read-only one is not an exception at all: nothing is pending for anyone and there is nothing to remedy (the
     // verifier's miss is already in the execution metrics). Listing it would only make "all normal" false.
     return rows.filter((t) => t.changed).map((t) => ({ key: `task:${t.code}:review`, detector: "review_backlog", owner: "julian", severity: "info", needs: "judgment",

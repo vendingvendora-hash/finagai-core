@@ -117,3 +117,8 @@ handling 1 exception". That was not true: there was nothing to handle.
   verifier's miss is already counted in the execution metrics.
 - An info item, such as the Mac asleep with no work waiting or spend past 80%, is listed as **noted**. It does not make
   "All normal" false and does not count as "handling".
+
+Hotfix 30 (same day). The final live check found that `exceptions` correctly said "All normal" and nothing needed
+Julian, but the executive brief still said "1 thing(s) need you: Task 129 needs your review". The brief had its own,
+older needs-review query. It now uses the same rule as the detector (`STATE_CHANGING_KINDS`): only a task that changed
+something is listed for his review.

@@ -152,6 +152,10 @@ describe.skipIf(!admin || !migT || !appT)("management by exception (Phase 7, ADR
     expect(await exc(`task:${ro}:review`)).toBeUndefined();                       // not an exception at all: nothing pending, nothing to remedy
     expect(await exc(`task:${rw}:review`)).toEqual(expect.objectContaining({ owner: "julian", needs: "judgment" }));
     expect(r.escalations.opened).toEqual([expect.stringMatching(new RegExp(`^\\[judgment\\] Task ${rw} changed something Finagai could not verify`))]);
+    // The brief applies the same rule (live 2026-10-11: it still listed read-only task 129 as "needs your review").
+    const b = await executiveBriefV2(pool);
+    expect(b.blocked.join(" ")).toMatch(new RegExp(`Task ${rw} needs your review`));
+    expect(b.blocked.join(" ")).not.toMatch(new RegExp(`Task ${ro} needs your review`));
     await q(`UPDATE control_task SET verification_status = 'verified' WHERE code = ANY($1::bigint[])`, [[ro, rw]]);
     await tick(new Date(Date.now() + 11 * 60_000));
   });

@@ -1,5 +1,6 @@
 import { appendEvent, withTransaction } from "../db/index.js";
 import { areaHealth } from "./areas.js";
+import { STATE_CHANGING_KINDS } from "../exceptions/detectors.js";
 import { sweepOverdue } from "./followups.js";
 const clean = (s) => s.trim().replace(/\s+/g, " ");
 /** Resolve by name: exact (case-insensitive) → unique prefix/contains. Returns candidates when ambiguous. */
@@ -247,7 +248,10 @@ export async function executiveBriefV2(pool, now = new Date()) {
         blocked.push(`Overdue: ${f.summary} (due ${new Date(f.due_at).toISOString().slice(0, 10)})`);
     // Needs-review results are blocked work; expired waits are a CHANGE (compressed), not a decision — live: five
     // days-old test tasks crowded the brief as "5 things need you".
-    for (const t of (await pool.query(`SELECT code, result_summary FROM control_task WHERE verification_status = 'needs_review' AND updated_at > now() - interval '3 days' LIMIT 5`)).rows)
+    // Phase 7 (ADR-086, live 2026-10-11): only a task that CHANGED something needs Julian's review — an unverifiable
+    // read-only answer (task 129) is not his to accept. Same rule as the review_backlog detector.
+    for (const t of (await pool.query(`SELECT t.code, t.result_summary FROM control_task t WHERE t.verification_status = 'needs_review' AND t.updated_at > now() - interval '3 days'
+      AND EXISTS (SELECT 1 FROM control_step s WHERE s.task_id = t.id AND s.status = 'done' AND s.kind = ANY($1::text[])) LIMIT 5`, [STATE_CHANGING_KINDS])).rows)
         blocked.push(`Task ${t.code} needs your review: ${String(t.result_summary ?? "").slice(0, 140)}`);
     const exp = (await pool.query(`SELECT array_agg(code ORDER BY code) AS codes FROM control_task WHERE status = 'expired' AND updated_at > now() - interval '3 days'`)).rows[0]?.codes;
     const areas = (await pool.query(`SELECT name FROM area WHERE archived_at IS NULL AND status = 'active' ORDER BY name`)).rows;
