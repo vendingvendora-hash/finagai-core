@@ -129,12 +129,21 @@ export const stuckTasks = async (db, now) => {
     return rows.map((t) => ({ key: `task:${t.code}:stuck`, detector: "stuck_task", owner: "finagai", severity: "warning", escalateAfterMin: 6 * 60,
         summary: `Mac task ${t.code} has made no progress for ${hhmm(ago(now, t.last_progress_at ?? now))} — Finagai keeps it leased for resumption`, detail: String(t.request).slice(0, 160) }));
 };
-/** Results Finagai could not verify and that wait for Julian's review. */
+/** Results Finagai could not verify. Julian's review is needed only when the task CHANGED something (filled, uploaded,
+ *  moved, typed, ran…): only he can accept that change. An unverified answer to a read-only question changed nothing —
+ *  that is Finagai's verifier problem, noted but never put on his plate (live 2026-10-11: task 129, "have I received an
+ *  update from Beth?", would otherwise have been escalated as "your review decides whether it counts"). */
+const CHANGES = ["browser_fill", "browser_fill_form", "browser_select", "browser_check", "browser_upload", "browser_download", "ax_set_value", "type", "key", "hotkey", "move_file", "trash_file", "run", "drag"];
 export const reviewBacklog = async (db, now) => {
-    const rows = (await db.query(`SELECT code, result_summary, updated_at FROM control_task WHERE verification_status = 'needs_review' AND status IN ('done','failed')
-      AND updated_at < $1::timestamptz - interval '24 hours' AND updated_at > $1::timestamptz - interval '14 days' ORDER BY code LIMIT 10`, [now])).rows;
-    return rows.map((t) => ({ key: `task:${t.code}:review`, detector: "review_backlog", owner: "julian", severity: "info", needs: "judgment",
-        summary: `Task ${t.code}'s result could not be verified automatically — your review decides whether it counts: ${String(t.result_summary ?? "").slice(0, 120)}` }));
+    const rows = (await db.query(`SELECT t.code, t.result_summary, t.updated_at,
+      EXISTS (SELECT 1 FROM control_step s WHERE s.task_id = t.id AND s.status = 'done' AND s.kind = ANY($2::text[])) AS changed
+    FROM control_task t WHERE t.verification_status = 'needs_review' AND t.status IN ('done','failed')
+      AND t.updated_at < $1::timestamptz - interval '24 hours' AND t.updated_at > $1::timestamptz - interval '14 days' ORDER BY t.code LIMIT 10`, [now, CHANGES])).rows;
+    return rows.map((t) => t.changed
+        ? { key: `task:${t.code}:review`, detector: "review_backlog", owner: "julian", severity: "info", needs: "judgment",
+            summary: `Task ${t.code} changed something Finagai could not verify — your review decides whether it counts: ${String(t.result_summary ?? "").slice(0, 120)}` }
+        : { key: `task:${t.code}:review`, detector: "review_backlog", owner: "finagai", severity: "info",
+            summary: `Task ${t.code} (read-only) ended without a verifiable answer — nothing was changed; Finagai is not asking you to review it` });
 };
 export const DETECTORS = { watcherFailing, workflowFailing, deadLetters, budget, deliveryFailing, areaBreach, macOffline, stuckTasks, reviewBacklog };
 //# sourceMappingURL=detectors.js.map

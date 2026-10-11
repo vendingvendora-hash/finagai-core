@@ -99,3 +99,14 @@ All of the above is tested structurally (`test/unit/exceptions-structure.test.ts
 Phase 5's integration test now also shows a real gap Phase 7 closes. Closing Beth's wait left the Altarum project
 without a next step. The area remedy reconciled it at once, and the lifecycle's step (a nudge that goes out as Julian)
 was escalated immediately, instead of waiting for some later deadline to wake the lifecycle.
+
+## Live acceptance fix (2026-10-11, hotfix 28)
+The first live tick escalated **Task 129** ("Have I received an update on my meeting with Beth?") to Julian as "your
+review decides whether it counts", and emailed him. The task only read Gmail: it opened tabs, read pages, clicked into
+a thread and searched. Its verifier failed to return a verdict, but nothing was changed, so there was nothing for Julian
+to accept.
+
+`review_backlog` now escalates only tasks that **changed** something, meaning a done step that fills, selects, uploads,
+downloads, types, moves, trashes, runs or drags. An unverifiable read-only answer is a Finagai-owned info exception and
+is never put on Julian's plate. The live escalation resolves itself on the first tick after deploy, because the
+exception becomes Finagai-owned.

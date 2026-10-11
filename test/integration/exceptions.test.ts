@@ -137,6 +137,22 @@ describe.skipIf(!admin || !migT || !appT)("management by exception (Phase 7, ADR
     expect((await q(`SELECT count(*)::int AS n FROM operating_exception WHERE status = 'open' AND detector = 'mac_offline'`))[0].n).toBe(0);
   });
 
+  it("an unverifiable READ-ONLY answer is Finagai's problem, not Julian's review; an unverified CHANGE is his to accept", async () => {
+    const mk = async (request: string, kinds: string[]) => {
+      const t = (await q(`INSERT INTO control_task (request, status, verification_status, result_summary, created_at, updated_at) VALUES ($1, 'done', 'needs_review', 'NEEDS YOUR REVIEW', now() - interval '2 days', now() - interval '2 days') RETURNING id, code`, [request]))[0];
+      let i = 0; for (const k of kinds) await q(`INSERT INTO control_step (task_id, seq, kind, risk, summary, status, result, ran_at) VALUES ($1, $2, $3, 'read', $4, 'done', 'verified: ok', now() - interval '2 days')`, [t.id, ++i, k, `${k} step`]);
+      return Number(t.code);
+    };
+    const ro = await mk("Have I received an update from Beth?", ["browser_open_tab", "browser_read", "browser_click", "browser_navigate"]);   // live: task 129
+    const rw = await mk("Fill the Chimes application form", ["browser_open_tab", "browser_fill_form", "browser_upload"]);
+    const r = await tick(new Date(Date.now() + 10 * 60_000));
+    expect(await exc(`task:${ro}:review`)).toEqual(expect.objectContaining({ owner: "finagai", needs: null, status: "open" }));
+    expect(await exc(`task:${rw}:review`)).toEqual(expect.objectContaining({ owner: "julian", needs: "judgment" }));
+    expect(r.escalations.opened).toEqual([expect.stringMatching(new RegExp(`^\\[judgment\\] Task ${rw} changed something Finagai could not verify`))]);
+    await q(`UPDATE control_task SET verification_status = 'verified' WHERE code = ANY($1::bigint[])`, [[ro, rw]]);
+    await tick(new Date(Date.now() + 11 * 60_000));
+  });
+
   it("'tell me when …' rules: validated, notify once on the edge, never act, and are removable", async () => {
     expect(await addRule(pool, { statement: "tell me when x", metric: "nope", op: ">", value: 1 })).toEqual({ error: expect.stringMatching(/Unknown metric "nope"/) });
     expect(await addRule(pool, { statement: "tell me when x", metric: "jobs_in_status", op: ">=", value: 1, area: "Career" })).toEqual({ error: expect.stringMatching(/needs a status/) });
