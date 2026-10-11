@@ -199,3 +199,16 @@ describe("time to answer with censoring (Kaplan–Meier)", () => {
     expect(responseWindow(short, 14)).toEqual(expect.objectContaining({ window: null, why: expect.stringMatching(/follow-up reaches day 18/) }));
   });
 });
+
+import { policyIncoherence } from "../../src/learning/apply.js";
+describe("policy parameters must also be coherent together", () => {
+  it("a response window at or past the stale cut-off would silently remove the nudge decision — refused", () => {
+    expect(policyIncoherence({ ...CAREER_POLICY, responseDays: 31 })).toMatch(/≥ staleAppliedDays 30/);
+    expect(policyIncoherence({ ...CAREER_POLICY, responseDays: 30 })).toMatch(/≥ staleAppliedDays 30/);
+    expect(policyIncoherence({ ...CAREER_POLICY, responseDays: 29 })).toBeNull();
+    expect(policyIncoherence(CAREER_POLICY)).toBeNull();
+    // and the lifecycle really would never ask: responseDays 31 → straight to a quiet close
+    const silent: JobFacts = { employer: "V", title: "FP&A", reqId: null, status: "applied", contact: "Dana", appliedAt: "2026-09-01T00:00:00Z", lastEvidenceAt: "2026-09-01T00:00:00Z", lastInterviewAt: null, createdAt: "2026-09-01T00:00:00Z" };
+    expect(nextStepFor(silent, new Date("2026-10-02T12:00:00Z"), { ...CAREER_POLICY, responseDays: 31 })).toEqual(expect.objectContaining({ kind: "close" }));
+  });
+});

@@ -1,4 +1,4 @@
-import { policyFor } from "./apply.js";
+import { policyFor, policyIncoherence } from "./apply.js";
 import { WINDOW_RULE, answeredByCI, kaplanMeier, responseWindow } from "./survival.js";
 /** Wilson score lower bound (95%) — a rate we can trust given its sample size. */
 export function wilsonLow(pos, n, z = 1.96) {
@@ -189,7 +189,11 @@ export async function outcomes(db, now) {
                     + (w.residualAtCurrent !== null ? ` An application still silent on day ${current} was later answered ${Math.round(100 * w.residualAtCurrent)}% of the time.` : ""),
                 lastEvidenceAt: last, evidence: { source: "opportunity_event", method: "Kaplan–Meier, unanswered applications censored at today / withdrawal / posting closed", applications: g.length, answers, rejections,
                     censored: g.length - answers, horizonDays: w.horizonDays, answeredBy: w.answeredBy, residualAtCurrent: w.residualAtCurrent, currentWindow: current, window: w.window, windowWhy: w.why, rule: WINDOW_RULE, candidateDays: w.candidateDays } });
-            if (w.window !== null && Math.abs(w.window - current) >= 5) {
+            const policyNow = await policyFor(db, areaId === "null" ? null : areaId);
+            const blocked = w.window !== null ? policyIncoherence({ ...policyNow, responseDays: w.window }) : null;
+            if (blocked)
+                out[out.length - 1].evidence.proposalBlocked = `day ${w.window} is supported by the data but not proposed: ${blocked}`;
+            if (w.window !== null && !blocked && Math.abs(w.window - current) >= 5) {
                 const cw = answeredByCI(kaplanMeier(obs), w.window);
                 out.push({ key: `outcome:${areaId}:response_days:policy`, kind: "outcome", basis: "inferred", areaId, scope: `area:${area}`, support: g.length, positives: answers,
                     confidence: Math.max(0, 1 - (cw.hi - cw.lo)),

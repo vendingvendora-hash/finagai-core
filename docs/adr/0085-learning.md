@@ -186,3 +186,17 @@ The response-window lesson's provenance (`candidateDays`, plus the `rule` it was
 - the follow-up remaining, and each rule the day fails. An empty list means the day passes.
 
 The window is the first day that passes every rule. Nothing else changed.
+
+## Revision 2026-10-11d (hotfix 25 live review → hotfix 26): parameters must be coherent together
+The live day-by-day table found day 31 as the first statistically supported window. Day 31 is also past
+`staleAppliedDays` (30), and the lifecycle closes a silent application once it is that stale. So a 31-day window would
+silently remove the nudge-or-let-go decision for every application. Each parameter was within its own bounds; only the
+combination was wrong.
+
+`policyIncoherence()` now rejects any `responseDays ≥ staleAppliedDays`:
+- **At proposal time:** the observed lesson records `proposalBlocked`, and no proposal is filed.
+- **At use:** `policyFor` skips an approved parameter that would make the policy incoherent.
+
+On the statistics: the 31-day result is the first day after the last observed late answer (around day 30). It rests on
+4 late answers in all, and only 5 applications have been followed through day 55. Day 30 misses the 20% bound by one
+point (21%). The data supports "no answers have been seen after about a month so far", not a precise 31-day policy.

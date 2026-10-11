@@ -89,6 +89,18 @@ export async function policyFor(db: Db, areaId: string | null | undefined): Prom
   const approved = (await approvedEffects(db, "policy_param")).map((a) => ({ ...a, effect: a.effect as Extract<Effect, { type: "policy_param" }> }))
     .filter((a) => a.effect.area.toLowerCase() === area.toLowerCase())
     .sort((a, b) => a.approvedAt.localeCompare(b.approvedAt));                       // the latest approval of a parameter wins
-  for (const a of approved) (base as unknown as Record<string, number | boolean>)[a.effect.param] = a.effect.value;
+  for (const a of approved) {
+    const next = { ...base, [a.effect.param]: a.effect.value } as LifecyclePolicy;
+    if (!policyIncoherence(next)) Object.assign(base, next);                       // an incoherent combination never applies
+  }
   return base;
+}
+
+/** Parameters that are each in bounds can still combine into a policy that silently disables a step. Returns why, or null.
+ *  (Live 2026-10-11: responseDays 31 with staleAppliedDays 30 would close every silent application before it could ever
+ *  become Julian's nudge-or-let-go decision.) */
+export function policyIncoherence(p: LifecyclePolicy): string | null {
+  if (p.responseDays >= p.staleAppliedDays)
+    return `responseDays ${p.responseDays} ≥ staleAppliedDays ${p.staleAppliedDays}: a silent application would close before it ever became your nudge-or-let-go decision`;
+  return null;
 }

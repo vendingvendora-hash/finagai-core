@@ -253,6 +253,31 @@ describe.skipIf(!admin || !migT || !appT)("learning (Phase 6, ADR-085)", () => {
     expect(await policyFor(pool, lab)).toEqual(CAREER_POLICY);
   });
 
+  it("a statistically supported window that would disable the nudge step is NOT proposed, and never applies", async () => {
+    const lab2 = (await ensureArea(pool, "Lab2")).id;
+    for (let i = 0; i < 9; i++) {
+      const o = (await q(`INSERT INTO opportunity (kind, area_id, org, title, status, source, dedupe_key, applied_at) VALUES ('job', $1, $2, 'Analyst', 'rejected', 'test', $3, $4) RETURNING id`, [lab2, `L2 ${i}`, `l2-${i}`, ago(80 + i)]))[0];
+      await q(`INSERT INTO opportunity_event (opportunity_id, at, kind, source, source_id, summary) VALUES ($1, $2, 'application', 'gmail', $3, 'applied'), ($1, $4, 'rejection', 'gmail', $5, 'no')`,
+        [o.id, ago(80 + i), `l2a${i}`, ago(80 + i - (32 + (i % 7))), `l2r${i}`]);
+    }
+    for (let i = 0; i < 40; i++) {
+      const o = (await q(`INSERT INTO opportunity (kind, area_id, org, title, status, source, dedupe_key, applied_at) VALUES ('job', $1, $2, 'Analyst', 'applied', 'test', $3, $4) RETURNING id`, [lab2, `L2 silent ${i}`, `l2s-${i}`, ago(100)]))[0];
+      await q(`INSERT INTO opportunity_event (opportunity_id, at, kind, source, source_id, summary) VALUES ($1, $2, 'application', 'gmail', $3, 'applied')`, [o.id, ago(100), `l2s${i}`]);
+    }
+    const r = await runLearning(pool, { dryRun: true, now: NOW });
+    const obs = r.lessons!.find((l) => l.key === `outcome:${lab2}:response_days`)!;
+    expect(obs.provenance.window).toBeGreaterThanOrEqual(30);
+    expect(obs.provenance.proposalBlocked).toMatch(/not proposed: responseDays \d+ ≥ staleAppliedDays 30/);
+    expect(r.lessons!.find((l) => l.key === `outcome:${lab2}:response_days:policy`)).toBeUndefined();
+    // Even an approved governed row with an incoherent value does not apply.
+    const l = (await q(`INSERT INTO lesson (key, kind, basis, area_id, scope, statement, confidence, last_evidence_at, status) VALUES ('tamper:c', 'outcome', 'inferred', $1, 'area:Lab2', 'z', 1, now(), 'approved') RETURNING id`, [lab2]))[0];
+    const p = (await q(`INSERT INTO proposal (kind, target_type, target_id, proposed_text, rationale, status, decided_at) VALUES ('preference_change', 'lesson', $1, $2, 'test', 'approved', now()) RETURNING id`,
+      [l.id, `z\n\n${encodeEffect({ type: "policy_param", area: "Lab2", param: "responseDays", value: 31 })}`]))[0];
+    await q(`INSERT INTO preference (key, statement, version, approved_proposal_id) VALUES ('tamper-c', (SELECT proposed_text FROM proposal WHERE id = $1), 1, $1)`, [p.id]);
+    expect((await policyFor(pool, lab2)).responseDays).toBe(CAREER_POLICY.responseDays);
+    await q(`UPDATE opportunity SET archived_at = now() WHERE area_id = $1`, [lab2]);              // keep later tests on Career only
+  });
+
   it("a forgotten observed lesson never comes back, even while its evidence is fresh", async () => {
     expect((await guidanceFor(pool, "Update the vendor tracker", NOW)).keys).toContain("recovery:browser_click->ax_click");
     await forgetLesson(pool, "recovery:browser_click->ax_click", "not true for my setup");
