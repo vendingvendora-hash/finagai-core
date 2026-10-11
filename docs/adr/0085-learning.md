@@ -176,3 +176,13 @@ Two more corrections:
 
 **Previews** (`run_learning preview`, `learning-preview`) now return every recomputed lesson, with its statement,
 provenance, confidence, freshness and resulting status. The transaction is then rolled back.
+
+## Revision 2026-10-11c (hotfix 25): every candidate day is shown
+The response-window lesson's provenance (`candidateDays`, plus the `rule` it was checked against) lists every day from
+7 to 45 with:
+- the number still at risk, the number still silent after the day, and those censored before the horizon;
+- the effective sample size, the number of later answers, the Kaplan–Meier and life-table later-answer rates, and the
+  95% upper bound;
+- the follow-up remaining, and each rule the day fails. An empty list means the day passes.
+
+The window is the first day that passes every rule. Nothing else changed.

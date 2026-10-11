@@ -1,5 +1,5 @@
 import { policyFor } from "./apply.js";
-import { answeredByCI, kaplanMeier, responseWindow } from "./survival.js";
+import { WINDOW_RULE, answeredByCI, kaplanMeier, responseWindow } from "./survival.js";
 /** Wilson score lower bound (95%) — a rate we can trust given its sample size. */
 export function wilsonLow(pos, n, z = 1.96) {
     if (n <= 0)
@@ -188,13 +188,13 @@ export async function outcomes(db, now) {
                     + `Counting the unanswered ones as still waiting (Kaplan–Meier), the chance of any answer is ${curve || "not estimable yet"}; follow-up reaches day ${w.horizonDays}.`
                     + (w.residualAtCurrent !== null ? ` An application still silent on day ${current} was later answered ${Math.round(100 * w.residualAtCurrent)}% of the time.` : ""),
                 lastEvidenceAt: last, evidence: { source: "opportunity_event", method: "Kaplan–Meier, unanswered applications censored at today / withdrawal / posting closed", applications: g.length, answers, rejections,
-                    censored: g.length - answers, horizonDays: w.horizonDays, answeredBy: w.answeredBy, residualAtCurrent: w.residualAtCurrent, currentWindow: current, window: w.window, windowWhy: w.why } });
+                    censored: g.length - answers, horizonDays: w.horizonDays, answeredBy: w.answeredBy, residualAtCurrent: w.residualAtCurrent, currentWindow: current, window: w.window, windowWhy: w.why, rule: WINDOW_RULE, candidateDays: w.candidateDays } });
             if (w.window !== null && Math.abs(w.window - current) >= 5) {
                 const cw = answeredByCI(kaplanMeier(obs), w.window);
                 out.push({ key: `outcome:${areaId}:response_days:policy`, kind: "outcome", basis: "inferred", areaId, scope: `area:${area}`, support: g.length, positives: answers,
                     confidence: Math.max(0, 1 - (cw.hi - cw.lo)),
                     statement: `${area}: wait ${w.window} days (not ${current}) before treating an application as unanswered — ${w.why}. Based on ${g.length} applications (${answers} answered, ${rejections} of them rejections; the ${g.length - answers} unanswered ones counted as still waiting). Answers later than day ${w.horizonDays} cannot be seen yet.`,
-                    lastEvidenceAt: last, evidence: { source: "opportunity_event", method: "Kaplan–Meier (censored)", applications: g.length, answers, rejections, horizonDays: w.horizonDays, answeredBy: w.answeredBy, window: w.window, why: w.why },
+                    lastEvidenceAt: last, evidence: { source: "opportunity_event", method: "Kaplan–Meier (censored)", applications: g.length, answers, rejections, horizonDays: w.horizonDays, answeredBy: w.answeredBy, window: w.window, why: w.why, rule: WINDOW_RULE, candidateDays: w.candidateDays },
                     effect: { type: "policy_param", area, param: "responseDays", value: w.window } });
             }
         }

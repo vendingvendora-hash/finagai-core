@@ -77,6 +77,8 @@ export interface WindowEstimate {
   /** smallest day whose residual chance of a later answer is ≤ maxResidual, with enough data on both sides; null = not identifiable */
   window: number | null;
   lateAnswers?: { k: number; nEff: number; p: number; upper: number };
+  /** every candidate day with its numbers and the rules it fails */
+  candidateDays?: CandidateDay[];
   why: string;
 }
 
@@ -94,16 +96,36 @@ export function responseWindow(obs: Obs[], currentDays: number, rule: WindowRule
     residualAtCurrent: currentDays + rule.minTailDays <= horizon && atRiskAt(steps, currentDays) >= rule.minAtRisk ? round(residual(currentDays)) : null };
   if (obs.length < rule.minApplications || answers < rule.minAnswers)
     return { ...base, window: null, why: `not enough data (${obs.length} applications, ${answers} answers; need ≥ ${rule.minApplications} and ≥ ${rule.minAnswers})` };
-  const rejectedDays: string[] = [];
-  for (let d = rule.minDay; d <= rule.maxDay; d++) {
-    if (d + rule.minTailDays > horizon) break;                                      // cannot see late answers past day d yet
-    if (atRiskAt(steps, d) < rule.minAtRisk) break;
-    const late = lateAnswers(obs, d, horizon);
-    if (residual(d) <= rule.maxResidual && late.upper <= rule.maxResidualUpper)
-      return { ...base, window: d, lateAnswers: late, why: `of the applications still silent after day ${d} (${Math.round(late.nEff)} effective), ${late.k} were answered later, by day ${Math.floor(horizon)} (${pct(residual(d))}; 95% upper bound ${pct(late.upper)})` };
-    if (residual(d) <= rule.maxResidual && rejectedDays.length < 3) rejectedDays.push(`day ${d}: ${late.k} later answers of ${Math.round(late.nEff)} — ${pct(late.p)}, but could be up to ${pct(late.upper)}`);
+  const candidateDays = candidateTable(obs, steps, horizon, residual, rule);
+  const first = candidateDays.find((c) => c.passes);
+  if (first) {
+    const late = lateAnswers(obs, first.day, horizon);
+    return { ...base, candidateDays, window: first.day, lateAnswers: late,
+      why: `of the applications still silent after day ${first.day} (${Math.round(late.nEff)} effective), ${late.k} were answered later, by day ${Math.floor(horizon)} (${pct(first.kmLaterRate)}; 95% upper bound ${pct(late.upper)})` };
   }
-  return { ...base, window: null, why: `no day in ${rule.minDay}–${rule.maxDay} where later answers are ≤ ${pct(rule.maxResidual)} AND their 95% upper bound ≤ ${pct(rule.maxResidualUpper)}, with ≥ ${rule.minAtRisk} still waiting and ≥ ${rule.minTailDays} days of follow-up after it (follow-up reaches day ${Math.floor(horizon)})${rejectedDays.length ? `; too uncertain: ${rejectedDays.join("; ")}` : ""}` };
+  return { ...base, candidateDays, window: null, why: `no day in ${rule.minDay}–${rule.maxDay} where later answers are ≤ ${pct(rule.maxResidual)} AND their 95% upper bound ≤ ${pct(rule.maxResidualUpper)}, with ≥ ${rule.minAtRisk} still waiting and ≥ ${rule.minTailDays} days of follow-up after it (follow-up reaches day ${Math.floor(horizon)})` };
+}
+
+export interface CandidateDay {
+  day: number; atRisk: number; stillSilentAfter: number; censoredBeforeHorizon: number; effective: number; laterAnswers: number;
+  kmLaterRate: number; lifeTableRate: number; upper95: number; followUpAfterDays: number; passes: boolean; fails: string[];
+}
+/** Every candidate day with the numbers each rule is checked against, and which rules it fails (empty = passes). */
+function candidateTable(obs: Obs[], steps: KmStep[], horizon: number, residual: (d: number) => number, rule: WindowRule): CandidateDay[] {
+  const out: CandidateDay[] = [];
+  for (let d = rule.minDay; d <= rule.maxDay; d++) {
+    const late = lateAnswers(obs, d, horizon);
+    const waiting = obs.filter((o) => o.t > d);
+    const row = { day: d, atRisk: atRiskAt(steps, d), stillSilentAfter: waiting.length, censoredBeforeHorizon: waiting.filter((o) => !o.event && o.t < horizon).length,
+      effective: round(late.nEff), laterAnswers: late.k, kmLaterRate: round(residual(d)), lifeTableRate: round(late.p), upper95: round(late.upper), followUpAfterDays: Math.max(0, Math.floor(horizon - d)) };
+    const fails: string[] = [];
+    if (row.followUpAfterDays < rule.minTailDays) fails.push(`only ${row.followUpAfterDays} days of follow-up after it (need ${rule.minTailDays})`);
+    if (row.atRisk < rule.minAtRisk) fails.push(`only ${row.atRisk} still waiting (need ${rule.minAtRisk})`);
+    if (row.kmLaterRate > rule.maxResidual) fails.push(`later-answer rate ${pct(row.kmLaterRate)} > ${pct(rule.maxResidual)}`);
+    if (row.upper95 > rule.maxResidualUpper) fails.push(`95% upper bound ${pct(row.upper95)} > ${pct(rule.maxResidualUpper)}`);
+    out.push({ ...row, passes: fails.length === 0, fails });
+  }
+  return out;
 }
 
 const round = (x: number) => Math.round(x * 1000) / 1000;

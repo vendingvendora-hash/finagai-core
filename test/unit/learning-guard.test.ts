@@ -186,6 +186,12 @@ describe("time to answer with censoring (Kaplan–Meier)", () => {
     expect(lateAnswers(data, 7, 50)).toEqual(expect.objectContaining({ k: 2 }));
     expect(lateAnswers(data, 7, 50).upper).toBeGreaterThan(0.2);
     expect(lateAnswers(data, 20, 50)).toEqual(expect.objectContaining({ k: 1, nEff: 27 }));
+    // Every candidate day is shown with its numbers and the rules it fails.
+    const c7 = w.candidateDays!.find((c) => c.day === 7)!, c20 = w.candidateDays!.find((c) => c.day === 20)!, c40 = w.candidateDays!.find((c) => c.day === 40)!;
+    expect(c7).toEqual(expect.objectContaining({ passes: false, laterAnswers: 2, fails: [expect.stringMatching(/95% upper bound 23% > 20%/)] }));
+    expect(c20).toEqual(expect.objectContaining({ passes: true, laterAnswers: 1, fails: [] }));
+    expect(c40.fails).toEqual([expect.stringMatching(/only 10 days of follow-up after it/)]);
+    expect(w.candidateDays).toHaveLength(39);
   });
   it("too little follow-up or too few answers → no window (no proposal), with the reason", () => {
     expect(responseWindow([{ t: 3, event: true }, { t: 4, event: false }], 14)).toEqual(expect.objectContaining({ window: null, why: expect.stringMatching(/not enough data/) }));
