@@ -101,10 +101,16 @@ export async function exceptionsStatus(db, now = new Date()) {
       ORDER BY CASE e.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, e.first_seen_at`)).rows;
     const recent = (await db.query(`SELECT summary, resolved_at, resolution FROM operating_exception WHERE status = 'resolved' AND resolved_at > $1::timestamptz - interval '3 days' ORDER BY resolved_at DESC LIMIT 10`, [now])).rows;
     const yours = open.filter((e) => e.owner === "julian");
+    // "Handling" means Finagai is actively working a problem (warning/critical); an info item is only noted (e.g. the Mac
+    // asleep with no work waiting, spend past 80%) and does not make "all normal" false.
+    const handling = open.filter((e) => e.owner === "finagai" && e.severity !== "info");
+    const noted = open.filter((e) => e.owner === "finagai" && e.severity === "info");
     return {
-        headline: !open.length ? "All normal — nothing is wrong." : yours.length ? `${yours.length} thing(s) only you can clear; Finagai is handling ${open.length - yours.length} other exception(s).` : `Nothing needs you — Finagai is handling ${open.length} exception(s).`,
+        headline: yours.length ? `${yours.length} thing(s) only you can clear${handling.length ? `; Finagai is handling ${handling.length} other exception(s)` : ""}.`
+            : handling.length ? `Nothing needs you — Finagai is handling ${handling.length} exception(s).` : "All normal — nothing is wrong.",
         needsYou: yours.map((e) => ({ area: e.area, summary: e.summary, needs: e.needs, since: e.first_seen_at, detail: e.detail })),
-        finagaiHandling: open.filter((e) => e.owner === "finagai").map((e) => ({ area: e.area, severity: e.severity, summary: e.summary, since: e.first_seen_at,
+        noted: noted.map((e) => ({ area: e.area, summary: e.summary, since: e.first_seen_at })),
+        finagaiHandling: handling.map((e) => ({ area: e.area, severity: e.severity, summary: e.summary, since: e.first_seen_at,
             remedy: e.remediation ? `${e.remediation} (${e.remediation_attempts}/${MAX_REMEDY_ATTEMPTS} tries${e.last_remediation_result ? `; last: ${e.last_remediation_result}` : ""})` : "watching / retrying" })),
         recentlyCleared: recent.map((r) => `${r.summary} (cleared ${new Date(r.resolved_at).toISOString().slice(0, 16).replace("T", " ")} UTC)`),
     };

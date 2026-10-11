@@ -139,11 +139,10 @@ export const reviewBacklog = async (db, now) => {
       EXISTS (SELECT 1 FROM control_step s WHERE s.task_id = t.id AND s.status = 'done' AND s.kind = ANY($2::text[])) AS changed
     FROM control_task t WHERE t.verification_status = 'needs_review' AND t.status IN ('done','failed')
       AND t.updated_at < $1::timestamptz - interval '24 hours' AND t.updated_at > $1::timestamptz - interval '14 days' ORDER BY t.code LIMIT 10`, [now, CHANGES])).rows;
-    return rows.map((t) => t.changed
-        ? { key: `task:${t.code}:review`, detector: "review_backlog", owner: "julian", severity: "info", needs: "judgment",
-            summary: `Task ${t.code} changed something Finagai could not verify — your review decides whether it counts: ${String(t.result_summary ?? "").slice(0, 120)}` }
-        : { key: `task:${t.code}:review`, detector: "review_backlog", owner: "finagai", severity: "info",
-            summary: `Task ${t.code} (read-only) ended without a verifiable answer — nothing was changed; Finagai is not asking you to review it` });
+    // A read-only one is not an exception at all: nothing is pending for anyone and there is nothing to remedy (the
+    // verifier's miss is already in the execution metrics). Listing it would only make "all normal" false.
+    return rows.filter((t) => t.changed).map((t) => ({ key: `task:${t.code}:review`, detector: "review_backlog", owner: "julian", severity: "info", needs: "judgment",
+        summary: `Task ${t.code} changed something Finagai could not verify — your review decides whether it counts: ${String(t.result_summary ?? "").slice(0, 120)}` }));
 };
 export const DETECTORS = { watcherFailing, workflowFailing, deadLetters, budget, deliveryFailing, areaBreach, macOffline, stuckTasks, reviewBacklog };
 //# sourceMappingURL=detectors.js.map

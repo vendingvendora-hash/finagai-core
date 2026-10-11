@@ -110,3 +110,10 @@ to accept.
 downloads, types, moves, trashes, runs or drags. An unverifiable read-only answer is a Finagai-owned info exception and
 is never put on Julian's plate. The live escalation resolves itself on the first tick after deploy, because the
 exception becomes Finagai-owned.
+
+Hotfix 29 (same day). After hotfix 28, Task 129 became a Finagai-owned info exception, so `exceptions` said "Finagai is
+handling 1 exception". That was not true: there was nothing to handle.
+- A read-only task whose result could not be verified is now **not an exception at all**. Nothing is pending, and the
+  verifier's miss is already counted in the execution metrics.
+- An info item, such as the Mac asleep with no work waiting or spend past 80%, is listed as **noted**. It does not make
+  "All normal" false and does not count as "handling".

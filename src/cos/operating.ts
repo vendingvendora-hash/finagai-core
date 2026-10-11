@@ -269,7 +269,7 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
     .map((r) => `${String(r.origin_message ?? "").slice(0, 80)}${r.verification_status && r.verification_status !== "verified" ? ` (${r.verification_status})` : ""}`);
 
   const rest = { areas: health.map((s) => `${s.area}: ${s.color}`), waitingOpen: Number((await pool.query(`SELECT count(*)::int AS n FROM followup WHERE state IN ('open','waiting')`)).rows[0].n) };
-  const handling = exs.rows.filter((x) => x.owner === "finagai").length;
+  const handling = exs.rows.filter((x) => x.owner === "finagai" && x.severity !== "info").length;
   const headline = decisions.length + blocked.length === 0
     ? (handling ? `Nothing needs you right now — Finagai is handling ${handling} exception(s) itself.` : "Nothing needs you right now — all normal.")
     : `${decisions.length + blocked.length} thing(s) need you.`;
