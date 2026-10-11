@@ -9,6 +9,7 @@ import { liveManifest } from "../tools/manifest.js";
 import { appendEvent, createPool, PgDeliveryStore, PgLlmCallRecorder } from "../db/index.js";
 import { ResendSender } from "../notify/resend.js";
 import { startEventLoop } from "../events/index.js";
+import { setBudgetReader } from "../exceptions/detectors.js";
 import { AnthropicProvider } from "../llm/anthropic.js";
 import { MeteredModelClient } from "../llm/metered.js";
 import { buildMcpServer } from "../tools/server.js";
@@ -103,6 +104,8 @@ async function main() {
   server.listen(port, () => log("finagai-core listening", { port, version: VERSION, env: cfg.NODE_ENV }));
   // Phase 5 (ADR-084): event-driven proactivity — on in production unless FINAGAI_EVENT_LOOP=off.
   if (cfg.NODE_ENV === "production" && process.env.FINAGAI_EVENT_LOOP !== "off") {
+    // Phase 7 (ADR-086): the exception detectors read the same budget meter the model client enforces (read-only).
+    setBudgetReader(async () => ({ monthToDateUsd: await recorder.monthToDateUsd(new Date()), targetUsd: cfg.MODEL_BUDGET_TARGET_USD_MONTH, ceilingUsd: cfg.MODEL_HARD_CEILING_USD_MONTH }));
     startEventLoop(pool, sharedGoogle, { store: new PgDeliveryStore(pool), timezone: cfg.FINAGAI_TIMEZONE,
       sender: new ResendSender({ apiKey: cfg.RESEND_API_KEY, from: cfg.NOTIFY_FROM, to: cfg.NOTIFY_TO, replyTo: cfg.NOTIFY_REPLY_TO }) }, log);
     log("event loop started", { everyMinutes: 5 });

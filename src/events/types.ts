@@ -41,7 +41,8 @@ export interface Subscription {
 /** Something only Julian can do — escalated once, resolved automatically when its source item closes. */
 export interface EscalationNeed {
   key: string;
-  needs: "judgment" | "authorization" | "principal_reserved";
+  /** 'requested' = a notification Julian asked for ("tell me when …"): not a decision, not a task */
+  needs: "judgment" | "authorization" | "principal_reserved" | "requested";
   summary: string;
   detail?: string;
   areaId?: string | null;

@@ -237,7 +237,7 @@ export async function executiveBriefV2(pool, now = new Date()) {
             decisions.push(`${p.n} pending proposal(s) to review`);
     // Phase 5 (ADR-084): what genuinely needs Julian (judgment / authorization / principal-reserved), as escalated by the
     // event engine from state — the single list both the brief and the escalation digest use.
-    for (const e of (await pool.query(`SELECT e.summary, e.due_at, e.needs, a.name AS area FROM escalation e LEFT JOIN area a ON a.id = e.area_id WHERE e.status = 'open' ORDER BY e.due_at NULLS LAST, e.created_at LIMIT 10`)).rows)
+    for (const e of (await pool.query(`SELECT e.summary, e.due_at, e.needs, a.name AS area FROM escalation e LEFT JOIN area a ON a.id = e.area_id WHERE e.status = 'open' AND e.needs <> 'requested' ORDER BY e.due_at NULLS LAST, e.created_at LIMIT 10`)).rows)
         decisions.push(`${e.area ? `[${e.area}] ` : ""}${e.summary}${e.due_at ? ` (by ${new Date(e.due_at).toISOString().slice(0, 10)})` : ""}`);
     const sync = (await pool.query(`SELECT after FROM event WHERE action = 'career_synced' AND occurred_at > now() - interval '48 hours' AND (after->>'dryRun')::boolean IS NOT TRUE ORDER BY occurred_at DESC LIMIT 1`)).rows[0]?.after;
     for (const d of (sync?.decisions ?? []).slice(0, 5))
@@ -257,9 +257,9 @@ export async function executiveBriefV2(pool, now = new Date()) {
         if (!("error" in s))
             health.push(s);
     }
-    for (const s of health)
-        if (s.color === "red")
-            blocked.push(`${s.area} is RED: ${s.breaches.join("; ")}`);
+    // Phase 7: a red Area is Finagai's to reconcile (management by exception) — a risk, not Julian's blocked work; the
+    // individual items that need him (overdue waits, etc.) are escalated on their own.
+    const redAreas = health.filter((s) => s.color === "red").map((s) => `${s.area} is RED: ${s.breaches.join("; ")} — Finagai is reconciling it`);
     const changes = [];
     if (exp?.length)
         changes.push(`${exp.length} stale Mac task(s) expired unanswered (${exp.join(", ")}) — say "resume <code>" only if still wanted`);
@@ -291,10 +291,23 @@ export async function executiveBriefV2(pool, now = new Date()) {
     for (const s of health)
         if (s.color === "yellow")
             risks.push(`${s.area} is yellow: ${s.warnings.slice(0, 2).join("; ")}`);
+    // Phase 7 (ADR-086): exceptions Finagai is handling itself are risks/changes, never decisions; what only Julian can
+    // clear arrives as an escalation above. Recently cleared problems are compressed into one line.
+    risks.push(...redAreas);
+    const exs = await pool.query(`SELECT owner, severity, summary, detector FROM operating_exception WHERE status = 'open' ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END LIMIT 8`).catch(() => ({ rows: [] }));
+    for (const x of exs.rows)
+        if (x.owner === "finagai" && x.severity !== "info" && x.detector !== "area_breach")
+            risks.push(`${x.summary}`);
+    const cleared = Number((await pool.query(`SELECT count(*)::int AS n FROM operating_exception WHERE status = 'resolved' AND resolved_at > now() - interval '24 hours'`).catch(() => ({ rows: [{ n: 0 }] }))).rows[0].n);
+    if (cleared)
+        changes.push(`${cleared} problem(s) cleared in the last 24 h (Finagai fixed them or they went away)`);
     const completed = (await pool.query(`SELECT origin_message, verification_status FROM interaction WHERE state = 'completed' AND completed_at > now() - interval '24 hours' ORDER BY completed_at DESC LIMIT 6`)).rows
         .map((r) => `${String(r.origin_message ?? "").slice(0, 80)}${r.verification_status && r.verification_status !== "verified" ? ` (${r.verification_status})` : ""}`);
     const rest = { areas: health.map((s) => `${s.area}: ${s.color}`), waitingOpen: Number((await pool.query(`SELECT count(*)::int AS n FROM followup WHERE state IN ('open','waiting')`)).rows[0].n) };
-    const headline = decisions.length + blocked.length === 0 ? "Nothing needs you right now." : `${decisions.length + blocked.length} thing(s) need you.`;
+    const handling = exs.rows.filter((x) => x.owner === "finagai").length;
+    const headline = decisions.length + blocked.length === 0
+        ? (handling ? `Nothing needs you right now — Finagai is handling ${handling} exception(s) itself.` : "Nothing needs you right now — all normal.")
+        : `${decisions.length + blocked.length} thing(s) need you.`;
     return { generatedAt: now.toISOString(), headline, decisions, blocked, changes, risks, completed, rest };
 }
 //# sourceMappingURL=operating.js.map

@@ -14,6 +14,7 @@ import { createLogger } from "../server/log.js";
 import { dispatch, MAX_JOB_ATTEMPTS, slotIdempotencyKey } from "./dispatcher.js";
 import { deliverOnce } from "../notify/delivery.js";
 import { placeholderHandlers } from "./handlers.js";
+import { eventLoopWatchdog } from "../exceptions/watchdog.js";
 
 async function main() {
   const cfg = loadConfig(process.env);
@@ -59,6 +60,13 @@ async function main() {
         subject: `Finagai: scheduled job failed (${r.job})`,
         text: `The ${r.job} job for ${r.scheduledFor.toISOString()} failed after ${r.attempt} attempts. Check job_run and the service logs.`,
       }).catch((e) => log("job failure alert not sent", { error: e instanceof Error ? e.name : "error" }));
+    }
+    // Phase 7 (ADR-086): dead-man check on Core's event loop (it cannot report its own death).
+    if (process.env.FINAGAI_EVENT_LOOP !== "off") {
+      const d = j3Deps();
+      const w = await eventLoopWatchdog(d.pool, new Date(), { store: d.store, sender: d.sender, timezone: d.timezone })
+        .catch((e) => ({ error: e instanceof Error ? e.message.slice(0, 160) : "error" }));
+      log("event loop watchdog", w as Record<string, unknown>);
     }
   } finally {
     await pool?.end();

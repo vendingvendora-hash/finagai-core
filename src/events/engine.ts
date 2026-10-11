@@ -14,6 +14,9 @@ import { appendEvent } from "../db/index.js";
 import { deliverOnce, type DeliveryStore, type EmailSender } from "../notify/delivery.js";
 import { RULE_NEEDS } from "../cos/lifecycle.js";
 import { routingOverride } from "../learning/apply.js";
+import { runExceptions } from "../exceptions/index.js";
+import { evaluateRules } from "../exceptions/rules.js";
+import type { DetectorDeps } from "../exceptions/detectors.js";
 import type { AreaModule, EngineCtx, EscalationNeed, RawEvent, StoredEvent, Subscription, Workflow } from "./types.js";
 
 const LOCK_KEY = 84_005;   // pg advisory lock id for the event engine
@@ -21,6 +24,8 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex").slice(0,
 
 export interface EngineDeps {
   modules: AreaModule[];
+  /** Phase 7 (ADR-086): what the exception detectors may read beyond the database (budget meter) */
+  exceptions?: DetectorDeps;
   notify?: { store: DeliveryStore; sender: EmailSender; timezone: string; quietHours?: [number, number] } | undefined;
 }
 export interface TickResult {
@@ -29,6 +34,7 @@ export interface TickResult {
   events: Array<{ summary: string; kind: string; status: string; routes: Array<{ subscription: string; area: string; workflow: string; why: string }>; reason?: string | null }>;
   workflows: Array<{ name: string; events: number; ok: boolean; changes: string[]; error?: string }>;
   escalations: { opened: string[]; resolved: string[]; open: number; notified: string[]; held?: string };
+  exceptions?: { open: number; opened: string[]; resolved: string[]; remedied: string[]; rulesFired: string[]; problems: string[] };
 }
 
 function localHour(now: Date, tz: string): number { return Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "numeric", hourCycle: "h23" }).format(now)); }
@@ -55,7 +61,7 @@ export async function runTick(pool: pg.Pool, ctxIn: Omit<EngineCtx, "pool">, dep
 }
 
 const statsOf = (r: TickResult) => ({ watchers: r.watchers, events: r.events.length, routed: r.events.filter((e) => e.routes.length).length,
-  workflows: r.workflows.map((w) => ({ name: w.name, events: w.events, ok: w.ok, changes: w.changes.length, error: w.error ?? null })), escalations: r.escalations });
+  workflows: r.workflows.map((w) => ({ name: w.name, events: w.events, ok: w.ok, changes: w.changes.length, error: w.error ?? null })), escalations: r.escalations, exceptions: r.exceptions ?? null });
 
 async function tick(ctx: EngineCtx, deps: EngineDeps, result: TickResult) {
   const { pool } = ctx;
@@ -140,11 +146,20 @@ async function tick(ctx: EngineCtx, deps: EngineDeps, result: TickResult) {
     }
   }
 
-  // 4) escalations: derived from state (the single source of truth) + workflow judgments
+  // 4) Phase 7 (ADR-086): management by exception — detect what is wrong, remedy what Finagai owns, and add only what
+  //    needs Julian (or outlived Finagai's remedies); then Julian's own "tell me when" rules.
+  try {
+    const ex = await runExceptions(pool, ctx.now, ctx.dryRun, deps.exceptions ?? {});
+    const rules = await evaluateRules(pool, ctx.now, ctx.dryRun, deps.exceptions ?? {});
+    needs.push(...ex.needs, ...rules.needs);
+    result.exceptions = { open: ex.open, opened: ex.opened, resolved: ex.resolved, remedied: ex.remedied, rulesFired: rules.fired, problems: [...ex.detectorProblems, ...rules.problems] };
+  } catch (e) { result.exceptions = { open: -1, opened: [], resolved: [], remedied: [], rulesFired: [], problems: [String((e as Error)?.message ?? e).slice(0, 200)] }; }
+
+  // 5) escalations: derived from state (the single source of truth) + workflow judgments
   needs.push(...await stateNeeds(pool, ctx.now));
   await reconcileEscalations(ctx, needs, result);
 
-  // 5) one digest for new escalations
+  // 6) one digest for new escalations
   if (deps.notify) await notifyDigest(ctx, deps.notify, result);
 }
 
@@ -172,10 +187,15 @@ export async function stateNeeds(db: Pick<pg.Pool, "query">, now: Date): Promise
 async function reconcileEscalations(ctx: EngineCtx, needs: EscalationNeed[], result: TickResult) {
   const { pool } = ctx;
   const want = new Map(needs.map((n) => [n.key, n]));
-  const open = (await pool.query(`SELECT e.id, e.key, e.summary, e.followup_id, f.state AS fstate FROM escalation e LEFT JOIN followup f ON f.id = e.followup_id WHERE e.status = 'open'`)).rows;
+  const open = (await pool.query(`SELECT e.id, e.key, e.summary, e.needs, e.notified_at, e.followup_id, f.state AS fstate FROM escalation e LEFT JOIN followup f ON f.id = e.followup_id WHERE e.status = 'open'`)).rows;
   // Resolve what no longer needs Julian (its follow-up closed / moved on, or a state-derived need disappeared).
   for (const o of open) {
-    const stateDerived = /^(followup|overdue|lesson):/.test(o.key);
+    // A notification Julian asked for is done once it has been delivered.
+    if (o.needs === "requested") {
+      if (o.notified_at) { result.escalations.resolved.push(o.summary); if (!ctx.dryRun) await pool.query(`UPDATE escalation SET status = 'resolved', resolved_at = now(), resolution = 'told' WHERE id = $1`, [o.id]); }
+      continue;
+    }
+    const stateDerived = /^(followup|overdue|lesson|exception):/.test(o.key);
     if ((o.followup_id && (o.fstate === "done" || o.fstate === "cancelled")) || (stateDerived && !want.has(o.key))) {
       result.escalations.resolved.push(o.summary);
       if (!ctx.dryRun) await pool.query(`UPDATE escalation SET status = 'resolved', resolved_at = now(), resolution = $2 WHERE id = $1`, [o.id, o.fstate === "done" || o.fstate === "cancelled" ? `follow-up ${o.fstate}` : "no longer needed"]);
@@ -194,7 +214,7 @@ async function reconcileEscalations(ctx: EngineCtx, needs: EscalationNeed[], res
     : Number((await pool.query(`SELECT count(*)::int AS n FROM escalation WHERE status = 'open'`)).rows[0].n);
 }
 
-const NEEDS_LABEL = { judgment: "your decision", authorization: "your authorization", principal_reserved: "only you can do this" } as const;
+const NEEDS_LABEL = { judgment: "your decision", authorization: "your authorization", principal_reserved: "only you can do this", requested: "you asked to be told" } as const;
 
 async function notifyDigest(ctx: EngineCtx, n: NonNullable<EngineDeps["notify"]>, result: TickResult) {
   const rows = (await ctx.pool.query(`SELECT e.id, e.key, e.needs, e.summary, e.due_at, a.name AS area FROM escalation e LEFT JOIN area a ON a.id = e.area_id
@@ -207,9 +227,13 @@ async function notifyDigest(ctx: EngineCtx, n: NonNullable<EngineDeps["notify"]>
   if (ctx.dryRun) { result.escalations.notified = pendingPreview; return; }
   const lines = rows.map((r) => `• ${r.area ? `[${r.area}] ` : ""}${r.summary}${r.due_at ? ` (by ${new Date(r.due_at).toISOString().slice(0, 10)})` : ""} — ${NEEDS_LABEL[r.needs as keyof typeof NEEDS_LABEL]}`);
   const key = `escalations:${sha(rows.map((r) => r.key).sort().join("|"))}`;
+  const told = rows.filter((r) => r.needs === "requested"), act = rows.filter((r) => r.needs !== "requested");
   const r = await deliverOnce(n.store, n.sender, key, "escalation_digest", {
-    subject: rows.length === 1 ? `Finagai needs you: ${String(rows[0].summary).slice(0, 80)}` : `Finagai needs you on ${rows.length} things`,
-    text: `Only the items below need you; everything else Finagai is handling.\n\n${lines.join("\n")}\n\nAsk Finagai in Claude (e.g. "what needs me?") to act on any of them.`,
+    subject: !act.length ? `Finagai: ${told.length === 1 ? String(told[0].summary).replace(/^You asked to be told: /, "").slice(0, 90) : `${told.length} things you asked to be told about`}`
+      : act.length === 1 ? `Finagai needs you: ${String(act[0].summary).slice(0, 80)}` : `Finagai needs you on ${act.length} things`,
+    text: [act.length ? `Only the items below need you; everything else Finagai is handling.\n\n${lines.filter((_, i) => rows[i].needs !== "requested").join("\n")}` : "",
+      told.length ? `${act.length ? "\n\n" : ""}You asked to be told (nothing to do):\n${lines.filter((_, i) => rows[i].needs === "requested").join("\n")}` : "",
+      act.length ? `\n\nAsk Finagai in Claude (e.g. "what needs me?") to act on any of them.` : ""].join(""),
   });
   if (r === "sent" || r === "already_sent") {
     await ctx.pool.query(`UPDATE escalation SET notified_at = now() WHERE id = ANY($1::uuid[])`, [rows.map((x) => x.id)]);
@@ -230,7 +254,7 @@ export async function proactivityStatus(pool: pg.Pool, limit = 25) {
   return {
     heartbeat: last ? { lastTick: last.started_at, status: last.status, ageMinutes: Math.round((Date.now() - new Date(last.started_at).getTime()) / 60_000), error: last.error } : null,
     last24h: Object.fromEntries(counts.map((c) => [c.status, c.n])),
-    needsJulian: escalations.filter((e) => e.status === "open").map((e) => ({ area: e.area, needs: NEEDS_LABEL[e.needs as keyof typeof NEEDS_LABEL], summary: e.summary, due: e.due_at, notified: !!e.notified_at })),
+    needsJulian: escalations.filter((e) => e.status === "open" && e.needs !== "requested").map((e) => ({ area: e.area, needs: NEEDS_LABEL[e.needs as keyof typeof NEEDS_LABEL], summary: e.summary, due: e.due_at, notified: !!e.notified_at })),
     recentlyResolved: escalations.filter((e) => e.status === "resolved").map((e) => e.summary),
     recentEvents: events, watchers: cursors, ticks,
   };

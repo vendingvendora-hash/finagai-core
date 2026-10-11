@@ -1,6 +1,6 @@
 {
- "count": 55,
- "digest": "7c2728a0db92",
+ "count": 58,
+ "digest": "bb1861cd165d",
  "names": [
   "list_tools",
   "call_tool",
@@ -54,6 +54,9 @@
   "run_learning",
   "teach_finagai",
   "forget_lesson",
+  "exceptions",
+  "tell_me_when",
+  "stop_telling_me",
   "executive_brief",
   "operating_review",
   "get_latest_review"

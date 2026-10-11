@@ -118,7 +118,13 @@ describe.skipIf(!admin || !migT || !appT)("event-driven proactivity (Phase 5, AD
     await resolveWaiting(pool, "Beth Young", "Beth replied: decision next week");
     const after = await tick(new Date("2026-10-15T15:12:00Z"));
     expect(after.escalations.resolved).toEqual([expect.stringMatching(/No answer from Beth Young/)]);
-    expect((await proactivityStatus(pool)).needsJulian).toEqual([]);
+    // Phase 7 (ADR-086): closing Beth's wait left the Altarum project without a next step (Career red: no next action).
+    // The area-breach remedy reconciled it at once, and the lifecycle's next step — 10 days without news after the
+    // interview — is Julian's (a nudge goes out as him). Before Phase 7 nothing surfaced it until some deadline woke
+    // the lifecycle. It is the only thing that needs him.
+    expect(after.escalations.opened).toEqual([expect.stringMatching(/^\[principal_reserved\] Approve a follow-up to Beth Young on the Pricing Analyst role at Altarum/)]);
+    expect((await proactivityStatus(pool)).needsJulian.map((n) => n.summary)).toEqual([expect.stringMatching(/^Approve a follow-up to Beth Young/)]);
+    expect(sent).toHaveLength(2);
   });
 
   it("a reply from someone Julian waits on closes the wait (never a false \"no answer\"); an unanswered one is escalated, held overnight", async () => {
@@ -136,10 +142,10 @@ describe.skipIf(!admin || !migT || !appT)("event-driven proactivity (Phase 5, AD
     const late = await tick(new Date("2026-10-17T03:00:00Z"));
     expect(late.escalations.opened).toEqual([expect.stringMatching(/No answer from Sam Lee/)]);
     expect(late.escalations.held).toMatch(/quiet hours/);
-    expect(sent).toHaveLength(1);
+    expect(sent).toHaveLength(2);
     const morning = await tick(new Date("2026-10-17T12:00:00Z"));                                  // 08:00 ET
     expect(morning.escalations.notified).toEqual([expect.stringMatching(/No answer from Sam Lee/)]);
-    expect(sent).toHaveLength(2);
+    expect(sent).toHaveLength(3);
   });
 
   it("a failing workflow does not lose the event (retried next tick) and a concurrent tick is skipped", async () => {

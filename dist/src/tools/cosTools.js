@@ -9,6 +9,8 @@ import { toolRef } from "./manifest.js";
 import { AREA_MODULES, ROUTABLE_WORKFLOWS, proactivityStatus, runTick } from "../events/index.js";
 import { listLessons, runLearning } from "../learning/index.js";
 import { forgetLesson, teachFinagai } from "../learning/teach.js";
+import { exceptionsStatus } from "../exceptions/index.js";
+import { EVENTS, METRICS, addRule, listRules, removeRule } from "../exceptions/rules.js";
 import { findOpportunity, inTx, pipelineSummary, recordOpportunityUpdate, trackOpportunity } from "../cos/opportunities.js";
 import { addWaiting, areaStatus, ensureArea, executiveBriefV2, placeUnderArea, resolveWaiting, setObjective, waitingOn } from "../cos/operating.js";
 export function registerCosTools(server, { ok, fail }, pool, google) {
@@ -173,6 +175,26 @@ export function registerCosTools(server, { ok, fail }, pool, google) {
         description: "Stop using something Finagai learned (by its key from lessons) — e.g. Julian says a lesson is wrong or no longer true. History is kept; a forgotten lesson is never revived automatically. Forgetting an approved change returns the Area to its default.",
         inputSchema: z.object({ key: z.string().min(3).max(300), reason: z.string().min(2).max(200) }),
     }, async ({ key, reason }) => out("forget_lesson", await forgetLesson(pool, key, reason)));
+    // Phase 7 (ADR-086): management by exception.
+    server.registerTool("exceptions", {
+        description: "\"Is anything wrong?\" / \"Is everything running?\" — what is going wrong right now across Finagai and Julian's Areas, who owns each problem (only-Julian vs Finagai handling it, with its remedy and tries), what cleared recently, and Julian's active \"tell me when\" rules. Says \"All normal\" when nothing is wrong. Read-only.",
+        inputSchema: z.object({}),
+        annotations: { readOnlyHint: true },
+    }, async () => ok("exceptions", { ...(await exceptionsStatus(pool)), yourRules: await listRules(pool) }));
+    server.registerTool("tell_me_when", {
+        description: `Julian states a "tell me when …" rule — Finagai only NOTIFIES him (once, when it becomes true; again only after it clears), it never acts on it. Either a metric with op/value — ${Object.entries(METRICS).map(([k, v]) => `${k}: ${v.describe}`).join("; ")} — or an event: ${Object.entries(EVENTS).map(([k, v]) => `${k}: ${v.describe}`).join("; ")}. Examples: "tell me when a Career job reaches interviewing" → event opportunity_status, area Career, status interviewing; "tell me if I apply to fewer than 3 jobs a week" → metric applications_last_7d, area Career, op <, value 3; "tell me if spend passes $25" → spend_month_usd > 25.`,
+        inputSchema: z.object({ statement: z.string().min(3).max(300).describe("Julian's words"), metric: z.string().max(60).optional(), event: z.string().max(60).optional(),
+            area: z.string().max(200).optional(), status: z.string().max(40).optional(), op: z.enum([">", ">=", "<", "<=", "="]).optional(), value: z.number().optional() }),
+    }, async (a) => {
+        if (!a.metric === !a.event)
+            return fail("tell_me_when", "give exactly one of metric or event");
+        return out("tell_me_when", await addRule(pool, { statement: a.statement, ...(a.metric ? { metric: a.metric } : {}), ...(a.event ? { event: a.event } : {}), area: a.area ?? null, status: a.status ?? null,
+            ...(a.op ? { op: a.op } : {}), ...(a.value !== undefined ? { value: a.value } : {}) }));
+    });
+    server.registerTool("stop_telling_me", {
+        description: "Remove one of Julian's \"tell me when\" rules, by its number (from exceptions → yourRules) or by words from it.",
+        inputSchema: z.object({ rule: z.string().min(1).max(200) }),
+    }, async ({ rule }) => out("stop_telling_me", await removeRule(pool, rule)));
     server.registerTool("executive_brief", {
         description: "Julian's executive brief, management by exception: 1) decisions he must make, 2) blocked work, 3) important changes, 4) deadlines and risks, 5) what Finagai completed, 6) everything else compressed. Lead with the headline; do not pad.",
         inputSchema: z.object({}),
