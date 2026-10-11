@@ -83,11 +83,17 @@ describe.skipIf(!admin || !migT || !appT)("Live State Stream (ADR-087)", () => {
     expect((await q(`SELECT count(*)::int AS n FROM live_event`))[0].n).toBe(n);
   });
 
-  it("a cursor older than the retained stream is told to re-snapshot (never silently skips)", async () => {
-    const oldest = Number((await q(`SELECT min(seq) AS s FROM live_event`))[0].s);
-    await q(`DELETE FROM live_event WHERE seq < $1`, [oldest + 3]);                  // simulate retention pruning
-    const r = await readAfter(pool, oldest, {});
+  it("a cursor older than the stream window is told to re-snapshot (never silently skips)", async () => {
+    const b = (await q(`SELECT min(seq) AS lo, max(seq) AS hi FROM live_event`))[0];
+    const later = new Date(Date.now() + 31 * 86_400_000);                           // everything published so far is now outside the window
+    const r = await readAfter(pool, Number(b.lo), {}, 500, later);
     expect(r).toEqual(expect.objectContaining({ reset: true, reason: expect.stringMatching(/take a new snapshot/) }));
+    expect((await readAfter(pool, Number(b.hi), {}, 500, later)).reset).toBe(false);   // a cursor at the head is still fine
+  });
+
+  it("archive-only invariant: the app role holds no DELETE privilege anywhere (Core's preflight refuses to start otherwise)", async () => {
+    const del = (await q(`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'finagai' AND c.relkind = 'r' AND has_table_privilege(current_user, c.oid, 'DELETE')`)).map((r) => r.relname);
+    expect(del).toEqual([]);
   });
 
   it("attributable: real-world input → classified → workflow → state change → escalation → notification, one correlation, causal links", async () => {

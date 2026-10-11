@@ -33,10 +33,8 @@ export async function publish(pool) {
         c.release();
     }
 }
-/** Drop stream positions older than the retention window (the events themselves are never deleted). */
-export async function pruneStream(db) {
-    return (await db.query(`DELETE FROM live_event WHERE published_at < now() - make_interval(days => $1)`, [RETENTION_DAYS])).rowCount ?? 0;
-}
+/** Retention is a READ window, not deletion: the app role is archive-only (no DELETE anywhere — Core's preflight
+ *  refuses to start otherwise). Positions older than the window cannot be resumed from; the rows themselves are tiny. */
 // ---------------------------------------------------------------------------------------------------- envelopes
 const SECRET_KEY = /pass(word|code)?|secret|token|cookie|authori[sz]ation|credential|api[-_]?key|private|otp|verifier|session|nonce|challenge|b64|base64|signature|ssn/i;
 const SECRET_VALUE = /\beyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}\b|\b(sk|pk|rk)-[A-Za-z0-9_-]{16,}\b|\bBearer\s+[A-Za-z0-9._-]{16,}/g;
@@ -109,22 +107,26 @@ function keep(e, f, areaId) {
         return false;
     return true;
 }
-/** The stream's retained range. A cursor below `oldest` cannot be resumed: take a new snapshot. */
-export async function streamBounds(db) {
-    const r = (await db.query(`SELECT min(seq) AS oldest, max(seq) AS newest FROM live_event`)).rows[0];
+/** The stream's resumable range: positions published within the retention window. A cursor below `oldest` cannot
+ *  be resumed: take a new snapshot. */
+export async function streamBounds(db, now = new Date()) {
+    const r = (await db.query(`SELECT (SELECT min(seq) FROM live_event WHERE published_at > $1::timestamptz - make_interval(days => $2)) AS oldest, max(seq) AS newest FROM live_event`, [now, RETENTION_DAYS])).rows[0];
     return { oldest: r.oldest === null ? null : Number(r.oldest), newest: r.newest === null ? 0 : Number(r.newest) };
 }
 /** Ordered events after a cursor (exclusive). Filtering never moves the cursor backwards: it advances over skipped rows. */
-export async function readAfter(db, after, f = {}, limit = 500) {
-    const b = await streamBounds(db);
-    if (after > 0 && b.oldest !== null && after < b.oldest - 1)
-        return { reset: true, reason: `cursor ${after} is older than the retained stream (oldest ${b.oldest}) — take a new snapshot`, oldest: b.oldest };
-    const rows = (await db.query(`SELECT l.seq, ${EVENT_COLS} FROM live_event l JOIN event e ON e.id = l.event_id WHERE l.seq > $1 ORDER BY l.seq LIMIT $2`, [after, limit + 1])).rows;
+export async function readAfter(db, after, f = {}, limit = 500, now = new Date()) {
+    const b = await streamBounds(db, now);
+    const expired = after > 0 && after < b.newest && (b.oldest === null || after < b.oldest - 1);
+    if (expired)
+        return { reset: true, reason: `cursor ${after} is older than the ${RETENTION_DAYS}-day stream window (oldest resumable ${b.oldest ?? "none"}) — take a new snapshot`, oldest: b.oldest };
+    // A fresh subscriber (after = 0) starts at the beginning of the window, not at the dawn of history.
+    const from = after === 0 && b.oldest !== null ? b.oldest - 1 : after;
+    const rows = (await db.query(`SELECT l.seq, ${EVENT_COLS} FROM live_event l JOIN event e ON e.id = l.event_id WHERE l.seq > $1 ORDER BY l.seq LIMIT $2`, [from, limit + 1])).rows;
     const more = rows.length > limit;
     const page = rows.slice(0, limit);
     const areaId = await resolveArea(db, f.area);
     const events = (await toEnvelopes(db, page)).filter((e) => keep(e, f, areaId));
-    return { reset: false, events, cursor: page.length ? Number(page[page.length - 1].seq) : after, more };
+    return { reset: false, events, cursor: page.length ? Number(page[page.length - 1].seq) : from, more };
 }
 /** Collapse runs of low-value events (same class + entity type) into one message carrying the count. Pure. */
 export function coalesce(events, minRun = 3) {
@@ -212,18 +214,11 @@ export async function snapshot(pool, f = {}) {
         c.release();
     }
 }
-/** Background publisher: every 5 s (and the stream endpoints publish on demand); prunes the index once a day. */
+/** Background publisher: every 5 s (the stream endpoints also publish on demand). */
 export function startLivePublisher(pool, log, everyMs = 5000) {
-    let lastPrune = 0;
     const run = async () => {
         try {
             await publish(pool);
-            if (Date.now() - lastPrune > 86_400_000) {
-                lastPrune = Date.now();
-                const n = await pruneStream(pool);
-                if (n)
-                    log("live stream pruned", { rows: n });
-            }
         }
         catch (e) {
             log("live publish failed", { error: String(e?.message ?? e).slice(0, 160) });

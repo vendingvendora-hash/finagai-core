@@ -60,9 +60,9 @@ describe("safety and delivery helpers", () => {
 
 describe("read-only trust boundary (structural)", () => {
   const live = (f: string) => readFileSync(join(SRC, "live", f), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
-  it("the stream code writes only its own ordering index — never operational state", () => {
+  it("the stream code only appends to its own ordering index — never operational state, never a DELETE", () => {
     const writes = readdirSync(join(SRC, "live")).flatMap((f) => [...live(f).matchAll(/\b(INSERT INTO|UPDATE|DELETE FROM)\s+([a-z_]+)/g)].map((m) => `${m[1]} ${m[2]}`));
-    expect(new Set(writes)).toEqual(new Set(["INSERT INTO live_event", "DELETE FROM live_event"]));
+    expect(new Set(writes)).toEqual(new Set(["INSERT INTO live_event"]));   // archive-only: no DELETE, not even for retention
     expect(live("http.ts")).not.toMatch(/\bappendEvent\(|from "\.\.\/(governance|approval|pipelines)|createTask\(/);
   });
   it("the HTTP surface is GET-only", () => {

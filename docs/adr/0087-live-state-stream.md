@@ -26,7 +26,7 @@ Phase 8's reliability and observability must build on the same foundation.
   This is needed because identity ids are allocated at insert, not at commit: a long transaction can make a *lower* id
   visible *after* a higher one, and a cursor over raw ids would silently skip it. A single publisher (advisory lock)
   inserts newly visible events within a 20,000-id late-commit window.
-- The index is pruned after 30 days. Events are never deleted.
+- Retention is a 30-day **read window**: positions older than 30 days cannot be resumed from. Nothing is ever deleted; the app role stays archive-only (see the 2026-10-11 deploy fix below).
 
 **Causal context without touching every call site.** `withCause()` (AsyncLocalStorage) carries correlation, cause
 ids and Area through awaits, and `appendEvent` fills them automatically:
@@ -129,3 +129,15 @@ Also deferred:
 `test/unit/live-contract.test.ts` checks that every action written in `src` is classified (it found two unclassified
 ones, now fixed), that sanitization works, that coalescing keeps the resume point, and that the stream code writes only
 its index and serves GET only.
+
+## Deploy fix (2026-10-11, release #43 → hotfix 32)
+Release #43 applied migration 0034, and then Core **refused to start**. Its preflight requires the app role to hold no
+DELETE privilege anywhere (the archive-only invariant), and 0034 had granted DELETE on `live_event` for pruning. The
+running Core stayed on the previous version, and nothing broke.
+
+The fix:
+- **Migration 0035** revokes that DELETE.
+- **Retention became a read window.** A cursor whose position was published more than 30 days ago gets a `reset`. A
+  fresh subscriber (cursor 0) starts at the beginning of the window.
+- **A new integration test** asserts the app role holds no DELETE on any table. It would have caught this.
+- **The structural test** now allows only INSERT on `live_event`.
