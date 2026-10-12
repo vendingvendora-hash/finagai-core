@@ -118,8 +118,12 @@ describe.skipIf(!admin || !migT || !appT)("Phase 8 continuous reliability (ADR-0
     expect(healthy.selfCheck.runs).toBeGreaterThanOrEqual(4);
     // flapping: the same exception opening again and again is named
     for (let i = 0; i < 4; i++) await appendEvent(pool, { actor: "cos", action: "exception_opened", entityType: "operating_exception", entityId: randomUUID(), causeIds: [], before: null, after: { key: "watcher:testmail" } });
+    // call_tool's routing record is not a failed call (Phase 8 live: 28/28 call_tool records counted as failures)
+    for (let i = 0; i < 4; i++) await appendEvent(pool, { actor: "system", action: "tool_called", entityType: "tool", after: { tool: "call_tool", routedTo: "tell_me_when" } });
+    for (let i = 0; i < 4; i++) await appendEvent(pool, { actor: "system", action: "tool_called", entityType: "tool", after: { tool: "tell_me_when", outcome: "ok" } });
     await publish(pool);
     const r = await reliabilityReport(pool, { days: 1 });
+    expect(r.tools).toEqual(expect.objectContaining({ calls: 4, failed: 0, failureRate: 0 }));
     expect(r.exceptions.flapping).toEqual(["watcher:testmail: opened 4×"]);
     expect(r.loop.ticks).toBeGreaterThanOrEqual(5);
     expect(r.stream.unpublished).toBe(0);

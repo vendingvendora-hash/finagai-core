@@ -36,7 +36,22 @@ export async function publish(pool) {
 /** Retention is a READ window, not deletion: the app role is archive-only (no DELETE anywhere — Core's preflight
  *  refuses to start otherwise). Positions older than the window cannot be resumed from; the rows themselves are tiny. */
 // ---------------------------------------------------------------------------------------------------- envelopes
-const SECRET_KEY = /pass(word|code)?|secret|token|cookie|authori[sz]ation|credential|api[-_]?key|private|otp|verifier|session|nonce|challenge|b64|base64|signature|ssn/i;
+/**
+ * A key is secret when one of its WORDS is a secret word (camelCase / snake_case / kebab-case split), or it names a
+ * key pair like apiKey / private_key. Words, not substrings (Phase 8 live acceptance: the substring "pass" redacted the
+ * self-check's own `allPass` and `passed` verdict fields on the stream; "token" would also hide `inputTokens` counts).
+ */
+const SECRET_WORDS = new Set(["password", "passwords", "passwd", "passcode", "passphrase", "secret", "secrets", "token", "tokens", "cookie", "cookies",
+    "authorization", "authorisation", "auth", "credential", "credentials", "apikey", "otp", "verifier", "session", "nonce", "challenge", "b64", "base64", "signature", "ssn", "jwt", "bearer"]);
+const SECRET_PAIR = /api_?key|private_?key|secret_?key|access_?key|client_?secret/;
+/** Count-like words: "inputTokens", "maxTokens" are usage numbers, not credentials. */
+const COUNT_PREFIX = new Set(["input", "output", "max", "min", "cache", "cachewrite", "cacheread", "thinking", "total", "used", "prompt", "completion"]);
+export function isSecretKey(k) {
+    const words = k.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[\s_\-.]+/).map((w) => w.toLowerCase()).filter(Boolean);
+    if (SECRET_PAIR.test(words.join("_")) || SECRET_PAIR.test(words.join("")))
+        return true;
+    return words.some((w, i) => SECRET_WORDS.has(w) && !(w === "tokens" && i > 0 && COUNT_PREFIX.has(words[i - 1])));
+}
 const SECRET_VALUE = /\beyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}\b|\b(sk|pk|rk)-[A-Za-z0-9_-]{16,}\b|\bBearer\s+[A-Za-z0-9._-]{16,}/g;
 /** Recursively remove secret-looking keys and values; bound sizes. Pure. */
 export function sanitize(v, depth = 0) {
@@ -52,7 +67,7 @@ export function sanitize(v, depth = 0) {
         return v.slice(0, 30).map((x) => sanitize(x, depth + 1));
     const out = {};
     for (const [k, x] of Object.entries(v).slice(0, 40))
-        out[k] = SECRET_KEY.test(k) ? "[redacted]" : sanitize(x, depth + 1);
+        out[k] = isSecretKey(k) ? "[redacted]" : sanitize(x, depth + 1);
     return out;
 }
 const AREA_OF = {

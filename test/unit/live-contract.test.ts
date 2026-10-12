@@ -33,6 +33,16 @@ describe("ontology", () => {
   it("classification reads the stored row (pure): ownership, verification, confidence", () => {
     expect(classify({ action: "exception_opened", entity_type: "operating_exception", after: { owner: "julian" }, before: null, approval_id: null })).toEqual(expect.objectContaining({ class: "exception.opened", nextOwner: "julian" }));
     expect(classify({ action: "control_task_done", entity_type: "control_task", after: { verification: "verified" }, before: null, approval_id: null }).verified).toBe(true);
+    // Phase 8 live: call_tool's routing record (no outcome) was classified tool.failed — it is a routing note
+    const row = (after: Record<string, unknown>) => ({ action: "tool_called", entity_type: "tool", after, before: null, approval_id: null });
+    expect(classify(row({ tool: "call_tool", routedTo: "tell_me_when" })).class).toBe("tool.routed");
+    expect(classify(row({ tool: "call_tool", routedTo: "tell_me_when", outcome: "routed" })).class).toBe("tool.routed");
+    expect(classify(row({ tool: "waiting_on", outcome: "ok" })).class).toBe("tool.succeeded");
+    expect(classify(row({ tool: "waiting_on", outcome: "error" })).class).toBe("tool.failed");
+    // the self-check verdict and job runs are classified
+    expect(classify({ action: "reliability_checked", entity_type: null, after: { allPass: false, failing: ["ordering"] }, before: null, approval_id: null }).class).toBe("system.check_failed");
+    expect(classify({ action: "reliability_checked", entity_type: null, after: { allPass: false, failing: [], pending: ["emailToStateChain"] }, before: null, approval_id: null })).toEqual(expect.objectContaining({ class: "system.checked", lowValue: true }));
+    expect(classify({ action: "job_finished", entity_type: null, after: { status: "failed" }, before: null, approval_id: null })).toEqual(expect.objectContaining({ class: "workflow.failed", nextOwner: "finagai" }));
     expect(classify({ action: "lesson_learned", entity_type: "lesson", after: { key: "perf:tool:x", confidence: 0.9 }, before: null, approval_id: null })).toEqual(expect.objectContaining({ class: "capability.measured", confidence: 0.9 }));
     expect(classify({ action: "lesson_proposed", entity_type: "lesson", after: { effect: { type: "procedure" } }, before: null, approval_id: null }).class).toBe("procedure.discovered");
     expect(classify({ action: "tool_called", entity_type: "tool", after: { outcome: "ok" }, before: null, approval_id: null })).toEqual(expect.objectContaining({ class: "tool.succeeded", lowValue: true }));
@@ -48,6 +58,12 @@ describe("safety and delivery helpers", () => {
     expect(JSON.stringify(s)).not.toMatch(/abcdefghijklmnopqrstuvwxyz|eyJabcdefghijk\./);
     expect((s.big as string).length).toBe(500);
     expect(s.ok).toBe(3);
+  });
+  it("redaction matches secret WORDS, not substrings (Phase 8 live: the self-check's allPass/passed were redacted)", () => {
+    const s = sanitize({ allPass: true, passed: 10, pass: false, inputTokens: 120, maxTokens: 900, outputTokens: 30, passkey_enrolled: 1,
+      refreshTokens: ["r1"], pageToken: "p", sessionSecret: "s", client_secret: "c", privateKey: "k", api_key: "a", oauthToken: "o", passcode: "1234", challenge: "x" }) as Record<string, unknown>;
+    expect(s).toEqual(expect.objectContaining({ allPass: true, passed: 10, pass: false, inputTokens: 120, maxTokens: 900, outputTokens: 30, passkey_enrolled: 1 }));
+    for (const k of ["refreshTokens", "pageToken", "sessionSecret", "client_secret", "privateKey", "api_key", "oauthToken", "passcode", "challenge"]) expect(s[k], k).toBe("[redacted]");
   });
   it("coalescing keeps the last seq of a burst (resume is never broken) and leaves everything else alone", () => {
     const ev = (seq: number, cls: string, lowValue: boolean): LiveEvent => ({ v: 1, seq, eventId: seq, at: "", class: cls, domain: cls.split(".")[0] as never, verb: "", action: "", actor: "", area: null,

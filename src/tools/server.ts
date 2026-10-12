@@ -148,7 +148,7 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     }
     const parsed = e.inputSchema ? (e.inputSchema as z.ZodType).safeParse(args ?? {}) : { success: true as const, data: args ?? {} };
     if (!parsed.success) return fail("call_tool", `Invalid arguments for ${tool}: ${parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")}`);
-    await appendEvent(deps.pool, { actor: "system", action: "tool_called", entityType: "tool", reason: "call_tool", after: { tool: "call_tool", routedTo: tool }, client: deps.client });
+    await appendEvent(deps.pool, { actor: "system", action: "tool_called", entityType: "tool", reason: "call_tool", after: { tool: "call_tool", routedTo: tool, outcome: "routed" }, client: deps.client });
     return e.handler(parsed.data, extra) as Promise<CallToolResult>;
   });
 

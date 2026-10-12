@@ -82,7 +82,10 @@ const RULES: Record<string, Rule> = {
   reliability_checked: (r) => F("system", r.after?.allPass === false && Array.isArray(r.after?.failing) && (r.after.failing as unknown[]).length ? "check_failed" : "checked",
     { lowValue: !(Array.isArray(r.after?.failing) && (r.after?.failing as unknown[]).length), verified: Array.isArray(r.after?.failing) ? !(r.after.failing as unknown[]).length : null }),
   // tools / sources
-  tool_called: (r) => F("tool", r.after?.outcome === "ok" ? "succeeded" : "failed", { verified: null, lowValue: r.after?.outcome === "ok" }),
+  // call_tool's own record is a ROUTING note (the routed tool records its own outcome) — never a failure (Phase 8 live:
+  // every call_tool counted as tool.failed because the routing record had no outcome; read-time, so history is fixed too)
+  tool_called: (r) => r.after?.routedTo || r.after?.outcome === "routed" ? F("tool", "routed", { verified: null, lowValue: true })
+    : F("tool", r.after?.outcome === "ok" ? "succeeded" : "failed", { verified: null, lowValue: r.after?.outcome === "ok" }),
   mcp_initialize: () => F("source", "connected", { lowValue: true }),
   mcp_tools_listed: () => F("source", "observed", { lowValue: true }),
   mcp_client_observed: () => F("source", "connected"),

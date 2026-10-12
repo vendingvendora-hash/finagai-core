@@ -101,3 +101,32 @@ The live ADR-087 acceptance (canaries 1–3) left these known gaps:
   work exception, Julian's exception clears the moment the Mac is back, and the idle note clears after the hold.
 - **Mutation checks.** Disabling the hold fails the flapping test; disabling the Area lookup fails the rule-Area test.
 - **Full suites:** 521 unit, 281 integration, all passing.
+
+## Increment 1 live acceptance (2026-10-12 20:31Z, Core `f66122059cf4`) and hotfix 37
+**Verified live:**
+
+| Item | Result | Evidence |
+|---|---|---|
+| The first hourly self-check ran in a real tick and recorded its verdict on the stream | Pass | `reliability_checked` 1972 / seq 1941 at 20:31:30Z: failing [], pending [emailToStateChain, escalationNotificationChain] (Core had just restarted), duration 2.6 s, version `f66122059cf4`. It cites the tick 1971 and shares its correlation |
+| A pending check opens no exception | Pass | — |
+| A run with no failures creates nothing for Julian | Pass | `exceptions`: "All normal — nothing is wrong."; needs-Julian is empty |
+| Rule events carry the rule's Area | Pass | `watch_rule_added` 1975 and `watch_rule_removed` 1978 (rule #3, a labeled ADR-088 canary in Finagai Test, added and removed through the normal tools) are both filed under Finagai Test. 1978 also has before {status active, removed_at null}. Hotfix 35's 1959 had no Area |
+| The reliability report reads the stream and finds real problems | Pass | Over the past 24 h it reported 298 ticks, 0 stalls (longest gap 5 min), career.sync 5/5, learning.run 1/1, 2 notifications delivered and 0 failed. The idle-Mac note **opened 7× in 24 h** (the flapping hotfix 36 removes, now measured) |
+
+**Two defects found live, fixed in hotfix 37:**
+1. **The stream hid the self-check's own verdict.**
+   - *Symptom:* 1972 showed `allPass: "[redacted]"` and `passed: "[redacted]"`.
+   - *Cause:* stream redaction matched the substring "pass".
+   - *Fix:* redaction now matches whole secret **words** in a key (camelCase, snake_case or kebab-case split) plus key pairs like apiKey / private_key. Usage counts such as `inputTokens` are not treated as secrets. Unit tests cover what must and must not be redacted.
+2. **Every `call_tool` was counted as a failed tool call.**
+   - *Symptom:* the report showed 28/28 failures, a 27% failure rate, and a false "degraded".
+   - *Cause:* call_tool's own audit record is a routing note with no outcome. The routed tool records its own outcome.
+   - *Fix:* routing notes are classified `tool.routed`. The classification is applied when events are read, so history is corrected too. New routing notes carry `outcome: "routed"`, and the report excludes them.
+
+**Waiting for real production occurrences** (nothing can be faked):
+- the first `job_finished` (daily_maintenance at 07:00Z);
+- a full night with the Mac asleep, which should give at most one idle-Mac note per sleep instead of hourly reopen/clear.
+
+The 24-hour report stays "degraded" until the pre-fix idle-Mac flaps (all before 20:31Z) age out of its window. That is correct evidence, not a defect.
+
+**Tests:** 522 unit and 281 integration, all passing.
