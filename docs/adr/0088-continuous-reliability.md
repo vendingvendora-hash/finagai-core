@@ -190,3 +190,38 @@ quiet hours (03:20 ET). Its tick is now pinned to daytime.
 - Idle sleep / dark-wake / sleep writes no exception events. The same sleep **with** work opens Julian's exception,
   which clears when the Mac is back. Restoring the idle note fails the test.
 - Full suites: 522 unit and 282 integration, all passing, including a night-time run.
+## Increment 2 (built and tested off-production; held until Increment 1 passes live)
+- **Daily internal canary** (`src/live/canary.ts`).
+  - Once a day the event loop drives a labeled fixture job (`FINAGAI-CANARY-<stamp>`, Area "Finagai Test", source
+    `canary`, actor `system`, never Julian) through the normal paths in four steps:
+    1. track as applied;
+    2. new evidence, which reschedules the follow-up;
+    3. withdraw (follow-up done, project completed);
+    4. archive the test job. The job is archived, never deleted.
+  - After each step it checks **the stream's own envelopes**. Every state event must name its object, be shown under
+    the object's Area, cite a cause, and carry a before-state if it is a transition. The expected events must exist.
+  - The verdict is recorded as `canary_ran`. A new `canaryFailing` detector opens `canary:state_path` (Finagai-owned)
+    when the two latest runs failed; the exception cites those runs and clears on the next pass.
+  - The brief never shows test-Area activity.
+- **Workflow-raised judgments no longer stay open forever.**
+  - A workflow need can name its `subject`, which becomes part of the key (`…@opportunity:<id>`). career.sync names the
+    job its decision is about.
+  - The need resolves "moved on (<action>)" when a later event about that object arrives from another unit of work, and
+    cites that event.
+  - Otherwise it resolves "expired: no answer in 14 days", the same rule as every other wait on Julian.
+- **Detector-opened exceptions cite their evidence.** The exception points at what showed the condition:
+  - self-check and canary: their runs;
+  - failing workflow: its `workflow_failed` events;
+  - delivery failure: the failed notices;
+  - stuck or unreviewed task: the task's latest event.
+- **Career history label.** A new event on a job Finagai already holds is labelled against the stored status
+  ("applied→offer", not "analyzed→offer"). An event that moves nothing carries no transition.
+- **Reliability report `since <ISO time>`** evaluates behaviour after a moment (e.g. a deploy) separately from the
+  rolling window. The report also covers the canary.
+- **Brief.** One risk line, "Finagai reliability (last 24 h) is degraded: …", appears only when not healthy. It is never
+  a decision, so a healthy platform adds nothing and a degraded one adds no task for Julian.
+- **Tests:**
+  - `test/integration/phase8-increment2.test.ts` (4 tests). Mutation checks: disabling the moved-on/expiry rule, or the
+    evidence citation, fails them.
+  - `test/unit/phase8.test.ts`.
+  - Full suites: 525 unit, 285 integration, all passing. No migration; the MCP tool surface is unchanged.

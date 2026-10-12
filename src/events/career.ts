@@ -72,7 +72,8 @@ export const careerModule: AreaModule = {
       return {
         changes: [...r.changes.map((c) => `${c.change}: ${c.job} — ${c.detail} [${c.sources.join(", ")}]`), ...r.lifecycle.map((c) => `${c.change}: ${c.job} — ${c.detail}`)],
         // An identity collision or evidence against a closed job is a judgment call — the only sync outcome that reaches Julian.
-        escalations: r.decisions.map((d) => ({ key: `career.sync:${sha(d)}`, needs: "judgment" as const, summary: `Career: ${d}` })),
+        escalations: r.decisions.map((d) => ({ key: `career.sync:${sha(d)}`, needs: "judgment" as const, summary: `Career: ${d}`,
+          ...(r.decisionSubjects?.[d] ? { subject: { type: "opportunity", id: r.decisionSubjects[d]! } } : {}) })),
       };
     },
   }],

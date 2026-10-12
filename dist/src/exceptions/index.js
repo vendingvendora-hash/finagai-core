@@ -64,6 +64,7 @@ export async function runExceptions(pool, now, dryRun, deps = {}) {
             RETURNING *`, [d.key, d.detector, d.areaId ?? null, d.owner, d.severity, d.needs ?? null, d.summary.slice(0, 500), d.detail?.slice(0, 1000) ?? null, d.remediation ?? null, now])).rows[0];
                 existing.set(d.key, row);
                 await recordTransition(pool, { actor: "cos", action: "exception_opened", table: "operating_exception", id: String(row.id), before, areaId: d.areaId ?? null,
+                    ...(d.evidence?.length ? { causeIds: d.evidence } : {}),
                     context: { key: d.key, owner: d.owner, severity: d.severity, summary: d.summary, detector: d.detector, occurrence: Number(row.occurrences ?? 1) } });
             }
             else
@@ -112,7 +113,7 @@ export async function runExceptions(pool, now, dryRun, deps = {}) {
     return res;
 }
 const detectorName = (fn) => ({ watcherFailing: "watcher_failing", workflowFailing: "workflow_failing", deadLetters: "dead_letter", budget: "budget", deliveryFailing: "delivery_failing",
-    areaBreach: "area_breach", macOffline: "mac_offline", stuckTasks: "stuck_task", reviewBacklog: "review_backlog", selfCheck: "self_check" }[fn] ?? fn);
+    areaBreach: "area_breach", macOffline: "mac_offline", stuckTasks: "stuck_task", reviewBacklog: "review_backlog", selfCheck: "self_check", canaryFailing: "canary" }[fn] ?? fn);
 /** Read-only: what is wrong right now, who owns it, what Finagai is doing about it. */
 export async function exceptionsStatus(db, now = new Date()) {
     const open = (await db.query(`SELECT e.key, e.detector, e.owner, e.severity, e.needs, e.summary, e.detail, e.first_seen_at, e.last_seen_at, e.remediation, e.remediation_attempts,

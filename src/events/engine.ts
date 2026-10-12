@@ -31,6 +31,8 @@ export interface EngineDeps {
   notify?: { store: DeliveryStore; sender: EmailSender; timezone: string; quietHours?: [number, number] } | undefined;
   /** Phase 8 (ADR-088): the live self-check, run at most every `everyMs` by real (non-preview) ticks */
   reliability?: { everyMs: number; version?: string; check: () => Promise<{ allPass: boolean; verdict: string[] }> };
+  /** Phase 8 (ADR-088, increment 2): the internal state-path canary, run at most every `everyMs` by real ticks */
+  canary?: { everyMs: number; run: (now: Date) => Promise<{ ok: boolean; jobId: string | null; label: string; steps: Array<{ step: string; ok: boolean; events: number; problems: string[] }> }> };
 }
 export interface TickResult {
   tickId: string | null; trigger: string; preview: boolean; skipped?: string;
@@ -175,7 +177,7 @@ async function tick(ctx: EngineCtx, deps: EngineDeps, result: TickResult) {
           after: { workflow: name, events: evs.length, changes: r.changes.slice(0, 30), escalations: r.escalations.length } });
       }
       // ADR-087: a judgment the workflow raised is caused by that workflow run.
-      needs.push(...r.escalations.map((x) => ({ ...x, detail: x.detail ?? `from ${evs.length} event(s): ${evs.slice(0, 3).map((e) => e.summary).join(" | ")}`,
+      needs.push(...r.escalations.map((x) => ({ ...x, key: subjectKey(x), detail: x.detail ?? `from ${evs.length} event(s): ${evs.slice(0, 3).map((e) => e.summary).join(" | ")}`,
         ...(x.causeIds?.length ? {} : completedId ? { causeIds: [completedId] } : {}) })));
     } catch (e) {
       const msg = String((e as Error)?.message ?? e).slice(0, 300);
@@ -190,6 +192,7 @@ async function tick(ctx: EngineCtx, deps: EngineDeps, result: TickResult) {
   // 3b) Phase 8 (ADR-088): continuous reliability — the ADR-087 self-check, hourly, its verdict on the stream (the
   //     selfCheck detector below turns a repeated failure into an exception).
   await runSelfCheck(ctx, deps);
+  await runCanaryIfDue(ctx, deps);
 
   // 4) Phase 7 (ADR-086): management by exception — detect what is wrong, remedy what Finagai owns, and add only what
   //    needs Julian (or outlived Finagai's remedies); then Julian's own "tell me when" rules.
@@ -259,6 +262,22 @@ async function reconcileEscalations(ctx: EngineCtx, needs: EscalationNeed[], res
         await recordTransition(pool, { actor: "cos", action: "escalation_resolved", table: "escalation", id: String(o.id), before, causeIds: await notifiedBy(pool, String(o.id)), context: { key: o.key, needs: o.needs, resolution: "told" } }); } }
       continue;
     }
+    // Phase 8 (ADR-088): a judgment a WORKFLOW raised has no state to derive it from, so it used to stay open forever.
+    // It now resolves when the object it is about moves on (a later event about that object, from another unit of
+    // work), or after WORKFLOW_ESCALATION_TTL_DAYS without an answer — the same rule as every other wait on Julian.
+    if (!o.followup_id && !/^(followup|overdue|lesson|exception|rule):/.test(o.key)) {
+      const why = await workflowNeedMovedOn(pool, o, ctx.now);
+      if (why) {
+        result.escalations.resolved.push(o.summary);
+        if (!ctx.dryRun) {
+          const before = await rowState(pool, "escalation", String(o.id));
+          await pool.query(`UPDATE escalation SET status = 'resolved', resolved_at = now(), resolution = $2 WHERE id = $1`, [o.id, why.resolution]);
+          await recordTransition(pool, { actor: "cos", action: "escalation_resolved", table: "escalation", id: String(o.id), before, ...(why.cause.length ? { causeIds: why.cause } : {}),
+            context: { key: o.key, needs: o.needs, resolution: why.resolution, summary: o.summary } });
+        }
+        continue;
+      }
+    }
     const stateDerived = /^(followup|overdue|lesson|exception):/.test(o.key);
     if ((o.followup_id && (o.fstate === "done" || o.fstate === "cancelled")) || (stateDerived && !want.has(o.key))) {
       result.escalations.resolved.push(o.summary);
@@ -289,6 +308,40 @@ async function reconcileEscalations(ctx: EngineCtx, needs: EscalationNeed[], res
   }
   result.escalations.open = ctx.dryRun ? open.length - result.escalations.resolved.length + result.escalations.opened.length
     : Number((await pool.query(`SELECT count(*)::int AS n FROM escalation WHERE status = 'open'`)).rows[0].n);
+}
+
+/** Phase 8 (ADR-088): how long a workflow-raised judgment waits for Julian before it expires (resolved, with that reason). */
+export const WORKFLOW_ESCALATION_TTL_DAYS = 14;
+const SUBJECT = /@([a-z_]+):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+/** A workflow need's identity includes the object it is about (so the engine can tell when that object moves on). */
+export const subjectKey = (n: EscalationNeed) => (n.subject && !SUBJECT.test(n.key) ? `${n.key}@${n.subject.type}:${n.subject.id}` : n.key);
+
+async function workflowNeedMovedOn(pool: pg.Pool, o: { id: string; key: string }, now: Date): Promise<{ resolution: string; cause: number[] } | null> {
+  const opened = (await pool.query(`SELECT id, occurred_at, correlation_id FROM event WHERE action = 'escalation_opened' AND entity_id = $1::uuid ORDER BY id LIMIT 1`, [o.id])).rows[0];
+  if (!opened) return null;
+  const subj = SUBJECT.exec(o.key);
+  if (subj) {
+    const later = (await pool.query(`SELECT id, action FROM event WHERE entity_type = $1 AND entity_id = $2::uuid AND id > $3 AND correlation_id IS DISTINCT FROM $4
+        AND action NOT IN ('opportunity_updated') ORDER BY id LIMIT 1`, [subj[1], subj[2], opened.id, opened.correlation_id])).rows[0];
+    if (later) return { resolution: `moved on (${later.action})`, cause: [Number(later.id)] };
+  }
+  if (now.getTime() - new Date(opened.occurred_at).getTime() >= WORKFLOW_ESCALATION_TTL_DAYS * 86_400_000)
+    return { resolution: `expired: no answer in ${WORKFLOW_ESCALATION_TTL_DAYS} days`, cause: await causeHere(pool) };
+  return null;
+}
+
+/** Phase 8 (ADR-088, increment 2): run the internal state-path canary when due and record its verdict on the stream. */
+export async function runCanaryIfDue(ctx: EngineCtx, deps: EngineDeps): Promise<void> {
+  const c = deps.canary;
+  if (!c || ctx.dryRun) return;
+  const last = (await ctx.pool.query(`SELECT occurred_at FROM event WHERE action = 'canary_ran' ORDER BY id DESC LIMIT 1`)).rows[0];
+  if (last && ctx.now.getTime() - new Date(last.occurred_at).getTime() < c.everyMs - 60_000) return;
+  const started = Date.now();
+  let r: Awaited<ReturnType<typeof c.run>>;
+  try { r = await c.run(ctx.now); }
+  catch (e) { r = { ok: false, jobId: null, label: "", steps: [{ step: "run", ok: false, events: 0, problems: [String((e as Error)?.message ?? e).slice(0, 200)] }] }; }
+  await appendEvent(ctx.pool, { actor: "system", action: "canary_ran", causeIds: await causeHere(ctx.pool),
+    after: { ok: r.ok, canary: "state_path", label: r.label, jobId: r.jobId, steps: r.steps.map((s) => ({ step: s.step, ok: s.ok, events: s.events, ...(s.problems.length ? { problems: s.problems.slice(0, 5) } : {}) })), durationMs: Date.now() - started } });
 }
 
 /** Phase 8 (ADR-088): run the live self-check when due and record its verdict (read-only otherwise). */

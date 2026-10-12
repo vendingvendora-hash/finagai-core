@@ -18,7 +18,11 @@ export interface Detected {
   remediation?: string;
   /** Finagai-owned: if still open after this long, Julian is asked (judgment) whether to keep trying or have it fixed */
   escalateAfterMin?: number;
+  /** Phase 8 (ADR-088): the stream events that show the condition (the opened exception cites them as its cause) */
+  evidence?: number[];
 }
+const ids = (rows: Array<{ id: unknown }>) => rows.map((r) => Number(r.id));
+const lastEventAbout = async (db: Db, type: string, id: string) => ids((await db.query(`SELECT id FROM event WHERE entity_type = $1 AND entity_id = $2::uuid ORDER BY id DESC LIMIT 1`, [type, id])).rows);
 export interface BudgetReading { monthToDateUsd: number; targetUsd: number; ceilingUsd: number }
 export interface DetectorDeps { budget?: () => Promise<BudgetReading> }
 type Detector = (db: Db, now: Date, deps: DetectorDeps) => Promise<Detected[]>;
@@ -67,7 +71,8 @@ export const workflowFailing: Detector = async (db) => {
   const out: Detected[] = [];
   for (const [name, r] of runs) if (r.length >= 3 && r.slice(0, 3).every((x) => !x.ok))
     out.push({ key: `workflow:${name}`, detector: "workflow_failing", owner: "finagai", severity: "warning", escalateAfterMin: 12 * 60,
-      summary: `Workflow ${name} failed its last ${r.findIndex((x) => x.ok) < 0 ? r.length : r.findIndex((x) => x.ok)} runs — its events are kept and retried`, detail: String(r[0]!.error ?? "").slice(0, 300) });
+      summary: `Workflow ${name} failed its last ${r.findIndex((x) => x.ok) < 0 ? r.length : r.findIndex((x) => x.ok)} runs — its events are kept and retried`, detail: String(r[0]!.error ?? "").slice(0, 300),
+      evidence: ids((await db.query(`SELECT id FROM event WHERE action = 'workflow_failed' AND after->>'workflow' = $1 ORDER BY id DESC LIMIT 3`, [name])).rows) });
   return out;
 };
 
@@ -99,7 +104,8 @@ export const deliveryFailing: Detector = async (db, now) => {
       WHERE (status = 'failed' AND created_at > $1::timestamptz - interval '48 hours') OR (status = 'pending' AND created_at < $1::timestamptz - interval '30 minutes' AND created_at > $1::timestamptz - interval '48 hours')
       ORDER BY created_at DESC LIMIT 10`, [now])).rows;
   if (!rows.length) return [];
-  return [{ key: "delivery:failing", detector: "delivery_failing", owner: "finagai", severity: "critical",
+  const evidence = ids((await db.query(`SELECT id FROM event WHERE action = 'notification_suppressed' AND occurred_at > $1::timestamptz - interval '48 hours' AND COALESCE(after->>'reason', '') NOT ILIKE '%quiet hours%' ORDER BY id DESC LIMIT 5`, [now])).rows);
+  return [{ key: "delivery:failing", detector: "delivery_failing", owner: "finagai", severity: "critical", evidence,
     summary: `${rows.length} notice(s) to you could not be delivered (latest: ${rows[0].purpose}, ${ago(now, rows[0].created_at)} min ago) — shown here instead`,
     detail: rows.map((r) => `${r.purpose} ${r.status}: ${String(r.last_error ?? "").slice(0, 80)}`).join(" | ") }];
 };
@@ -142,10 +148,13 @@ export const macOffline: Detector = async (db, now) => {
 
 /** A Mac task that stopped making progress (its lease ran out and nobody resumed it). */
 export const stuckTasks: Detector = async (db, now) => {
-  const rows = (await db.query(`SELECT code, request, last_progress_at FROM control_task WHERE status = 'active' AND claimed_at IS NOT NULL
+  const rows = (await db.query(`SELECT id, code, request, last_progress_at FROM control_task WHERE status = 'active' AND claimed_at IS NOT NULL
       AND COALESCE(last_progress_at, claimed_at) < $1::timestamptz - interval '60 minutes' ORDER BY code LIMIT 10`, [now])).rows;
-  return rows.map((t) => ({ key: `task:${t.code}:stuck`, detector: "stuck_task", owner: "finagai" as const, severity: "warning" as const, escalateAfterMin: 6 * 60,
-    summary: `Mac task ${t.code} has made no progress for ${hhmm(ago(now, t.last_progress_at ?? now))} — Finagai keeps it leased for resumption`, detail: String(t.request).slice(0, 160) }));
+  const out: Detected[] = [];
+  for (const t of rows) out.push({ key: `task:${t.code}:stuck`, detector: "stuck_task", owner: "finagai", severity: "warning", escalateAfterMin: 6 * 60,
+    summary: `Mac task ${t.code} has made no progress for ${hhmm(ago(now, t.last_progress_at ?? now))} — Finagai keeps it leased for resumption`, detail: String(t.request).slice(0, 160),
+    evidence: await lastEventAbout(db, "control_task", String(t.id)) });
+  return out;
 };
 
 /** Results Finagai could not verify. Julian's review is needed only when the task CHANGED something (filled, uploaded,
@@ -154,14 +163,17 @@ export const stuckTasks: Detector = async (db, now) => {
  *  update from Beth?", would otherwise have been escalated as "your review decides whether it counts"). */
 export const STATE_CHANGING_KINDS = ["browser_fill", "browser_fill_form", "browser_select", "browser_check", "browser_upload", "browser_download", "ax_set_value", "type", "key", "hotkey", "move_file", "trash_file", "run", "drag"];
 export const reviewBacklog: Detector = async (db, now) => {
-  const rows = (await db.query(`SELECT t.code, t.result_summary, t.updated_at,
+  const rows = (await db.query(`SELECT t.id, t.code, t.result_summary, t.updated_at,
       EXISTS (SELECT 1 FROM control_step s WHERE s.task_id = t.id AND s.status = 'done' AND s.kind = ANY($2::text[])) AS changed
     FROM control_task t WHERE t.verification_status = 'needs_review' AND t.status IN ('done','failed')
       AND t.updated_at < $1::timestamptz - interval '24 hours' AND t.updated_at > $1::timestamptz - interval '14 days' ORDER BY t.code LIMIT 10`, [now, STATE_CHANGING_KINDS])).rows;
   // A read-only one is not an exception at all: nothing is pending for anyone and there is nothing to remedy (the
   // verifier's miss is already in the execution metrics). Listing it would only make "all normal" false.
-  return rows.filter((t) => t.changed).map((t): Detected => ({ key: `task:${t.code}:review`, detector: "review_backlog", owner: "julian", severity: "info", needs: "judgment",
-    summary: `Task ${t.code} changed something Finagai could not verify — your review decides whether it counts: ${String(t.result_summary ?? "").slice(0, 120)}` }));
+  const out: Detected[] = [];
+  for (const t of rows.filter((x) => x.changed)) out.push({ key: `task:${t.code}:review`, detector: "review_backlog", owner: "julian", severity: "info", needs: "judgment",
+    summary: `Task ${t.code} changed something Finagai could not verify — your review decides whether it counts: ${String(t.result_summary ?? "").slice(0, 120)}`,
+    evidence: await lastEventAbout(db, "control_task", String(t.id)) });
+  return out;
 };
 
 /**
@@ -172,14 +184,25 @@ export const reviewBacklog: Detector = async (db, now) => {
  * (judgment) to have it fixed; it clears itself when the check passes again.
  */
 export const selfCheck: Detector = async (db, now) => {
-  const runs = (await db.query(`SELECT after FROM event WHERE action = 'reliability_checked' AND occurred_at > $1::timestamptz - interval '3 hours' ORDER BY id DESC LIMIT 2`, [now])).rows
-    .map((r) => (r.after ?? {}) as { failing?: string[]; version?: string; at?: string });
+  const rows = (await db.query(`SELECT id, after FROM event WHERE action = 'reliability_checked' AND occurred_at > $1::timestamptz - interval '3 hours' ORDER BY id DESC LIMIT 2`, [now])).rows;
+  const runs = rows.map((r) => (r.after ?? {}) as { failing?: string[]; version?: string; at?: string });
   if (runs.length < 2) return [];
   const [latest, previous] = runs as [{ failing?: string[]; version?: string }, { failing?: string[] }];
+  const evidence = ids(rows);
   return (latest.failing ?? []).filter((c) => (previous.failing ?? []).includes(c)).map((c) => ({
     key: `reliability:${c}`, detector: "self_check", owner: "finagai" as const, severity: "warning" as const, escalateAfterMin: 60,
     summary: `Finagai's live self-check "${c}" failed twice in a row — a platform guarantee (ADR-087) is not holding`,
-    detail: `latest run on Core ${latest.version ?? "?"}; see finagai-job: live-acceptance for the evidence` }));
+    detail: `latest run on Core ${latest.version ?? "?"}; see finagai-job: live-acceptance for the evidence`, evidence }));
 };
 
-export const DETECTORS: Record<string, Detector> = { watcherFailing, workflowFailing, deadLetters, budget, deliveryFailing, areaBreach, macOffline, stuckTasks, reviewBacklog, selfCheck };
+/** Phase 8 (ADR-088, increment 2): the internal state-path canary failed on its two latest daily runs. */
+export const canaryFailing: Detector = async (db, now) => {
+  const rows = (await db.query(`SELECT id, after FROM event WHERE action = 'canary_ran' AND occurred_at > $1::timestamptz - interval '3 days' ORDER BY id DESC LIMIT 2`, [now])).rows;
+  if (rows.length < 2 || rows.some((r) => r.after?.ok !== false)) return [];
+  const steps = ((rows[0].after?.steps ?? []) as Array<{ step: string; ok: boolean; problems?: string[] }>).filter((s) => !s.ok);
+  return [{ key: "canary:state_path", detector: "canary", owner: "finagai", severity: "warning", escalateAfterMin: 60, evidence: ids(rows),
+    summary: `Finagai's daily internal canary failed twice in a row (${steps.map((s) => s.step).join(", ") || "run"}) — a state-change path is not behaving as ADR-087 guarantees`,
+    detail: steps.flatMap((s) => s.problems ?? []).join(" | ").slice(0, 900) }];
+};
+
+export const DETECTORS: Record<string, Detector> = { watcherFailing, workflowFailing, deadLetters, budget, deliveryFailing, areaBreach, macOffline, stuckTasks, reviewBacklog, selfCheck, canaryFailing };

@@ -65,6 +65,7 @@ export async function runExceptions(pool: pg.Pool, now: Date, dryRun: boolean, d
             RETURNING *`, [d.key, d.detector, d.areaId ?? null, d.owner, d.severity, d.needs ?? null, d.summary.slice(0, 500), d.detail?.slice(0, 1000) ?? null, d.remediation ?? null, now])).rows[0];
         existing.set(d.key, row);
         await recordTransition(pool, { actor: "cos", action: "exception_opened", table: "operating_exception", id: String(row.id), before, areaId: d.areaId ?? null,
+          ...(d.evidence?.length ? { causeIds: d.evidence } : {}),
           context: { key: d.key, owner: d.owner, severity: d.severity, summary: d.summary, detector: d.detector, occurrence: Number(row.occurrences ?? 1) } });
       } else existing.set(d.key, { key: d.key, first_seen_at: now, remediation_attempts: 0, last_remediation_at: null, status: "open" });
     } else if (!dryRun) {
@@ -105,7 +106,7 @@ export async function runExceptions(pool: pg.Pool, now: Date, dryRun: boolean, d
 }
 
 const detectorName = (fn: string) => ({ watcherFailing: "watcher_failing", workflowFailing: "workflow_failing", deadLetters: "dead_letter", budget: "budget", deliveryFailing: "delivery_failing",
-  areaBreach: "area_breach", macOffline: "mac_offline", stuckTasks: "stuck_task", reviewBacklog: "review_backlog", selfCheck: "self_check" } as Record<string, string>)[fn] ?? fn;
+  areaBreach: "area_breach", macOffline: "mac_offline", stuckTasks: "stuck_task", reviewBacklog: "review_backlog", selfCheck: "self_check", canaryFailing: "canary" } as Record<string, string>)[fn] ?? fn;
 
 /** Read-only: what is wrong right now, who owns it, what Finagai is doing about it. */
 export async function exceptionsStatus(db: Pick<pg.Pool, "query">, now = new Date()) {

@@ -25,10 +25,23 @@ export interface SyncChange { job: string; change: "new job" | "event" | "status
 export interface SyncResult {
   dryRun: boolean; ok: boolean; area: string; acquiredAt: string; snapshotDigest: string; interpretationDigest: string; interpreterVersion: string; records: number; complete: boolean; problems: string[];
   newSourceRecords: number; changes: SyncChange[]; lifecycle: LifecycleChange[]; decisions: string[]; unassigned: string[]; kept: number; supersededProposals: number[];
+  /** Phase 8 (ADR-088): decision text → the job it is about (so the judgment resolves itself when that job moves on) */
+  decisionSubjects?: Record<string, string>;
   counts: { jobsCreated: number; eventsAdded: number; statusChanges: number; lifecycleChanges: number; decisions: number };
 }
 
 const label = (o: { org: string; title: string; reqId: string | null }) => `${o.org} — ${o.title}${o.reqId ? ` (${o.reqId})` : ""}`;
+
+/**
+ * Phase 8 (ADR-088): the history label of a NEW event on a job Finagai already holds is relative to the STORED status,
+ * not the interpreter's mail-only replay (live: "analyzed→offer" was recorded while the job was applied → offer).
+ * The event that moves the job reads "<stored>→<new>"; one that does not move it carries no transition.
+ */
+export function storedTransition(interpreted: string | null | undefined, storedStatus: string, newStatus: string | null): string | null {
+  const to = interpreted?.split("→")[1];
+  if (newStatus && to === newStatus) return `${storedStatus}→${newStatus}`;
+  return null;
+}
 
 /** Pure-ish reconcile of one interpreted job against the stored row (no I/O). */
 export function planJob(o: BootstrapOpportunity, stored: { status: string; eventIds: Set<string> } | null): { create: boolean; newEvents: BootstrapOpportunity["events"]; status: string | null; decision: string | null } {
@@ -68,6 +81,7 @@ export async function syncCareer(pool: pg.Pool, google: GoogleSearch | CareerSou
     const seenRecords = new Set(evRows.map((e) => String(e.source_id)));
 
     const changes: SyncChange[] = []; const decisions: string[] = []; const touched = new Set<string>();
+    const decisionSubjects: Record<string, string> = {};
     let jobsCreated = 0, eventsAdded = 0, statusChanges = 0, kept = 0;
     const empIds = new Map<string, string>();
     for (const e of payload.employers ?? []) {
@@ -86,7 +100,7 @@ export async function syncCareer(pool: pg.Pool, google: GoogleSearch | CareerSou
       if (cands.length > 1) { decisions.push(`${label(o)}: matches ${cands.length} stored jobs — not merged, not written (identity needs you)`); continue; }
       const stored = cands[0] ?? null;
       const plan = planJob(o, stored ? { status: stored.status, eventIds: eventsOf.get(stored.id) ?? new Set() } : null);
-      if (plan.decision) decisions.push(plan.decision);
+      if (plan.decision) { decisions.push(plan.decision); if (stored) decisionSubjects[plan.decision] = stored.id; }
       let id = stored?.id ?? null;
       if (plan.create) {
         // A sheet-only row that is new is a pipeline record; it carries no event and no lifecycle work.
@@ -123,14 +137,16 @@ export async function syncCareer(pool: pg.Pool, google: GoogleSearch | CareerSou
       for (const e of plan.newEvents) {
         if (!id) break;
         const r = await tx.query(`INSERT INTO opportunity_event (opportunity_id, at, kind, source, source_id, summary, transition) VALUES ($1, $2, $3, 'gmail', $4, $5, $6) ON CONFLICT DO NOTHING RETURNING id`,
-          [id, e.at, e.kind, e.sourceId, e.subject, e.transition]);
+          [id, e.at, e.kind, e.sourceId, e.subject, stored ? storedTransition(e.transition, stored.status, plan.status) : e.transition]);
         if (r.rowCount) {
           await recordTransition(tx, { actor: "cos", action: "opportunity_evidence_added", table: "opportunity_event", id: String(r.rows[0].id), before: null, areaId: String(area.id), context: { sourceId: `gmail:${e.sourceId}` } }); eventsAdded++; touched.add(id); if (!plan.create) changes.push({ job: label(o), change: "event", detail: `${e.at.slice(0, 10)} ${e.kind}: ${e.subject}`.slice(0, 200), sources: [`gmail:${e.sourceId}`] }); }
       }
       // The interpreter never reopens a terminal job; a NEW record it flagged as an anomaly is Julian's to judge.
       const flagged = plan.newEvents.filter((e) => o.anomalies.some((a) => a.includes(e.sourceId)));
-      if (stored && !plan.decision && flagged.length)
-        decisions.push(`${label(o)}: ${flagged.map((e) => `${e.at.slice(0, 10)} ${e.kind}`).join(", ")} arrived after the job was ${isTerminal(stored.status) ? stored.status : o.status} — recorded as history, status unchanged (a new application is a new job)`);
+      if (stored && !plan.decision && flagged.length) {
+        const d = `${label(o)}: ${flagged.map((e) => `${e.at.slice(0, 10)} ${e.kind}`).join(", ")} arrived after the job was ${isTerminal(stored.status) ? stored.status : o.status} — recorded as history, status unchanged (a new application is a new job)`;
+        decisions.push(d); decisionSubjects[d] = stored.id;
+      }
     }
     const unassigned = (payload.unassigned ?? []).filter((u) => !seenRecords.has(u.recordId)).map((u) => `${u.at.slice(0, 10)} ${u.employer} ${u.kind} (record ${u.recordId}): ${u.reason}`);
     // A job this sync changed is reconciled even when it lives in another Area (ADR-087 canary 2: an offer on a
@@ -139,7 +155,7 @@ export async function syncCareer(pool: pg.Pool, google: GoogleSearch | CareerSou
     // Older pending bootstrap proposals are evidence of earlier runs, not candidates any more.
     const sup = (await tx.query(`UPDATE bootstrap_proposal SET status = 'discarded' WHERE area = 'Career' AND status = 'pending' RETURNING code`)).rows.map((r) => Number(r.code)).sort((a, b) => a - b);
     const newSourceRecords = new Set(changes.flatMap((c) => c.sources).filter((s) => s.startsWith("gmail:"))).size;
-    const result: SyncResult = { ...base, ok: true, newSourceRecords, changes, lifecycle: tick.changes, decisions, unassigned, kept, supersededProposals: sup,
+    const result: SyncResult = { ...base, ok: true, newSourceRecords, changes, lifecycle: tick.changes, decisions, decisionSubjects, unassigned, kept, supersededProposals: sup,
       counts: { jobsCreated, eventsAdded, statusChanges, lifecycleChanges: tick.changes.length, decisions: decisions.length } };
     await appendEvent(tx, { actor: "cos", action: "career_synced", entityType: "area", entityId: String(area.id),
       after: { dryRun, snapshot: acq.digest, counts: result.counts, decisions: decisions.slice(0, 20), changes: changes.slice(0, 40).map((c) => `${c.change}: ${c.job} — ${c.detail}`), lifecycle: tick.changes.slice(0, 40).map((c) => `${c.change}: ${c.job} — ${c.detail}`) } });

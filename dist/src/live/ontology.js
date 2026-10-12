@@ -61,6 +61,7 @@ const RULES = {
     promote_seed_batch: () => F("workflow", "completed"),
     // Phase 8 (ADR-088): scheduled job runs and the continuous self-check are on the stream
     job_finished: (r) => F("workflow", r.after?.status === "succeeded" ? "completed" : r.after?.status === "skipped" ? "skipped" : "failed", r.after?.status === "failed" ? { nextOwner: "finagai" } : { lowValue: true }),
+    canary_ran: (r) => F("system", r.after?.ok === false ? "check_failed" : "checked", { lowValue: r.after?.ok !== false, verified: typeof r.after?.ok === "boolean" ? r.after.ok : null }),
     reliability_checked: (r) => F("system", r.after?.allPass === false && Array.isArray(r.after?.failing) && r.after.failing.length ? "check_failed" : "checked", { lowValue: !(Array.isArray(r.after?.failing) && (r.after?.failing).length), verified: Array.isArray(r.after?.failing) ? !r.after.failing.length : null }),
     // tools / sources
     // call_tool's own record is a ROUTING note (the routed tool records its own outcome) — never a failure (Phase 8 live:

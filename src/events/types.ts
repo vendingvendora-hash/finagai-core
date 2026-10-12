@@ -50,6 +50,8 @@ export interface EscalationNeed {
   dueAt?: string | null;
   /** ADR-087: the stored events that caused this need (resolved from the source item when omitted). */
   causeIds?: number[];
+  /** Phase 8 (ADR-088): the object a workflow-raised need is about; the need resolves itself when that object moves on */
+  subject?: { type: string; id: string } | null;
 }
 
 export interface WorkflowResult { changes: string[]; escalations: EscalationNeed[] }

@@ -8,6 +8,7 @@
  * search). Area health is green/yellow/red with the exact reasons, so "why is Career yellow?" has an answer.
  */
 import type pg from "pg";
+import { reliabilityReport } from "../live/reliability.js";
 import { recordBulkTransitions, recordTransition, rowState } from "../db/state-events.js";
 import { appendEvent, withTransaction } from "../db/index.js";
 import { areaHealth } from "./areas.js";
@@ -242,12 +243,15 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
   const redAreas = health.filter((s) => s.color === "red").map((s) => `${s.area} is RED: ${s.breaches.join("; ")} — Finagai is reconciling it`);
 
   const changes: string[] = [];
+  // Finagai's own acceptance tests and daily canary live in the "Finagai Test" Area — never news for Julian.
+  const testArea = ((await pool.query(`SELECT id FROM area WHERE name = 'Finagai Test'`)).rows[0]?.id as string | undefined) ?? null;
   if (exp?.length) changes.push(`${exp.length} stale Mac task(s) expired unanswered (${exp.join(", ")}) — say "resume <code>" only if still wanted`);
-  for (const e of (await pool.query(`SELECT action, after FROM event WHERE action IN ('followup_done','area_created','objective_set','project_placed') AND occurred_at > now() - interval '48 hours' ORDER BY occurred_at DESC LIMIT 8`)).rows)
+  for (const e of (await pool.query(`SELECT action, after FROM event WHERE action IN ('followup_done','area_created','objective_set','project_placed') AND occurred_at > now() - interval '48 hours'
+      AND area_id IS DISTINCT FROM $1::uuid ORDER BY occurred_at DESC LIMIT 8`, [testArea])).rows)
     changes.push(`${String(e.action).replace(/_/g, " ")}${e.after?.outcome ? `: ${e.after.outcome}` : e.after?.name ? `: ${e.after.name}` : ""}`);
   // Job pipeline movement (evidence or Julian): status changes per job, and projects the lifecycle closed.
   for (const e of (await pool.query(`SELECT ev.before, ev.after, o.org, o.title, o.requisition_id FROM event ev JOIN opportunity o ON o.id = ev.entity_id
-      WHERE ev.action = 'opportunity_status' AND ev.occurred_at > now() - interval '48 hours' ORDER BY ev.occurred_at DESC LIMIT 10`)).rows)
+      WHERE ev.action = 'opportunity_status' AND ev.occurred_at > now() - interval '48 hours' AND o.area_id IS DISTINCT FROM $1::uuid ORDER BY ev.occurred_at DESC LIMIT 10`, [testArea])).rows)
     changes.push(`${e.org} — ${e.title}${e.requisition_id ? ` (${e.requisition_id})` : ""}: ${e.before?.status ?? "?"} → ${e.after?.status ?? "?"}`);
   const handled = (await pool.query(`SELECT count(*) FILTER (WHERE status = 'handled')::int AS h, count(*) FILTER (WHERE status = 'ignored')::int AS i, count(*) FILTER (WHERE status = 'failed')::int AS f
       FROM inbound_event WHERE received_at > now() - interval '24 hours'`)).rows[0];
@@ -256,7 +260,7 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
   // need his approval are escalated as decisions instead).
   const learnt = (await pool.query(`SELECT basis, statement FROM lesson WHERE status = 'active' AND basis IN ('observed','stated') AND created_at > now() - interval '48 hours' ORDER BY created_at DESC LIMIT 4`).catch(() => ({ rows: [] }))).rows;
   if (learnt.length) changes.push(`Finagai learned: ${learnt.map((l) => `${l.statement}${l.basis === "stated" ? " (you said so)" : ""}`).join(" · ").slice(0, 600)}`);
-  const closedProjects = (await pool.query(`SELECT count(*)::int AS n FROM event WHERE action = 'project_completed' AND occurred_at > now() - interval '48 hours'`)).rows[0]?.n ?? 0;
+  const closedProjects = (await pool.query(`SELECT count(*)::int AS n FROM event WHERE action = 'project_completed' AND occurred_at > now() - interval '48 hours' AND area_id IS DISTINCT FROM $1::uuid`, [testArea])).rows[0]?.n ?? 0;
   if (closedProjects) changes.push(`${closedProjects} job project(s) closed by the lifecycle (rejected, withdrawn, or no response and nobody to nudge — they stay in the pipeline)`);
 
   const risks: string[] = [];
@@ -272,6 +276,10 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
   risks.push(...redAreas);
   const exs = await pool.query(`SELECT owner, severity, summary, detector FROM operating_exception WHERE status = 'open' ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END LIMIT 8`).catch(() => ({ rows: [] as Array<{ owner: string; severity: string; summary: string; detector: string }> }));
   for (const x of exs.rows) if (x.owner === "finagai" && x.severity !== "info" && x.detector !== "area_breach") risks.push(`${x.summary}`);
+  // Phase 8 (ADR-088): Finagai's own reliability, from the Live State Stream — one line, only when it is NOT healthy.
+  // It is a risk (Finagai's to fix), never a decision: a healthy platform adds nothing, a degraded one adds no task.
+  const rel = await reliabilityReport(pool, { days: 1, now }).catch(() => null);
+  if (rel && rel.verdict !== "healthy") risks.push(`Finagai reliability (last 24 h) is degraded: ${rel.why.slice(0, 3).join("; ")}`.slice(0, 400));
   const cleared = Number((await pool.query(`SELECT count(*)::int AS n FROM operating_exception WHERE status = 'resolved' AND resolved_at > now() - interval '24 hours'`).catch(() => ({ rows: [{ n: 0 }] }))).rows[0].n);
   if (cleared) changes.push(`${cleared} problem(s) cleared in the last 24 h (Finagai fixed them or they went away)`);
   const completed = (await pool.query(`SELECT origin_message, verification_status FROM interaction WHERE state = 'completed' AND completed_at > now() - interval '24 hours' ORDER BY completed_at DESC LIMIT 6`)).rows

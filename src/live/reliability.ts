@@ -21,10 +21,14 @@ export const RELIABILITY_BUDGET = {
   maxOpensPerKey: 3,
 } as const;
 
-export async function reliabilityReport(db: Db, opts: { days?: number; now?: Date } = {}) {
+/**
+ * `since` evaluates behaviour after a given moment (e.g. a deploy) separately from the rolling window, so history that
+ * predates a fix is preserved in the stream but does not stand in for the fixed behaviour.
+ */
+export async function reliabilityReport(db: Db, opts: { days?: number; now?: Date; since?: Date } = {}) {
   const now = opts.now ?? new Date();
   const days = Math.min(Math.max(opts.days ?? 1, 1), 30);
-  const from = new Date(now.getTime() - days * 86_400_000);
+  const from = opts.since && !Number.isNaN(opts.since.getTime()) ? opts.since : new Date(now.getTime() - days * 86_400_000);
   const q = async <T extends Record<string, unknown>>(sql: string, p: unknown[] = []) => (await db.query(sql, [from, now, ...p])).rows as T[];
 
   // the event loop — from its own ledger (each tick is a row, finished or failed)
@@ -80,6 +84,11 @@ export async function reliabilityReport(db: Db, opts: { days?: number; now?: Dat
     failures: [...new Set(failingRuns.flatMap((r) => r.after.failing ?? []))],
     last: sc.length ? { at: new Date(sc.at(-1)!.occurred_at).toISOString(), version: sc.at(-1)!.after.version ?? null, failing: sc.at(-1)!.after.failing ?? [], pending: sc.at(-1)!.after.pending ?? [] } : null };
 
+  // the daily internal canary (increment 2)
+  const cr = await q<{ after: { ok?: boolean; steps?: Array<{ step: string; ok: boolean }> } }>(`SELECT after FROM event WHERE action = 'canary_ran' AND occurred_at BETWEEN $1 AND $2 ORDER BY id`);
+  const canary = { runs: cr.length, failed: cr.filter((r) => r.after.ok === false).length,
+    failedSteps: [...new Set(cr.filter((r) => r.after.ok === false).flatMap((r) => (r.after.steps ?? []).filter((s) => !s.ok).map((s) => s.step)))] };
+
   // the stream itself
   const unpublished = Number((await db.query(`SELECT count(*)::int AS n FROM event e WHERE NOT EXISTS (SELECT 1 FROM live_event l WHERE l.event_id = e.id) AND e.occurred_at < $1::timestamptz - interval '1 minute'`, [now])).rows[0].n);
 
@@ -93,7 +102,8 @@ export async function reliabilityReport(db: Db, opts: { days?: number; now?: Dat
   if (exceptions.flapping.length) why.push(`flapping exceptions: ${exceptions.flapping.join(", ")}`);
   if (selfCheck.failingRuns) why.push(`self-check failed in ${selfCheck.failingRuns} of ${selfCheck.runs} runs (${selfCheck.failures.join(", ")})`);
   if (unpublished) why.push(`${unpublished} event(s) not yet on the live stream`);
+  if (canary.failed) why.push(`internal canary failed in ${canary.failed} of ${canary.runs} runs (${canary.failedSteps.join(", ")})`);
 
-  return { window: { from: from.toISOString(), to: now.toISOString(), days }, verdict: why.length ? "degraded" : "healthy", why,
-    budget: RELIABILITY_BUDGET, loop, workflows, tools, jobs, notifications, exceptions, selfCheck, stream: { unpublished } };
+  return { window: { from: from.toISOString(), to: now.toISOString(), days: opts.since ? Math.round(((now.getTime() - from.getTime()) / 86_400_000) * 100) / 100 : days }, verdict: why.length ? "degraded" : "healthy", why,
+    budget: RELIABILITY_BUDGET, loop, workflows, tools, jobs, notifications, exceptions, selfCheck, canary, stream: { unpublished } };
 }

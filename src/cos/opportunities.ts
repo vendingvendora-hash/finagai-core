@@ -263,6 +263,8 @@ export async function pipelineSummary(pool: pg.Pool, areaName = "Career", now = 
 // Track a posting / record what happened (writes).
 
 export const TEST_AREA = "Finagai Test";
+/** Who acted: Julian (his tools), Finagai on a posting (j6), or Finagai's own internal canary (system; Phase 8, ADR-088). */
+export const actorFor = (source: string | undefined) => (source === "j6" ? "j6" as const : source === "canary" ? "system" as const : "julian" as const);
 /** Finagai's own never-submitting fixtures are test postings: they live in a separate area, never in Career. */
 export const isFixtureUrl = (u?: string | null) => !!u && /^https:\/\/finagai-core\.onrender\.com\/fixtures\//i.test(u.trim()) || !!u && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\/fixtures\//i.test(u.trim());
 
@@ -289,7 +291,7 @@ async function employerFor(db: Db, name: string): Promise<{ id: string; key: str
 
 export type TrackStatus = "shortlisted" | "preparing" | "applied" | "interviewing";
 export interface TrackInput { employer: string; title: string; reqId?: string | null; url?: string | null; location?: string | null; status?: TrackStatus; fitScore?: number | null; notes?: string | null;
-  contact?: string | null; source: "julian" | "j6"; sourceRef?: string | null; area?: string | null; at?: string | null }
+  contact?: string | null; source: "julian" | "j6" | "canary"; sourceRef?: string | null; area?: string | null; at?: string | null }
 
 export type TrackResult =
   | { outcome: "created" | "existing"; jobId: string; job: string; status: string; previousStatus: string | null; alreadyApplied: boolean; appliedAt: string | null; area: string; changes: LifecycleChange[]; nextStep: string | null }
@@ -342,23 +344,23 @@ export async function trackOpportunity(db: Db, input: TrackInput, now = new Date
     await db.query(`UPDATE opportunity SET url = COALESCE(url, $2), location = COALESCE(location, $3), requisition_id = COALESCE(requisition_id, $4), fit_score = COALESCE($5, fit_score),
       contact = COALESCE(contact, $6), alias_keys = (SELECT array_agg(DISTINCT x ORDER BY x) FROM unnest(alias_keys || $7::text[]) x), updated_at = now() WHERE id = $1`,
       [jobId, url, input.location ?? null, reqId, input.fitScore ?? null, input.contact ?? null, keys.filter((k) => k !== h.dedupe_key)]);
-    await recordTransition(db, { actor: input.source === "j6" ? "j6" : "julian", action: "opportunity_updated", table: "opportunity", id: jobId, before: beforeJob, context: { via: "track_opportunity" } });
+    await recordTransition(db, { actor: actorFor(input.source), action: "opportunity_updated", table: "opportunity", id: jobId, before: beforeJob, context: { via: "track_opportunity" } });
   } else {
     outcome = "created";
     let employerId = emp?.id ?? null;
     if (!employerId) {
       const er = (await db.query(`INSERT INTO employer (key, name, aliases) VALUES ($1, $2, ARRAY[$1]) ON CONFLICT (key) DO UPDATE SET updated_at = now() RETURNING id, (xmax = 0) AS inserted`, [empKey, employerName])).rows[0];
       employerId = String(er.id);
-      if (er.inserted) await recordTransition(db, { actor: input.source === "j6" ? "j6" : "julian", action: "employer_created", table: "employer", id: employerId, before: null });
+      if (er.inserted) await recordTransition(db, { actor: actorFor(input.source), action: "employer_created", table: "employer", id: employerId, before: null });
     }
     jobId = String((await db.query(`INSERT INTO opportunity (kind, area_id, org, title, url, location, status, fit_score, fit_notes, contact, source, dedupe_key, alias_keys, employer_id, requisition_id, identity_basis, source_ids, details)
        VALUES ('job', $1, $2, $3, $4, $5, 'discovered', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb) RETURNING id`,
       [area.id, employerName, title, url, input.location ?? null, input.fitScore ?? null, input.notes ?? null, input.contact ?? null, input.source, key, keys, employerId, reqId, reqId ? "requisition" : "title",
        [`${input.source}:${input.sourceRef ?? sha(key)}`], JSON.stringify({ trackedVia: input.source, ...(fixture ? { fixture: true } : {}) })])).rows[0].id);
-    await appendEvent(db, { actor: input.source === "j6" ? "j6" : "julian", action: "opportunity_tracked", entityType: "opportunity", entityId: jobId, after: { job: `${employerName} — ${title}`, reqId, url, area: area.name } });
+    await appendEvent(db, { actor: actorFor(input.source), action: "opportunity_tracked", entityType: "opportunity", entityId: jobId, after: { job: `${employerName} — ${title}`, reqId, url, area: area.name } });
   }
   const kind = wanted === "applied" ? "application" : wanted === "interviewing" ? "interview" : "tracked";
-  const ev = await recordOnJob(db, jobId, { kind, at, source: input.source, sourceId: input.sourceRef ?? `${kind}:${wanted}:${at.toISOString().slice(0, 10)}`, summary: input.notes ?? `${wanted} (${input.source === "j6" ? "Finagai, from the posting" : "Julian"})`, status: wanted }, now);
+  const ev = await recordOnJob(db, jobId, { kind, at, source: input.source, sourceId: input.sourceRef ?? `${kind}:${wanted}:${at.toISOString().slice(0, 10)}`, summary: input.notes ?? `${wanted} (${input.source === "j6" ? "Finagai, from the posting" : input.source === "canary" ? "Finagai internal canary" : "Julian"})`, status: wanted }, now);
   const after = (await db.query(`SELECT status, applied_at FROM opportunity WHERE id = $1`, [jobId])).rows[0];
   const alreadyApplied = previous !== null && STATUS_RANK[previous as keyof typeof STATUS_RANK] >= STATUS_RANK.applied;
   const fresh = (await db.query(`${JOB_SELECT} WHERE o.id = $1`, [jobId])).rows[0] as JobRow;
@@ -396,7 +398,7 @@ export async function recordOnJob(db: Db, jobId: string, e: { kind: EventKind; a
   return { inserted, transition, anomaly: t.anomaly ?? null, changes: rec.changes, step: rec.step };
 }
 
-export async function recordOpportunityUpdate(db: Db, input: { job?: string | null; employer?: string | null; title?: string | null; reqId?: string | null; kind: EventKind; at?: string | null; contact?: string | null; note?: string | null; source?: "julian" | "j6"; sourceRef?: string | null }, now = new Date()) {
+export async function recordOpportunityUpdate(db: Db, input: { job?: string | null; employer?: string | null; title?: string | null; reqId?: string | null; kind: EventKind; at?: string | null; contact?: string | null; note?: string | null; source?: "julian" | "j6" | "canary"; sourceRef?: string | null }, now = new Date()) {
   const rows = await findJobs(db, { query: input.job ?? null, employer: input.employer ?? null, title: input.title ?? null, reqId: input.reqId ?? null }, 12);
   if (!rows.length) return { error: `No job matches${input.job ? ` "${input.job}"` : ""}. Track it first (employer + title).` };
   if (rows.length > 1) {
