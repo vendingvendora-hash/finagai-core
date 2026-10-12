@@ -29,6 +29,8 @@ export interface EngineDeps {
   /** Phase 7 (ADR-086): what the exception detectors may read beyond the database (budget meter) */
   exceptions?: DetectorDeps;
   notify?: { store: DeliveryStore; sender: EmailSender; timezone: string; quietHours?: [number, number] } | undefined;
+  /** Phase 8 (ADR-088): the live self-check, run at most every `everyMs` by real (non-preview) ticks */
+  reliability?: { everyMs: number; version?: string; check: () => Promise<{ allPass: boolean; verdict: string[] }> };
 }
 export interface TickResult {
   tickId: string | null; trigger: string; preview: boolean; skipped?: string;
@@ -185,6 +187,10 @@ async function tick(ctx: EngineCtx, deps: EngineDeps, result: TickResult) {
     }
   }
 
+  // 3b) Phase 8 (ADR-088): continuous reliability — the ADR-087 self-check, hourly, its verdict on the stream (the
+  //     selfCheck detector below turns a repeated failure into an exception).
+  await runSelfCheck(ctx, deps);
+
   // 4) Phase 7 (ADR-086): management by exception — detect what is wrong, remedy what Finagai owns, and add only what
   //    needs Julian (or outlived Finagai's remedies); then Julian's own "tell me when" rules.
   try {
@@ -283,6 +289,21 @@ async function reconcileEscalations(ctx: EngineCtx, needs: EscalationNeed[], res
   }
   result.escalations.open = ctx.dryRun ? open.length - result.escalations.resolved.length + result.escalations.opened.length
     : Number((await pool.query(`SELECT count(*)::int AS n FROM escalation WHERE status = 'open'`)).rows[0].n);
+}
+
+/** Phase 8 (ADR-088): run the live self-check when due and record its verdict (read-only otherwise). */
+export async function runSelfCheck(ctx: EngineCtx, deps: EngineDeps): Promise<void> {
+  const r = deps.reliability;
+  if (!r || ctx.dryRun) return;
+  const last = (await ctx.pool.query(`SELECT occurred_at FROM event WHERE action = 'reliability_checked' ORDER BY id DESC LIMIT 1`)).rows[0];
+  if (last && ctx.now.getTime() - new Date(last.occurred_at).getTime() < r.everyMs - 60_000) return;
+  const started = Date.now();
+  let v: { allPass: boolean; verdict: string[] };
+  try { v = await r.check(); }
+  catch (e) { v = { allPass: false, verdict: [`selfCheck: FAIL (${String((e as Error)?.message ?? e).slice(0, 160)})`] }; }
+  const by = (word: string) => v.verdict.filter((x) => x.endsWith(`: ${word}`) || x.includes(`: ${word} (`)).map((x) => x.split(":")[0]!.trim());
+  await appendEvent(ctx.pool, { actor: "cos", action: "reliability_checked", causeIds: await causeHere(ctx.pool),
+    after: { allPass: v.allPass, failing: by("FAIL"), pending: by("PENDING"), passed: by("PASS").length, ...(r.version ? { version: r.version } : {}), durationMs: Date.now() - started } });
 }
 
 /** ADR-087: the latest stored event about one entity (the cause of what follows from it). */

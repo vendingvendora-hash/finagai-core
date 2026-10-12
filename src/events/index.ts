@@ -8,6 +8,7 @@ import { careerModule } from "./career.js";
 import { genericModule } from "./generic.js";
 import { learningModule } from "./learning.js";
 import { runTick, type EngineDeps } from "./engine.js";
+import { liveAcceptance } from "../live/acceptance.js";
 import type { AreaModule } from "./types.js";
 
 /** Generic watchers/reactions first, then each Area's plug-in. A new Area adds a module here — the engine is unchanged. */
@@ -17,10 +18,16 @@ export const ROUTABLE_WORKFLOWS = AREA_MODULES.flatMap((m) => m.subscriptions.fi
 
 export const TICK_EVERY_MS = 5 * 60_000;
 
+/** Phase 8 (ADR-088): how often the live self-check runs inside the loop. */
+export const SELF_CHECK_EVERY_MS = 60 * 60_000;
+
 export function startEventLoop(pool: pg.Pool, google: GoogleSearch | undefined, notify: EngineDeps["notify"], log: (m: string, f?: Record<string, unknown>) => void) {
+  const version = process.env.RENDER_GIT_COMMIT?.slice(0, 12) ?? "dev";
+  const selfCheck: EngineDeps["reliability"] = { everyMs: SELF_CHECK_EVERY_MS, version,
+    check: async () => { const a = await liveAcceptance(pool, { version }); return { allPass: a.allPass, verdict: a.verdict }; } };
   const run = async () => {
     try {
-      const r = await runTick(pool, { google, now: new Date(), dryRun: false, log }, { modules: AREA_MODULES, notify }, "interval");
+      const r = await runTick(pool, { google, now: new Date(), dryRun: false, log }, { modules: AREA_MODULES, notify, reliability: selfCheck }, "interval");
       if (!r.skipped) log("event tick", { events: r.events.length, routed: r.events.filter((e) => e.routes.length).length, workflows: r.workflows.map((w) => `${w.name}:${w.ok ? "ok" : "failed"}`),
         opened: r.escalations.opened.length, resolved: r.escalations.resolved.length });
     } catch (e) { log("event tick failed", { error: String((e as Error)?.message ?? e).slice(0, 200) }); }

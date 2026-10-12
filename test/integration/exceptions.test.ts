@@ -11,7 +11,7 @@ import { ensureArea, executiveBriefV2 } from "../../src/cos/operating.js";
 import { appendEvent, PgDeliveryStore } from "../../src/db/index.js";
 import { proactivityStatus, runTick } from "../../src/events/index.js";
 import type { AreaModule } from "../../src/events/types.js";
-import { exceptionsStatus } from "../../src/exceptions/index.js";
+import { CLEAR_AFTER_MIN, exceptionsStatus } from "../../src/exceptions/index.js";
 import { addRule, listRules, removeRule } from "../../src/exceptions/rules.js";
 import { eventLoopWatchdog } from "../../src/exceptions/watchdog.js";
 import type { EmailMessage, EmailSender } from "../../src/notify/delivery.js";
@@ -133,10 +133,12 @@ describe.skipIf(!admin || !migT || !appT)("management by exception (Phase 7, ADR
     await q(`INSERT INTO control_task (request, status, created_at) VALUES ('make the September chart', 'active', now() - interval '40 minutes')`);
     const r = await tick(new Date(t.getTime() + 60_000));
     expect(r.escalations.opened).toEqual([expect.stringMatching(/^\[principal_reserved\] Your Mac has been unreachable for 2 h and 1 Mac task\(s\) are waiting/)]);
+    // the idle note was superseded by the work exception (one detector, one current condition) — not held open
+    expect((await exc("mac:offline")).status).toBe("resolved");
     await q(`UPDATE control_task SET status = 'cancelled' WHERE status = 'active'`);
     await q(`UPDATE mac_runtime SET last_heartbeat_at = now()`);
     const back = await tick(new Date(t.getTime() + 120_000));
-    expect(back.exceptions!.resolved.length).toBeGreaterThanOrEqual(1);
+    expect(back.exceptions!.resolved.length).toBeGreaterThanOrEqual(1);            // Julian's exception clears the moment the Mac is back
     expect((await q(`SELECT count(*)::int AS n FROM operating_exception WHERE status = 'open' AND detector = 'mac_offline'`))[0].n).toBe(0);
   });
 
@@ -204,7 +206,11 @@ describe.skipIf(!admin || !migT || !appT)("management by exception (Phase 7, ADR
     const r2 = await tick(new Date(t.getTime() + 60_000));
     expect(r2.exceptions!.rulesFired).toEqual([]);                                  // still true: no repeat
     await q(`UPDATE mac_runtime SET last_heartbeat_at = now()`);
-    await tick(new Date(t.getTime() + 120_000));                                    // clears → re-arms
+    // Phase 8 (ADR-088): an idle-Mac note clears only after the Mac has stayed reachable for the hold period
+    await tick(new Date(t.getTime() + 120_000));
+    expect((await exc("mac:offline")).status).toBe("open");
+    await q(`UPDATE operating_exception SET last_seen_at = last_seen_at - make_interval(mins => $1) WHERE key = 'mac:offline'`, [CLEAR_AFTER_MIN.mac_offline! + 1]);
+    await tick(new Date(t.getTime() + 180_000));                                    // clears → re-arms
     expect((await q(`SELECT armed, fired_count FROM watch_rule WHERE statement = 'Tell me if anything goes wrong'`))[0]).toEqual({ armed: true, fired_count: 1 });
   });
 

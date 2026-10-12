@@ -17,11 +17,12 @@ import { exceptionsStatus } from "../exceptions/index.js";
 import { listRules } from "../exceptions/rules.js";
 import { causalChain, publish, readAfter, streamBounds } from "../live/stream.js";
 import { liveAcceptance } from "../live/acceptance.js";
+import { reliabilityReport } from "../live/reliability.js";
 
 export type FinagaiJob =
   | { kind: "stability"; runs: number; orgs: string[] } | { kind: "result"; code: number } | { kind: "trace"; code: number; org: string }
   | { kind: "replay"; code: number; runs: number } | { kind: "propose" } | { kind: "jobs"; code: number; employer: string } | { kind: "career-state" } | { kind: "proposal"; code: number } | { kind: "reinterpret"; code: number } | { kind: "acquisitions"; limit: number } | { kind: "unknown"; text: string }
-  | { kind: "pipeline"; area: string } | { kind: "find"; text: string } | { kind: "sync-preview" } | { kind: "lifecycle-preview" } | { kind: "brief" } | { kind: "area-status"; area: string } | { kind: "waiting" } | { kind: "mcp-manifest" } | { kind: "events"; limit: number } | { kind: "tick-preview" } | { kind: "lessons"; limit: number } | { kind: "learning-preview" } | { kind: "exceptions" } | { kind: "live"; limit: number } | { kind: "live-acceptance" };
+  | { kind: "pipeline"; area: string } | { kind: "find"; text: string } | { kind: "sync-preview" } | { kind: "lifecycle-preview" } | { kind: "brief" } | { kind: "area-status"; area: string } | { kind: "waiting" } | { kind: "mcp-manifest" } | { kind: "events"; limit: number } | { kind: "tick-preview" } | { kind: "lessons"; limit: number } | { kind: "learning-preview" } | { kind: "exceptions" } | { kind: "live"; limit: number } | { kind: "live-acceptance" } | { kind: "reliability"; days: number };
 
 export function parseFinagaiJob(request: string): FinagaiJob | null {
   const m = /^\s*finagai-job:\s*(.*)$/is.exec(request);
@@ -53,6 +54,7 @@ export function parseFinagaiJob(request: string): FinagaiJob | null {
   if (c === "learning-preview") return { kind: "learning-preview" };
   if (c === "exceptions") return { kind: "exceptions" };
   if (c === "live-acceptance") return { kind: "live-acceptance" };
+  if (c === "reliability") return { kind: "reliability", days: Math.min(int(rest[0], 1), 30) };
   if (c === "live") return { kind: "live", limit: Math.min(int(rest[0], 20), 100) };
   return { kind: "unknown", text: t.slice(0, 100) };
 }
@@ -96,6 +98,7 @@ export async function runFinagaiJob(pool: pg.Pool, google: GoogleSearch | undefi
       return { bounds: b, unpublishedLast24h: lag, latest: r.reset ? r : r.events, latestChain: lastChange ? await causalChain(pool, Number(lastChange)) : [] };
     }
     case "live-acceptance": return liveAcceptance(pool, { version: process.env.RENDER_GIT_COMMIT?.slice(0, 12) ?? "dev" });
+    case "reliability": return reliabilityReport(pool, { days: job.days });
     case "exceptions": return { ...(await exceptionsStatus(pool)), rules: await listRules(pool) };
     case "tick-preview": return runTick(pool, { google, now: new Date(), dryRun: true }, { modules: AREA_MODULES }, "preview");
     case "mcp-manifest": {
@@ -106,6 +109,6 @@ export async function runFinagaiJob(pool: pg.Pool, google: GoogleSearch | undefi
       const lastList = traffic.find((t) => t.action === "mcp_tools_listed");
       return { live: m, inProcess: TRAFFIC, lastToolsListServed: lastList ? { at: lastList.occurred_at, digest: lastList.after?.served, count: lastList.after?.count } : null, recentTraffic: traffic };
     }
-    case "unknown": return { error: `Unknown finagai-job "${job.text}". Allowed: stability [runs] [org,org], result <code>, trace <proposal> <org>, replay <proposal> [runs], jobs <proposal> <employer>, proposal <code>, reinterpret <code>, career-state, propose, acquisitions [n], pipeline [area], find <text>, sync-preview, lifecycle-preview, brief, area-status [area], waiting, mcp-manifest, events [n], tick-preview, lessons [n], learning-preview, exceptions, live [n], live-acceptance.` };
+    case "unknown": return { error: `Unknown finagai-job "${job.text}". Allowed: stability [runs] [org,org], result <code>, trace <proposal> <org>, replay <proposal> [runs], jobs <proposal> <employer>, proposal <code>, reinterpret <code>, career-state, propose, acquisitions [n], pipeline [area], find <text>, sync-preview, lifecycle-preview, brief, area-status [area], waiting, mcp-manifest, events [n], tick-preview, lessons [n], learning-preview, exceptions, live [n], live-acceptance, reliability [days].` };
   }
 }

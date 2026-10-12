@@ -25,10 +25,10 @@ export const STATE_TABLES = {
     conflict: { entity: "conflict", semantic: ["status", "resolution_note", "resolved_at"] },
     proposal: { entity: "proposal", semantic: ["status", "decided_at", "proposed_text"] },
     governance_request: { entity: "governance_request", semantic: ["status", "decided_at"] },
-    escalation: { entity: "escalation", semantic: ["needs", "summary", "status", "due_at", "notified_at", "resolved_at"] },
-    operating_exception: { entity: "operating_exception", semantic: ["owner", "severity", "needs", "status", "remediation", "resolved_at"] },
-    watch_rule: { entity: "watch_rule", semantic: ["statement", "status", "armed", "removed_at"] },
-    lesson: { entity: "lesson", semantic: ["statement", "effect", "status", "confidence", "retired_reason"] },
+    escalation: { entity: "escalation", semantic: ["needs", "summary", "status", "due_at", "notified_at", "resolved_at"], areaColumn: true },
+    operating_exception: { entity: "operating_exception", semantic: ["owner", "severity", "needs", "status", "remediation", "resolved_at"], areaColumn: true },
+    watch_rule: { entity: "watch_rule", semantic: ["statement", "status", "armed", "removed_at"], areaColumn: true },
+    lesson: { entity: "lesson", semantic: ["statement", "effect", "status", "confidence", "retired_reason"], areaColumn: true },
     control_task: { entity: "control_task", semantic: ["status", "verification_status", "awaiting_kind", "terminal_reason", "failure_class"] },
     artifact: { entity: "artifact", semantic: ["state", "available_until"] },
     review: { entity: "review", semantic: ["delivered_at", "delivery_status"] },
@@ -117,6 +117,11 @@ export async function recordTransition(db, t) {
 async function objectArea(db, table, entityId, row) {
     if (row && row.area_id)
         return String(row.area_id);
+    if (STATE_TABLES[table]?.areaColumn) {
+        const r = (await db.query(`SELECT area_id FROM finagai.${table} WHERE id = $1`, [entityId])).rows[0];
+        if (r?.area_id)
+            return String(r.area_id);
+    }
     if (table === "opportunity_event") {
         const r = (await db.query(`SELECT area_id FROM finagai.opportunity WHERE id = $1`, [entityId])).rows[0];
         if (r?.area_id)

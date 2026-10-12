@@ -16,6 +16,15 @@ import { DETECTORS } from "./detectors.js";
 import { REMEDIES } from "./remedies.js";
 export const MAX_REMEDY_ATTEMPTS = 3;
 const REMEDY_GAP_MS = 30 * 60_000;
+/**
+ * Phase 8 (ADR-088) — hysteresis for NOTED conditions. A Finagai-owned, info-level condition that comes and goes faster
+ * than this is one ongoing note, not a new exception each time (live: the Mac waking for a single heartbeat and sleeping
+ * again cleared and reopened mac:offline about every hour — two stream events per cycle, all night). Such a note
+ * resolves once its condition has been absent this long. Never applied to anything Julian owns or that Finagai is
+ * actively working (warning/critical): those clear the moment their condition does. A note whose detector now reports a
+ * different condition (e.g. the Mac offline WITH work waiting) is superseded and resolves at once.
+ */
+export const CLEAR_AFTER_MIN = { mac_offline: 45 };
 export async function detectAll(db, now, deps) {
     const detected = [];
     const problems = [];
@@ -40,6 +49,10 @@ export async function runExceptions(pool, now, dryRun, deps = {}) {
         if (r.status !== "open" || want.has(r.key))
             continue;
         if ([...failedDetectors].some((d) => detectorName(d) === r.detector))
+            continue;
+        const hold = r.owner === "finagai" && r.severity === "info" ? CLEAR_AFTER_MIN[r.detector] : undefined;
+        const superseded = detected.some((d) => d.detector === r.detector);
+        if (hold && !superseded && r.last_seen_at && now.getTime() - new Date(r.last_seen_at).getTime() < hold * 60_000)
             continue;
         res.resolved.push(r.summary);
         if (!dryRun) {
@@ -112,7 +125,7 @@ export async function runExceptions(pool, now, dryRun, deps = {}) {
     return res;
 }
 const detectorName = (fn) => ({ watcherFailing: "watcher_failing", workflowFailing: "workflow_failing", deadLetters: "dead_letter", budget: "budget", deliveryFailing: "delivery_failing",
-    areaBreach: "area_breach", macOffline: "mac_offline", stuckTasks: "stuck_task", reviewBacklog: "review_backlog" }[fn] ?? fn);
+    areaBreach: "area_breach", macOffline: "mac_offline", stuckTasks: "stuck_task", reviewBacklog: "review_backlog", selfCheck: "self_check" }[fn] ?? fn);
 /** Read-only: what is wrong right now, who owns it, what Finagai is doing about it. */
 export async function exceptionsStatus(db, now = new Date()) {
     const open = (await db.query(`SELECT e.key, e.detector, e.owner, e.severity, e.needs, e.summary, e.detail, e.first_seen_at, e.last_seen_at, e.remediation, e.remediation_attempts,

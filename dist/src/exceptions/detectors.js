@@ -144,5 +144,24 @@ export const reviewBacklog = async (db, now) => {
     return rows.filter((t) => t.changed).map((t) => ({ key: `task:${t.code}:review`, detector: "review_backlog", owner: "julian", severity: "info", needs: "judgment",
         summary: `Task ${t.code} changed something Finagai could not verify — your review decides whether it counts: ${String(t.result_summary ?? "").slice(0, 120)}` }));
 };
-export const DETECTORS = { watcherFailing, workflowFailing, deadLetters, budget, deliveryFailing, areaBreach, macOffline, stuckTasks, reviewBacklog };
+/**
+ * Phase 8 (ADR-088) — the platform's own guarantees, checked continuously. The engine runs the ADR-087 live self-check
+ * hourly and records each verdict on the stream (reliability_checked). A check that FAILED in the two latest runs is an
+ * exception (one failure can be a coincidence — e.g. Julian's tool call landing inside the read-only window; two in a
+ * row is not). PENDING is never a failure. Finagai cannot fix its own code, so if it persists an hour Julian is asked
+ * (judgment) to have it fixed; it clears itself when the check passes again.
+ */
+export const selfCheck = async (db, now) => {
+    const runs = (await db.query(`SELECT after FROM event WHERE action = 'reliability_checked' AND occurred_at > $1::timestamptz - interval '3 hours' ORDER BY id DESC LIMIT 2`, [now])).rows
+        .map((r) => (r.after ?? {}));
+    if (runs.length < 2)
+        return [];
+    const [latest, previous] = runs;
+    return (latest.failing ?? []).filter((c) => (previous.failing ?? []).includes(c)).map((c) => ({
+        key: `reliability:${c}`, detector: "self_check", owner: "finagai", severity: "warning", escalateAfterMin: 60,
+        summary: `Finagai's live self-check "${c}" failed twice in a row — a platform guarantee (ADR-087) is not holding`,
+        detail: `latest run on Core ${latest.version ?? "?"}; see finagai-job: live-acceptance for the evidence`
+    }));
+};
+export const DETECTORS = { watcherFailing, workflowFailing, deadLetters, budget, deliveryFailing, areaBreach, macOffline, stuckTasks, reviewBacklog, selfCheck };
 //# sourceMappingURL=detectors.js.map

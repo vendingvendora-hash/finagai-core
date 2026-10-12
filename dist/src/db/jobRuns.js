@@ -1,3 +1,4 @@
+import { appendEvent } from "./events.js";
 /**
  * Lease-based job ledger on finagai.job_run (ADR-033). Postgres row locking on the
  * (job, scheduled_for) unique key makes concurrent claims safe: at most one live lease per slot.
@@ -34,7 +35,15 @@ export class PgJobLedger {
     async finish(runId, owner, outcome) {
         const res = await this.pool.query(`UPDATE job_run SET status = $3, finished_at = now(), lease_expires_at = NULL, lease_owner = NULL,
               error = $4
-        WHERE id = $1 AND lease_owner = $2 AND status = 'running'`, [runId, owner, outcome.status, outcome.status === "succeeded" ? null : outcome.detail ?? null]);
+        WHERE id = $1 AND lease_owner = $2 AND status = 'running'
+        RETURNING job, scheduled_for, attempt, started_at`, [runId, owner, outcome.status, outcome.status === "succeeded" ? null : outcome.detail ?? null]);
+        const r = res.rows[0];
+        // Phase 8 (ADR-088): every scheduled job run is on the Live State Stream, in the run's own unit of work (its id is
+        // the correlation id of everything the job did), so reliability is measured from the stream like everything else.
+        if (r)
+            await appendEvent(this.pool, { actor: "system", action: "job_finished", correlationId: runId, causeIds: [],
+                after: { job: r.job, scheduledFor: new Date(r.scheduled_for).toISOString(), attempt: Number(r.attempt), status: outcome.status,
+                    durationMs: r.started_at ? Date.now() - new Date(r.started_at).getTime() : null, ...(outcome.status !== "succeeded" && outcome.detail ? { detail: outcome.detail.slice(0, 300) } : {}) } });
         return res.rowCount === 1;
     }
 }

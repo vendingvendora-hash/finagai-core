@@ -59,6 +59,9 @@ const RULES = {
     learning_ran: () => F("workflow", "completed"),
     review_generated: () => F("workflow", "completed"),
     promote_seed_batch: () => F("workflow", "completed"),
+    // Phase 8 (ADR-088): scheduled job runs and the continuous self-check are on the stream
+    job_finished: (r) => F("workflow", r.after?.status === "succeeded" ? "completed" : r.after?.status === "skipped" ? "skipped" : "failed", r.after?.status === "failed" ? { nextOwner: "finagai" } : { lowValue: true }),
+    reliability_checked: (r) => F("system", r.after?.allPass === false && Array.isArray(r.after?.failing) && r.after.failing.length ? "check_failed" : "checked", { lowValue: !(Array.isArray(r.after?.failing) && (r.after?.failing).length), verified: Array.isArray(r.after?.failing) ? !r.after.failing.length : null }),
     // tools / sources
     tool_called: (r) => F("tool", r.after?.outcome === "ok" ? "succeeded" : "failed", { verified: null, lowValue: r.after?.outcome === "ok" }),
     mcp_initialize: () => F("source", "connected", { lowValue: true }),

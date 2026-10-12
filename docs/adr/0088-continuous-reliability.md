@@ -1,0 +1,103 @@
+# ADR-088 — Phase 8: continuous reliability on the Live State Stream
+
+Status: Decided (builder, under Julian's 2026-10-09 Phase 0–8 mandate). Increment 1 shipped as hotfix 36.
+Date: 2026-10-12
+
+## Context
+Phases 0–7 made Finagai do the work. Phase 8 makes it **keep working**, and makes "is it working?" a fact Finagai
+checks continuously rather than something found in an audit.
+
+ADR-087 (closed 2026-10-12) is the foundation. The event table is the one source of truth, and every state change is
+a semantic event with its object, before/after, Area, unit of work and cause. Phase 8 therefore adds **no monitoring
+store**:
+- reliability is computed from the stream;
+- reliability problems are Phase 7 operating exceptions, with owner, remedy and escalation;
+- a future Command Center sees reliability the same way it sees everything else.
+
+The live ADR-087 acceptance (canaries 1–3) left these known gaps:
+- the self-check ran only when someone asked for it;
+- scheduler job runs were invisible on the stream;
+- the idle-Mac note flapped (opened and cleared about every hour while the Mac slept, two events per cycle, all night);
+- `watch_rule_removed` had no Area;
+- workflow-raised escalations never auto-resolve;
+- detector-opened exceptions are causal roots;
+- the career interpreter labels job history "analyzed→X".
+
+## Decision
+
+### Principles
+1. **Measure from the stream.** Every reliability number can be re-derived by replaying events. The engine's own tick
+   ledger (`event_tick`) is the one exception, because a stalled loop writes no events.
+2. **Act through Phase 7.** A reliability failure is an `operating_exception`:
+   - Finagai owns it and applies a remedy if one exists.
+   - Julian hears about it only if it persists, as a judgment ("have it fixed").
+   - It clears itself when the condition clears.
+3. **One failure is a signal; a repeated failure is an exception.** Pending is never a failure.
+4. **Noise is a reliability defect.** A condition that flaps is one ongoing note, not a stream of open/close events.
+
+### Increment 1 (hotfix 36)
+- **Continuous self-check.**
+  - The event loop runs the full ADR-087 `live-acceptance` at most hourly, inside a real tick (never a preview).
+  - It records the verdict on the stream as `reliability_checked` (`system.checked` / `system.check_failed`): allPass,
+    failing, pending, passed count, Core version, duration. The tick's unit of work causes it.
+  - The new `selfCheck` detector opens `reliability:<check>` when the same check FAILED in the two latest runs. It is
+    Finagai-owned, warning, and escalated as judgment after 60 minutes.
+  - A check that throws is recorded as the failure `selfCheck`.
+- **Scheduled job runs on the stream.** `PgJobLedger.finish` appends `job_finished` (`workflow.completed`, `skipped` or
+  `failed`). Its correlation id is the run id, which is also the correlation of everything the job did. It records job,
+  slot, attempt, status, duration and failure detail. A finish after a lost lease records nothing.
+- **Hysteresis for noted conditions.**
+  - `CLEAR_AFTER_MIN` (`mac_offline`: 45 min): a Finagai-owned **info** note resolves only after its condition has been
+    absent that long. 45 minutes is longer than the 30-minute re-detection after a brief wake.
+  - It never applies to anything Julian owns or Finagai is actively working; those clear at once.
+  - A note whose detector now reports a different condition (the Mac offline *with* work waiting) is superseded and
+    resolves at once.
+- **Object Area for rows that carry one.** Escalations, exceptions, watch rules and lessons have an `area_id` that is not
+  semantic state. Their transition events are now filed under it. This closes the ADR-087 residual (`watch_rule_removed`
+  had no Area).
+- **Reliability report.** `finagai-job: reliability [days]` (read-only) gives a verdict of **healthy** or **degraded**,
+  with the reasons, against an explicit budget (`RELIABILITY_BUDGET`). It covers:
+  - event-loop ticks, failures and stalls (gap > 15 min, including "still stalled");
+  - per-workflow success rate (≥ 90% over ≥ 3 runs);
+  - tool-call failure rate (≤ 10%);
+  - scheduled jobs by status;
+  - notifications delivered, held for quiet hours, or failed;
+  - exceptions opened and **flapping** (> 3 opens per key);
+  - self-check runs and failures;
+  - events not yet on the live stream.
+
+### Increment 2 (next)
+- **Workflow-raised escalations** auto-resolve when the workflow's next run no longer raises them, or when the object
+  they are about reaches a state that makes them moot.
+- **Detector-opened exceptions** cite the evidence that tripped them (the watcher failure, the failed workflow event,
+  the stale heartbeat), instead of being causal roots.
+- **The career interpreter's transition label** reflects the stored status, so it no longer says "analyzed→offer" for a
+  job that was applied.
+- **Daily reliability digest line** in the executive brief, from the report. Silent when healthy.
+- **Synthetic canaries without Julian's mailbox.** A scheduled internal canary (a labeled test-Area object driven
+  through the normal tool paths and cleaned up through them) proves the state-change path continuously. The external
+  email path still needs a real email, so it stays a manual canary.
+
+## Consequences
+- The ADR-087 guarantees are now checked every hour in production, not just when asked. A regression surfaces as an
+  exception within about two hours, and reaches Julian as a judgment only if it persists.
+- Every unit of work Finagai runs on its own (ticks, tool calls, scheduled jobs) is visible on the stream with its
+  outcome.
+- The idle-Mac note no longer produces open/close noise all night. Julian-owned Mac exceptions are unchanged.
+- No schema change. No new tool on the MCP surface: the tool-list digest is unchanged, and the report is an operator
+  command.
+
+## Evidence (increment 1, pre-deploy)
+- `test/integration/reliability.test.ts` (5 tests) covers:
+  - the self-check runs in real ticks only and is due-gated;
+  - its verdict is on the stream with a cause;
+  - two consecutive failures open the exception, and a pass clears it;
+  - a thrown check is recorded;
+  - `job_finished` with run correlation;
+  - one Mac-offline note across a brief wake, clearing after the hold;
+  - rule events carry the rule's Area;
+  - the report names a failed job, self-check failures and a flapping key.
+- `test/integration/exceptions.test.ts` is updated for the new semantics. The idle note is superseded at once by the
+  work exception, Julian's exception clears the moment the Mac is back, and the idle note clears after the hold.
+- **Mutation checks.** Disabling the hold fails the flapping test; disabling the Area lookup fails the rule-Area test.
+- **Full suites:** 521 unit, 281 integration, all passing.

@@ -13,7 +13,11 @@ export { causeHere };
 import { currentCause } from "./live-context.js";
 import type { Queryable } from "./pool.js";
 
-export interface StateTable { /** event entity_type */ entity: string; /** columns whose change is a semantic state change */ semantic: string[] }
+export interface StateTable {
+  /** event entity_type */ entity: string;
+  /** columns whose change is a semantic state change */ semantic: string[];
+  /** the row carries an area_id that is not itself semantic state (the object's Area for event attribution) */ areaColumn?: true;
+}
 
 export const STATE_TABLES: Record<string, StateTable> = {
   area: { entity: "area", semantic: ["name", "description", "status", "archived_at"] },
@@ -30,10 +34,10 @@ export const STATE_TABLES: Record<string, StateTable> = {
   conflict: { entity: "conflict", semantic: ["status", "resolution_note", "resolved_at"] },
   proposal: { entity: "proposal", semantic: ["status", "decided_at", "proposed_text"] },
   governance_request: { entity: "governance_request", semantic: ["status", "decided_at"] },
-  escalation: { entity: "escalation", semantic: ["needs", "summary", "status", "due_at", "notified_at", "resolved_at"] },
-  operating_exception: { entity: "operating_exception", semantic: ["owner", "severity", "needs", "status", "remediation", "resolved_at"] },
-  watch_rule: { entity: "watch_rule", semantic: ["statement", "status", "armed", "removed_at"] },
-  lesson: { entity: "lesson", semantic: ["statement", "effect", "status", "confidence", "retired_reason"] },
+  escalation: { entity: "escalation", semantic: ["needs", "summary", "status", "due_at", "notified_at", "resolved_at"], areaColumn: true },
+  operating_exception: { entity: "operating_exception", semantic: ["owner", "severity", "needs", "status", "remediation", "resolved_at"], areaColumn: true },
+  watch_rule: { entity: "watch_rule", semantic: ["statement", "status", "armed", "removed_at"], areaColumn: true },
+  lesson: { entity: "lesson", semantic: ["statement", "effect", "status", "confidence", "retired_reason"], areaColumn: true },
   control_task: { entity: "control_task", semantic: ["status", "verification_status", "awaiting_kind", "terminal_reason", "failure_class"] },
   artifact: { entity: "artifact", semantic: ["state", "available_until"] },
   review: { entity: "review", semantic: ["delivered_at", "delivery_status"] },
@@ -136,6 +140,10 @@ export async function recordTransition(db: Queryable, t: Transition): Promise<nu
  */
 async function objectArea(db: Queryable, table: string, entityId: string, row: Record<string, unknown> | null): Promise<string | undefined> {
   if (row && row.area_id) return String(row.area_id);
+  if (STATE_TABLES[table]?.areaColumn) {
+    const r = (await db.query(`SELECT area_id FROM finagai.${table} WHERE id = $1`, [entityId])).rows[0];
+    if (r?.area_id) return String(r.area_id);
+  }
   if (table === "opportunity_event") {
     const r = (await db.query(`SELECT area_id FROM finagai.opportunity WHERE id = $1`, [entityId])).rows[0];
     if (r?.area_id) return String(r.area_id);
