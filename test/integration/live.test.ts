@@ -4,6 +4,7 @@
  * and consistent with authoritative state (snapshot + replay agree).
  */
 import http from "node:http";
+import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import pg from "pg";
@@ -18,6 +19,9 @@ import type { AreaModule } from "../../src/events/types.js";
 import { liveHandler } from "../../src/live/http.js";
 import { causalChain, history, publish, readAfter, snapshot, type LiveEvent } from "../../src/live/stream.js";
 import { liveAcceptance } from "../../src/live/acceptance.js";
+import { recordOnJob, trackOpportunity } from "../../src/cos/opportunities.js";
+import { sweepOverdue } from "../../src/cos/followups.js";
+import { isOwnMail } from "../../src/events/engine.js";
 import type { EmailMessage, EmailSender } from "../../src/notify/delivery.js";
 import { createHandler } from "../../src/server/app.js";
 import { createLogger } from "../../src/server/log.js";
@@ -214,11 +218,122 @@ describe.skipIf(!admin || !migT || !appT)("Live State Stream (ADR-087)", () => {
     expect(rows[1].cause_ids.map(Number)).toEqual([Number((await q(`SELECT id FROM event WHERE correlation_id = '11111111-1111-4111-8111-111111111111' AND action = 'workflow_started'`))[0].id)]);
   });
 
+  // ------------------------------------------------------------------------------------------------ hotfix 34
+  let since34 = new Date();
+  it("hotfix 34 — the Vantage case: a real-shaped email that reschedules a follow-up emits that transition, with object, before/after, unit of work and cause", async () => {
+    since34 = new Date(Date.now() - 1000);
+    const T0 = new Date("2026-10-01T15:00:00Z"), T1 = new Date("2026-10-12T14:40:00Z");
+    // production calls arrive as a unit of work (a tool call); the test does the same
+    const asTool = <T,>(name: string, fn: () => Promise<T>) => withCause({ correlationId: randomUUID(), causeIds: [], root: { actor: "julian", what: `tool:${name}` } }, fn);
+    const tracked = await asTool("track_opportunity", () => trackOpportunity(pool, { employer: "Vantage Network", title: "Staff Accountant", status: "applied", at: T0.toISOString(), source: "julian" }, T0)) as { jobId: string };
+    const f0 = (await q(`SELECT id, due_at FROM followup WHERE opportunity_id = $1 AND state IN ('open','waiting')`, [tracked.jobId]))[0];
+    expect(f0).toBeTruthy();
+    const mod: AreaModule = {
+      watchers: [{ name: "gmail", everyMs: 0, async poll() { return { events: [{ source: "gmail", kind: "mail.received", externalId: "acct:m-vantage-viewed", occurredAt: T1.toISOString(),
+        summary: "LinkedIn — Your application was viewed by Vantage Network", payload: { from: "LinkedIn <jobs-noreply@linkedin.com>" } }], cursors: [], problems: [] }; } }],
+      subscriptions: [{ id: "career.viewed", area: "Career", workflow: "career.viewed", async match() { return "job evidence (viewed — Vantage Network)"; } }],
+      workflows: [{ name: "career.viewed", async run(ctx) {
+        await recordOnJob(ctx.pool, tracked.jobId, { kind: "application", at: T1, source: "gmail", sourceId: "gmail:m-vantage-viewed", summary: "Your application was viewed by Vantage Network" }, ctx.now);
+        return { changes: ["Vantage viewed"], escalations: [{ key: "test:vantage-call", needs: "judgment" as const, summary: "Vantage asked for a call — your decision", areaId: careerId }] };
+      } }],
+    };
+    sent.length = 0;
+    await runTick(pool, { now: T1, dryRun: false }, { modules: [mod], exceptions: { budget: async () => ({ monthToDateUsd: 1, targetUsd: 30, ceilingUsd: 36 }) },
+      notify: { store: new PgDeliveryStore(pool), sender, timezone: "America/New_York" } }, "manual");
+    const evs = await history(pool, { from: since34.toISOString() });
+    const one = (a: string, pred: (e: LiveEvent) => boolean = () => true) => evs.filter((e) => e.action === a && pred(e)).at(-1)!;
+    const observed = one("evidence_observed", (e) => (e.after as { summary: string }).summary.includes("Vantage"));
+    const routed = one("evidence_routed", (e) => e.cause.eventIds.includes(observed.eventId));
+    const started = one("workflow_started", (e) => e.cause.eventIds.includes(routed.eventId));
+    const corr = observed.cause.correlationId;
+    // the follow-up moved: its own event, the object, the due date before and after, the tick, the workflow run as cause
+    const moved = one("followup_updated");
+    expect(moved).toEqual(expect.objectContaining({ class: "wait.updated", entity: { type: "followup", id: f0.id } }));
+    expect(new Date((moved.before as { due_at: string }).due_at).toISOString()).toBe(new Date(f0.due_at).toISOString());
+    expect((moved.after as { due_at: string }).due_at.slice(0, 10)).toBe("2026-10-26");
+    expect(moved.cause).toEqual(expect.objectContaining({ correlationId: corr, eventIds: [started.eventId] }));
+    expect(moved.area).toEqual({ id: careerId, name: "Career" });
+    // the new piece of job history: its own event about the job
+    const hist = one("opportunity_evidence_added");
+    expect(hist).toEqual(expect.objectContaining({ class: "evidence.attached", entity: { type: "opportunity", id: tracked.jobId } }));
+    expect(hist.after).toEqual(expect.objectContaining({ kind: "application", transition: null }));
+    expect(hist.cause.eventIds).toEqual([started.eventId]);
+    // only the evidence date moved on the job itself (not a semantic field): no extra job event, and nothing silent (see acceptance)
+    // escalation -> notification, causally linked
+    const done = one("workflow_completed", (e) => e.cause.eventIds.includes(started.eventId));
+    const esc = one("escalation_opened", (e) => (e.after as { key: string }).key === "test:vantage-call");
+    const told = one("notification_delivered", (e) => e.cause.eventIds.includes(esc.eventId));
+    expect(esc.cause.eventIds).toEqual([done.eventId]);
+    expect(told).toBeTruthy();
+    expect(one("escalation_notified", (e) => e.entity.id === esc.entity.id).cause.eventIds).toEqual([told.eventId]);
+    expect(sent.length).toBe(1);
+  });
+
+  it("hotfix 34 — a follow-up passing its date is its own event (before → after, cites the follow-up's previous event)", async () => {
+    const unit = <T,>(fn: () => Promise<T>) => withCause({ correlationId: randomUUID(), causeIds: [], root: { actor: "julian", what: "tool:track_waiting" } }, fn);
+    const f = (await q(`INSERT INTO followup (area_id, summary, counterparty, state, due_at, origin) VALUES ($1, 'Waiting on Lee', 'Lee', 'waiting', now() - interval '1 hour', 'julian') RETURNING id`, [careerId]))[0];
+    const created = await unit(() => appendEvent(pool, { actor: "julian", action: "followup_created", entityType: "followup", entityId: f.id, after: { summary: "Waiting on Lee", state: "waiting" } }));
+    await unit(() => sweepOverdue(pool));
+    const ev = (await history(pool, { from: since34.toISOString() })).filter((e) => e.action === "followup_overdue" && e.entity.id === f.id).at(-1)!;
+    expect(ev).toEqual(expect.objectContaining({ class: "wait.expired", before: { state: "waiting" }, after: expect.objectContaining({ state: "overdue" }) }));
+    // cause: the unit of work that swept it (a tool call here; the engine's workflow run in production)
+    const [cause] = ev.cause.eventIds;
+    expect((await q(`SELECT action, after->>'what' AS what FROM event WHERE id = $1`, [cause]))[0]).toEqual({ action: "work_invoked", what: "tool:track_waiting" });
+    expect(cause).toBeGreaterThan(created);
+  });
+
+  it("hotfix 34 — a held (quiet-hours) notification cites the escalation it holds", async () => {
+    const mod: AreaModule = { watchers: [], subscriptions: [], workflows: [] };
+    const kim = (await q(`INSERT INTO followup (area_id, summary, counterparty, state, due_at, origin) VALUES ($1, 'Waiting on Kim', 'Kim', 'waiting', now() - interval '2 days', 'julian') RETURNING id`, [careerId]))[0];
+    await withCause({ correlationId: randomUUID(), causeIds: [], root: { actor: "julian", what: "tool:track_waiting" } },
+      () => appendEvent(pool, { actor: "julian", action: "followup_created", entityType: "followup", entityId: kim.id, after: { summary: "Waiting on Kim", state: "waiting" } }));
+    await runTick(pool, { now: new Date("2026-10-13T03:00:00Z"), dryRun: false }, { modules: [mod], exceptions: { budget: async () => ({ monthToDateUsd: 1, targetUsd: 30, ceilingUsd: 36 }) },
+      notify: { store: new PgDeliveryStore(pool), sender, timezone: "America/New_York" } }, "manual");     // 23:00 ET
+    const evs = await history(pool, { from: since34.toISOString() });
+    const held = evs.filter((e) => e.action === "notification_suppressed").at(-1)!;
+    const escIds = evs.filter((e) => e.action === "escalation_opened").map((e) => e.eventId);
+    expect(held.after).toEqual(expect.objectContaining({ reason: "quiet hours" }));
+    expect(held.cause.eventIds.some((id) => escIds.includes(id))).toBe(true);
+  });
+
+  it("hotfix 34 — Finagai's own outgoing mail is observed but never routed as evidence", async () => {
+    process.env.NOTIFY_FROM = "Finagai <review@notify.example.test>";
+    expect(isOwnMail({ from: "Finagai <review@notify.example.test>" })).toBe(true);
+    expect(isOwnMail({ from: "LinkedIn <jobs-noreply@linkedin.com>" })).toBe(false);
+    const mod: AreaModule = {
+      watchers: [{ name: "gmail", everyMs: 0, async poll() { return { events: [{ source: "gmail", kind: "mail.received", externalId: "acct:m-own-review", occurredAt: new Date().toISOString(),
+        summary: "Finagai — Finagai weekly review", payload: { from: "Finagai <review@notify.example.test>" } }], cursors: [], problems: [] }; } }],
+      subscriptions: [{ id: "career.all", area: "Career", workflow: "career.all", async match() { return "from/about a live job (Beth Young)"; } }],
+      workflows: [{ name: "career.all", async run() { throw new Error("must not run on Finagai's own mail"); } }],
+    };
+    const r = await runTick(pool, { now: new Date(), dryRun: false }, { modules: [mod] }, "manual");
+    expect(r.events.find((e) => e.summary.includes("weekly review"))).toEqual(expect.objectContaining({ status: "ignored", reason: expect.stringMatching(/own outgoing/) }));
+    expect(r.workflows).toEqual([]);
+    delete process.env.NOTIFY_FROM;
+  });
+
   it("the live acceptance self-check passes every property it can prove on this database (and never changes state)", async () => {
-    const r = await liveAcceptance(pool, { version: "test", port: Number(new URL(base).port) });
+    const r = await liveAcceptance(pool, { version: "test", port: Number(new URL(base).port), since: since34 });
     const c = r.checks as Record<string, { pass: boolean | null } & Record<string, unknown>>;
-    for (const k of ["noDeletePrivilege", "ordering", "snapshotCorrespondsToStream", "needsMeAgreement", "causalChain", "resume", "expiredCursor", "protections"]) expect({ k, pass: c[k]!.pass, detail: c[k]!.pass ? null : c[k] }).toEqual({ k, pass: true, detail: null });
+    for (const k of ["noDeletePrivilege", "ordering", "snapshotCorrespondsToStream", "needsMeAgreement", "emailToStateChain", "escalationNotificationChain", "stateEventQuality", "noSilentStateChanges", "resume", "expiredCursor", "protections"])
+      expect({ k, pass: c[k]!.pass, detail: c[k]!.pass ? null : c[k] }).toEqual({ k, pass: true, detail: null });
     expect((c.protections!.redaction as { storedEventsWithSecretShapedFields: number }).storedEventsWithSecretShapedFields).toBeGreaterThan(0);   // there was something to redact
-    expect((c.causalChain!.stages as Record<string, boolean>)).toEqual(expect.objectContaining({ input: true, routing: true, workflow: true, stateChange: true, escalation: true, notification: true }));
+    const proof = c.emailToStateChain!.proof as { stateChanges: Array<{ action: string }>; defects: string[] };
+    expect(proof.stateChanges.map((x) => x.action)).toEqual(expect.arrayContaining(["followup_updated", "opportunity_evidence_added"]));
+    expect((c.escalationNotificationChain!.latest as { fromEmail: boolean; notification: unknown }).fromEmail).toBe(true);
+  }, 30_000);
+
+  it("the self-check is strict: an internal (non-email) input or a state change with no event is never a pass", async () => {
+    const r0 = await liveAcceptance(pool, { version: "test", port: Number(new URL(base).port), since: new Date(Date.now() + 60_000) });   // nothing after "since"
+    const c0 = r0.checks as Record<string, { pass: boolean | null }>;
+    expect(c0.emailToStateChain!.pass).toBeNull();
+    expect(c0.escalationNotificationChain!.pass).toBeNull();
+    expect(r0.allPass).toBe(false);
+    // a silent write (bypassing the event writer) is caught at runtime
+    await new Promise((r) => setTimeout(r, 1500));
+    const t = new Date(Date.now() - 500);
+    await q(`UPDATE followup SET due_at = due_at + interval '1 day', updated_at = now() WHERE summary = 'Waiting on Lee'`);
+    const r1 = await liveAcceptance(pool, { version: "test", port: Number(new URL(base).port), since: t });
+    expect((r1.checks as Record<string, { pass: boolean | null; silent?: string[] }>).noSilentStateChanges).toEqual(expect.objectContaining({ pass: false, silent: [expect.stringMatching(/^followup .* with no event$/)] }));
   }, 30_000);
 });

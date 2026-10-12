@@ -8,6 +8,7 @@
  *   (compare-and-set) -> record decision with authenticated principal and credential -> apply the
  *   action -> immutable event carrying approval ID and principal -> executed.
  */
+import { recordTransition, rowState } from "../db/state-events.js";
 import type pg from "pg";
 import { appendEvent, withTransaction } from "../db/index.js";
 import type { TargetRef } from "./stage.js";
@@ -189,10 +190,14 @@ async function resolveConflict(tx: pg.PoolClient, req: Req, ev: Ev) {
   await tx.query(`UPDATE conflict SET status = $2, resolution_note = $3, resolved_at = now(), version = version + 1 WHERE id = $1`, [c.id, status, req.rationale]);
   // Clear the dispute only when no other conflict remains open on the same record.
   if (c.existing_type === "work_item") {
+    const before = await rowState(tx, "work_item", String(c.existing_id));
     await tx.query(`UPDATE work_item SET disputed = EXISTS (SELECT 1 FROM conflict WHERE existing_id = $1 AND status = 'open') WHERE id = $1`, [c.existing_id]);
+    await recordTransition(tx, { actor: "julian", action: "update", table: "work_item", id: String(c.existing_id), before, context: { via: "conflict_resolve", conflict: c.id } });
   } else if (c.existing_type === "knowledge_item") {
+    const before = await rowState(tx, "knowledge_item", String(c.existing_id));
     await tx.query(`UPDATE knowledge_item SET status = 'active' WHERE id = $1 AND status = 'disputed'
                       AND NOT EXISTS (SELECT 1 FROM conflict WHERE existing_id = $1 AND status = 'open')`, [c.existing_id]);
+    await recordTransition(tx, { actor: "julian", action: "update", table: "knowledge_item", id: String(c.existing_id), before, context: { via: "conflict_resolve", conflict: c.id } });
   }
   await ev("conflict_resolve", "conflict", c.id, { resolution });
   return { conflict: c.id, resolution };

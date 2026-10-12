@@ -1,3 +1,16 @@
+/**
+ * Phase 7 (ADR-086) — management by exception. Each event-engine tick:
+ *   1. every detector reports what is wrong now (detectors.ts)
+ *   2. the store opens / updates / resolves operating_exception rows (a cleared condition resolves itself)
+ *   3. Finagai-owned exceptions get their remedy (bounded: ≤ 3 attempts, ≥ 30 min apart)
+ *   4. only two things reach Julian (as escalations, once, quiet hours respected):
+ *        - an exception only he can clear (owner 'julian', with what it needs)
+ *        - a Finagai-owned exception that outlived its remedies (escalateAfterMin) — a judgment call
+ *   5. his "tell me when …" rules are evaluated (rules.ts)
+ * Nothing here changes authority, approvals, budgets or verification: detectors read, remedies only re-run Finagai's
+ * own internal reconciliation.
+ */
+import { causeHere, recordTransition, rowState } from "../db/state-events.js";
 import { appendEvent } from "../db/index.js";
 import { DETECTORS } from "./detectors.js";
 import { REMEDIES } from "./remedies.js";
@@ -30,8 +43,9 @@ export async function runExceptions(pool, now, dryRun, deps = {}) {
             continue;
         res.resolved.push(r.summary);
         if (!dryRun) {
+            const before = await rowState(pool, "operating_exception", String(r.id));
             await pool.query(`UPDATE operating_exception SET status = 'resolved', resolved_at = $2, resolution = 'condition cleared' WHERE id = $1`, [r.id, now]);
-            await appendEvent(pool, { actor: "cos", action: "exception_resolved", entityType: "operating_exception", entityId: r.id, after: { key: r.key, summary: r.summary } });
+            await recordTransition(pool, { actor: "cos", action: "exception_resolved", table: "operating_exception", id: String(r.id), before, context: { key: r.key, summary: r.summary, resolution: "condition cleared" } });
         }
     }
     // open / update
@@ -40,6 +54,7 @@ export async function runExceptions(pool, now, dryRun, deps = {}) {
         if (!r || r.status === "resolved") {
             res.opened.push(`[${d.owner}] ${d.summary}`);
             if (!dryRun) {
+                const before = r ? await rowState(pool, "operating_exception", String(r.id)) : null;
                 const row = (await pool.query(`INSERT INTO operating_exception (key, detector, area_id, owner, severity, needs, summary, detail, remediation, first_seen_at, last_seen_at)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
             ON CONFLICT (key) DO UPDATE SET status = 'open', resolved_at = NULL, resolution = NULL, first_seen_at = EXCLUDED.first_seen_at, last_seen_at = EXCLUDED.last_seen_at,
@@ -48,13 +63,17 @@ export async function runExceptions(pool, now, dryRun, deps = {}) {
               occurrences = operating_exception.occurrences + 1
             RETURNING *`, [d.key, d.detector, d.areaId ?? null, d.owner, d.severity, d.needs ?? null, d.summary.slice(0, 500), d.detail?.slice(0, 1000) ?? null, d.remediation ?? null, now])).rows[0];
                 existing.set(d.key, row);
-                await appendEvent(pool, { actor: "cos", action: "exception_opened", entityType: "operating_exception", entityId: row.id, after: { key: d.key, owner: d.owner, severity: d.severity, summary: d.summary } });
+                await recordTransition(pool, { actor: "cos", action: "exception_opened", table: "operating_exception", id: String(row.id), before, areaId: d.areaId ?? null,
+                    context: { key: d.key, owner: d.owner, severity: d.severity, summary: d.summary, detector: d.detector, occurrence: Number(row.occurrences ?? 1) } });
             }
             else
                 existing.set(d.key, { key: d.key, first_seen_at: now, remediation_attempts: 0, last_remediation_at: null, status: "open" });
         }
         else if (!dryRun) {
+            const before = await rowState(pool, "operating_exception", String(r.id));
             await pool.query(`UPDATE operating_exception SET last_seen_at = $2, summary = $3, detail = $4, severity = $5, owner = $6, needs = $7 WHERE id = $1`, [r.id, now, d.summary.slice(0, 500), d.detail?.slice(0, 1000) ?? null, d.severity, d.owner, d.needs ?? null]);
+            // owner / severity / needs changing is a state change (who must act, how bad); the running summary is not.
+            await recordTransition(pool, { actor: "cos", action: "exception_updated", table: "operating_exception", id: String(r.id), before, areaId: d.areaId ?? null, context: { key: d.key, summary: d.summary.slice(0, 200) } });
         }
     }
     // Finagai's own remedies first (bounded)
@@ -75,7 +94,7 @@ export async function runExceptions(pool, now, dryRun, deps = {}) {
             result = `failed: ${String(e?.message ?? e).slice(0, 200)}`;
         }
         await pool.query(`UPDATE operating_exception SET remediation_attempts = remediation_attempts + 1, last_remediation_at = $2, last_remediation_result = $3 WHERE key = $1`, [d.key, now, result.slice(0, 500)]);
-        await appendEvent(pool, { actor: "cos", action: "exception_remedied", entityType: "operating_exception", entityId: r.id, after: { key: d.key, remedy: d.remediation, result } });
+        await appendEvent(pool, { actor: "cos", action: "exception_remedied", entityType: "operating_exception", entityId: r.id, causeIds: await causeHere(pool), after: { key: d.key, remedy: d.remediation, result } });
         res.remedied.push(`${d.remediation}: ${result}`);
     }
     // what reaches Julian

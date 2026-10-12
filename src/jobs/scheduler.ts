@@ -15,6 +15,8 @@ import { dispatch, MAX_JOB_ATTEMPTS, slotIdempotencyKey } from "./dispatcher.js"
 import { deliverOnce } from "../notify/delivery.js";
 import { placeholderHandlers } from "./handlers.js";
 import { eventLoopWatchdog } from "../exceptions/watchdog.js";
+import { withCause } from "../db/live-context.js";
+import { randomUUID } from "node:crypto";
 
 async function main() {
   const cfg = loadConfig(process.env);
@@ -64,7 +66,7 @@ async function main() {
     // Phase 7 (ADR-086): dead-man check on Core's event loop (it cannot report its own death).
     if (process.env.FINAGAI_EVENT_LOOP !== "off") {
       const d = j3Deps();
-      const w = await eventLoopWatchdog(d.pool, new Date(), { store: d.store, sender: d.sender, timezone: d.timezone })
+      const w = await withCause({ correlationId: randomUUID(), causeIds: [], root: { actor: "system", what: "scheduler:dead-man-check" } }, () => eventLoopWatchdog(d.pool, new Date(), { store: d.store, sender: d.sender, timezone: d.timezone }))
         .catch((e) => ({ error: e instanceof Error ? e.message.slice(0, 160) : "error" }));
       log("event loop watchdog", w as Record<string, unknown>);
     }

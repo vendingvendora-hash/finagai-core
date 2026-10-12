@@ -1,4 +1,5 @@
 /** Enrollment-code minting: requires the migration role (the app role has no INSERT on the table). */
+import { recordTransition, rowState } from "../db/state-events.js";
 import { createHash, randomBytes } from "node:crypto";
 import type pg from "pg";
 
@@ -14,6 +15,8 @@ export async function mintEnrollmentCode(migratorPool: pg.Pool, principalSubject
 }
 
 export async function revokeCredential(pool: pg.Pool, credentialUuid: string): Promise<boolean> {
+  const before = await rowState(pool, "webauthn_credential", credentialUuid);
   const r = await pool.query(`UPDATE finagai.webauthn_credential SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL`, [credentialUuid]);
+  if (r.rowCount === 1) await recordTransition(pool, { actor: "julian", action: "credential_revoked", table: "webauthn_credential", id: credentialUuid, before, context: { via: "admin_cli" } });
   return r.rowCount === 1;
 }

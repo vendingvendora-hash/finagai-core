@@ -85,7 +85,7 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
   (server as unknown as { registerTool: typeof register }).registerTool = (name, config, cb) => {
     if (catalog.has(name)) throw new Error(`MCP tool "${name}" registered twice`);
     // ADR-087: each tool call is one unit of work — every event it appends shares one correlation id.
-    const traced = (args: unknown, extra: unknown) => withCause({ correlationId: randomUUID(), causeIds: [] }, async () => cb(args, extra));
+    const traced = (args: unknown, extra: unknown) => withCause({ correlationId: randomUUID(), causeIds: [], root: { actor: "julian", what: `tool:${name}` } }, async () => cb(args, extra));
     catalog.set(name, { name, description: String(config.description ?? ""), inputSchema: config.inputSchema as z.ZodType | undefined,
       readOnly: (config.annotations as { readOnlyHint?: boolean } | undefined)?.readOnlyHint === true, handler: traced });
     return register(name, config, traced);

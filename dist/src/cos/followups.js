@@ -1,4 +1,5 @@
 import { appendEvent, withTransaction } from "../db/index.js";
+import { recordBulkTransitions } from "../db/state-events.js";
 /** The next state given the current one and whether it is now past due. Pure. */
 export function nextState(state, now, dueAt) {
     if (state === "done" || state === "cancelled")
@@ -33,8 +34,10 @@ export async function closeFollowup(pool, id, outcome, cancelled = false) {
 }
 /** Sweep: flip past-due open/waiting follow-ups to 'overdue'. Returns how many changed. Idempotent. */
 export async function sweepOverdue(pool, now = new Date()) {
-    const r = await pool.query(`UPDATE followup SET state='overdue', updated_at=now()
-     WHERE state IN ('open','waiting') AND due_at IS NOT NULL AND due_at < $1 RETURNING id`, [now]);
+    const r = await pool.query(`WITH p AS (SELECT id, state FROM followup WHERE state IN ('open','waiting') AND due_at IS NOT NULL AND due_at < $1 FOR UPDATE)
+     UPDATE followup f SET state = 'overdue', updated_at = now() FROM p WHERE f.id = p.id RETURNING f.id, p.state AS "before.state"`, [now]);
+    // ADR-087: each follow-up passing its date is its own observable transition (cause: the follow-up's previous event).
+    await recordBulkTransitions(pool, r.rows, { actor: "system", action: "followup_overdue", table: "followup", context: { asOf: now.toISOString() } });
     return r.rowCount ?? 0;
 }
 /** Open follow-ups, overdue first, then soonest due. For the brief + exception view. */

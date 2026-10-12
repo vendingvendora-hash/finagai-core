@@ -1,5 +1,6 @@
 import { toolRef } from "../tools/manifest.js";
 import { appendEvent } from "../db/index.js";
+import { recordTransition, rowState } from "../db/state-events.js";
 import { acquireAndStoreCareer, buildCareerPayload } from "./bootstrap.js";
 import { interpretCareer, interpretationDigest, INTERPRETER_VERSION } from "./career-evidence.js";
 import { isTerminal, transitionAllowed } from "./lifecycle.js";
@@ -53,9 +54,12 @@ export async function syncCareer(pool, google, opts = {}) {
         let jobsCreated = 0, eventsAdded = 0, statusChanges = 0, kept = 0;
         const empIds = new Map();
         for (const e of payload.employers ?? []) {
+            const prev = (await tx.query(`SELECT id FROM employer WHERE key = $1`, [e.key])).rows[0];
+            const before = prev ? await rowState(tx, "employer", String(prev.id)) : null;
             const r = await tx.query(`INSERT INTO employer (key, name, aliases, party, details) VALUES ($1, $2, $3, $4, $5::jsonb)
         ON CONFLICT (key) DO UPDATE SET aliases = (SELECT array_agg(DISTINCT x ORDER BY x) FROM unnest(employer.aliases || EXCLUDED.aliases) x), updated_at = now() RETURNING id`, [e.key, e.name, e.aliases, e.party, JSON.stringify({ partyReason: e.partyReason })]);
             empIds.set(e.key, String(r.rows[0].id));
+            await recordTransition(tx, { actor: "cos", action: before ? "employer_updated" : "employer_created", table: "employer", id: String(r.rows[0].id), before, context: { via: "career_sync" } });
         }
         for (const o of payload.opportunities) {
             const keys = [...new Set([o.dedupe, ...o.aliasKeys])];
@@ -73,25 +77,32 @@ export async function syncCareer(pool, google, opts = {}) {
             if (plan.create) {
                 // A sheet-only row that is new is a pipeline record; it carries no event and no lifecycle work.
                 let employerId = empIds.get(o.employerKey) ?? null;
-                if (!employerId)
-                    employerId = String((await tx.query(`INSERT INTO employer (key, name, aliases) VALUES ($1, $2, ARRAY[$1]) ON CONFLICT (key) DO UPDATE SET updated_at = now() RETURNING id`, [o.employerKey, o.org])).rows[0].id);
+                if (!employerId) {
+                    const er = (await tx.query(`INSERT INTO employer (key, name, aliases) VALUES ($1, $2, ARRAY[$1]) ON CONFLICT (key) DO UPDATE SET updated_at = now() RETURNING id, (xmax = 0) AS inserted`, [o.employerKey, o.org])).rows[0];
+                    employerId = String(er.id);
+                    if (er.inserted)
+                        await recordTransition(tx, { actor: "cos", action: "employer_created", table: "employer", id: employerId, before: null, context: { via: "career_sync" } });
+                }
                 id = String((await tx.query(`INSERT INTO opportunity (kind, area_id, org, title, url, location, work_mode, salary, eligibility, status, fit_score, fit_notes, resume_ref, source, dedupe_key, details,
             employer_id, requisition_id, identity_basis, alias_keys, source_ids, contact, first_evidence_at, last_evidence_at, applied_at)
           VALUES ('job', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16, $17, $18, $19, $20, $21, $22, $23, $24) RETURNING id`, [area.id, o.org, o.title, o.url, o.location, o.workMode, o.salary, o.eligibility, o.status, o.fitScore, o.fitNotes, o.resume, o.statusSource === "evidence" ? "gmail" : `career_copilot:${o.sourceId}`, o.dedupe,
                     JSON.stringify({ folder: o.folder, sheetUpdatedAt: o.updatedAt, statusSource: o.statusSource, anomalies: o.anomalies, via: "sync" }),
                     employerId, o.reqId, o.identityBasis, keys, o.sourceIds, o.contact, o.firstEvidenceAt, o.lastEvidenceAt, o.appliedAt])).rows[0].id);
+                await recordTransition(tx, { actor: "cos", action: "opportunity_tracked", table: "opportunity", id, before: null, areaId: String(area.id), context: { via: "career_sync", statusSource: o.statusSource, sources: (o.events.length ? o.events.map((e) => `gmail:${e.sourceId}`) : o.sourceIds).slice(0, 10) } });
                 jobsCreated++;
                 changes.push({ job: label(o), change: "new job", detail: `${o.status} (${o.statusSource})`, sources: o.events.length ? o.events.map((e) => `gmail:${e.sourceId}`) : o.sourceIds });
                 if (o.events.length)
                     touched.add(id);
             }
             else if (stored) {
+                const beforeJob = await rowState(tx, "opportunity", stored.id);
                 await tx.query(`UPDATE opportunity SET alias_keys = (SELECT array_agg(DISTINCT x ORDER BY x) FROM unnest(alias_keys || $2::text[]) x), source_ids = (SELECT array_agg(DISTINCT x ORDER BY x) FROM unnest(source_ids || $3::text[]) x),
             requisition_id = COALESCE(requisition_id, $4), contact = COALESCE(contact, $5), url = COALESCE(url, $6), location = COALESCE(location, $7), fit_score = COALESCE(fit_score, $8),
             first_evidence_at = LEAST(first_evidence_at, $9), last_evidence_at = GREATEST(last_evidence_at, $10), applied_at = COALESCE(applied_at, $11) WHERE id = $1`, [stored.id, keys, o.sourceIds, o.reqId, o.contact, o.url, o.location, o.fitScore, o.firstEvidenceAt, o.lastEvidenceAt, o.appliedAt]);
+                await tx.query(`UPDATE opportunity SET status = COALESCE($2, status), updated_at = CASE WHEN $2::text IS NULL THEN updated_at ELSE now() END WHERE id = $1`, [stored.id, plan.status ?? null]);
+                await recordTransition(tx, { actor: "cos", action: plan.status ? "opportunity_status" : "opportunity_updated", table: "opportunity", id: stored.id, before: beforeJob, areaId: String(area.id),
+                    context: { via: "career_sync", sources: plan.newEvents.map((e) => e.sourceId).slice(0, 10) } });
                 if (plan.status) {
-                    await tx.query(`UPDATE opportunity SET status = $2, updated_at = now() WHERE id = $1`, [stored.id, plan.status]);
-                    await appendEvent(tx, { actor: "cos", action: "opportunity_status", entityType: "opportunity", entityId: stored.id, before: { status: stored.status }, after: { status: plan.status, via: "career_sync", sources: plan.newEvents.map((e) => e.sourceId) } });
                     statusChanges++;
                     touched.add(stored.id);
                     changes.push({ job: label(o), change: "status", detail: `${stored.status} → ${plan.status}${o.statusSource === "sheet" ? " (Career Copilot sheet)" : ""}`, sources: plan.newEvents.length ? plan.newEvents.map((e) => `gmail:${e.sourceId}`) : o.sourceIds.filter((s) => s.startsWith("sheet:")) });
@@ -102,8 +113,9 @@ export async function syncCareer(pool, google, opts = {}) {
             for (const e of plan.newEvents) {
                 if (!id)
                     break;
-                const r = await tx.query(`INSERT INTO opportunity_event (opportunity_id, at, kind, source, source_id, summary, transition) VALUES ($1, $2, $3, 'gmail', $4, $5, $6) ON CONFLICT DO NOTHING`, [id, e.at, e.kind, e.sourceId, e.subject, e.transition]);
+                const r = await tx.query(`INSERT INTO opportunity_event (opportunity_id, at, kind, source, source_id, summary, transition) VALUES ($1, $2, $3, 'gmail', $4, $5, $6) ON CONFLICT DO NOTHING RETURNING id`, [id, e.at, e.kind, e.sourceId, e.subject, e.transition]);
                 if (r.rowCount) {
+                    await recordTransition(tx, { actor: "cos", action: "opportunity_evidence_added", table: "opportunity_event", id: String(r.rows[0].id), before: null, areaId: String(area.id), context: { sourceId: `gmail:${e.sourceId}` } });
                     eventsAdded++;
                     touched.add(id);
                     if (!plan.create)

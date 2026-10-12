@@ -3,6 +3,7 @@
  * A stated lesson passes the same whitelist as everything else: Julian cannot, through teaching, relax approvals,
  * verification, commitments or secrets handling — those change only through governance.
  */
+import { recordTransition, rowState } from "../db/state-events.js";
 import type pg from "pg";
 import { createHash } from "node:crypto";
 import { appendEvent } from "../db/index.js";
@@ -50,8 +51,9 @@ export async function teachFinagai(db: Db, t: Teaching, ctx: { allowedWorkflows:
 export async function forgetLesson(db: Db, key: string, reason: string, now = new Date()) {
   const l = (await db.query(`SELECT id, statement, status, proposal_id FROM lesson WHERE key = $1`, [key])).rows[0];
   if (!l) return { error: `No lesson "${key}". Use lessons to see their keys.` };
-  if (l.proposal_id) await db.query(`UPDATE proposal SET status = 'superseded', updated_at = now(), version = version + 1 WHERE id = $1 AND status = 'pending'`, [l.proposal_id]);
+  if (l.proposal_id) { const bp = await rowState(db, "proposal", String(l.proposal_id)); await db.query(`UPDATE proposal SET status = 'superseded', updated_at = now(), version = version + 1 WHERE id = $1 AND status = 'pending'`, [l.proposal_id]); await recordTransition(db, { actor: "julian", action: "proposal_superseded", table: "proposal", id: String(l.proposal_id), before: bp, context: { why: "the lesson was forgotten by Julian" } }); }
+  const before = await rowState(db, "lesson", String(l.id));
   await db.query(`UPDATE lesson SET status = 'retired', retired_reason = $2, updated_at = $3 WHERE id = $1`, [l.id, `forgotten by Julian: ${reason.slice(0, 200)}`, now]);
-  await appendEvent(db, { actor: "julian", action: "lesson_forgotten", entityType: "lesson", entityId: String(l.id), after: { key, reason: reason.slice(0, 200), was: l.status } });
+  await recordTransition(db, { actor: "julian", action: "lesson_forgotten", table: "lesson", id: String(l.id), before, context: { key, reason: reason.slice(0, 200), was: l.status } });
   return { forgotten: l.statement, was: l.status, note: l.status === "approved" ? "the approved change no longer applies; the Area is back on its default for it" : "no longer used" };
 }

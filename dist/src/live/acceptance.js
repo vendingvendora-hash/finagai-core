@@ -51,6 +51,8 @@ async function fingerprint(pool) {
 }
 export async function liveAcceptance(pool, opts = {}) {
     const out = {};
+    // "since the deploy": this process's start (each deploy restarts Core) unless the caller says otherwise
+    const since = opts.since ?? new Date(Date.now() - process.uptime() * 1000);
     await publish(pool);
     // 1) the app role cannot DELETE (or TRUNCATE) anything; the stream index and the event log are append-only
     {
@@ -128,40 +130,92 @@ export async function liveAcceptance(pool, opts = {}) {
         out.needsMeAgreement = { pass: eq(atCursor.needsJulian, snapNeeds) && untracked.length === 0, snapshotNeedsJulian: snapNeeds, replayedFromStream: atCursor.needsJulian,
             openEscalationsWithoutAStreamEvent: untracked, snapshotWaits: snap.waits.length, snapshotTasksActive: snap.tasks.length };
     }
-    // 5) a real event-engine cycle: the latest real input and everything it caused
+    // 5) causal chains from REAL post-deploy inputs (hotfix 34: judged strictly — explicit cause links, not shared correlation)
     {
-        // the latest real input that reached an Area workflow; otherwise the latest real input at all
-        const head = (await pool.query(`SELECT o.id, o.correlation_id FROM event o WHERE o.action = 'evidence_observed' AND o.correlation_id IS NOT NULL
-        AND EXISTS (SELECT 1 FROM event w WHERE w.correlation_id = o.correlation_id AND w.action = 'workflow_started') ORDER BY o.id DESC LIMIT 1`)).rows[0]
-            ?? (await pool.query(`SELECT id, correlation_id FROM event WHERE action = 'evidence_observed' AND correlation_id IS NOT NULL ORDER BY id DESC LIMIT 1`)).rows[0];
-        const inputs = (await pool.query(`SELECT count(*)::int AS n, count(*) FILTER (WHERE EXISTS (SELECT 1 FROM event w WHERE w.correlation_id = o.correlation_id AND w.action = 'workflow_started'))::int AS routed
-        FROM event o WHERE o.action = 'evidence_observed'`)).rows[0];
-        const latestTick = (await pool.query(`SELECT correlation_id, count(*)::int AS n, min(occurred_at) AS at, array_agg(action ORDER BY id) AS actions FROM event
-        WHERE correlation_id = (SELECT correlation_id FROM event WHERE actor IN ('cos','system') AND correlation_id IS NOT NULL AND action IN ('area_health_changed','workflow_started','evidence_observed','escalation_opened','exception_opened','exception_resolved') ORDER BY id DESC LIMIT 1)
-        GROUP BY correlation_id`)).rows[0] ?? null;
-        if (!head)
-            out.causalChain = { pass: null, status: "waiting for the first real input since the deploy (no evidence_observed yet)", realInputsSinceDeploy: { observed: inputs.n, reachedAWorkflow: inputs.routed }, latestEngineCycle: latestTick };
-        else {
-            const group = (await pool.query(`SELECT l.seq, e.id, e.occurred_at, e.actor, e.action, e.entity_type, e.entity_id, e.before, e.after, e.request_id, e.approval_id, e.correlation_id, e.cause_ids, e.area_id
-          FROM event e LEFT JOIN live_event l ON l.event_id = e.id WHERE e.correlation_id = $1 ORDER BY e.id`, [head.correlation_id])).rows;
-            const evs = await toEnvelopes(pool, group);
-            const ids = new Set(evs.map((e) => e.eventId));
-            const dangling = evs.filter((e) => e.cause.eventIds.some((c) => !ids.has(c))).map((e) => ({ eventId: e.eventId, action: e.action, causes: e.cause.eventIds }));
-            const roots = evs.filter((e) => !e.cause.eventIds.length).map((e) => `${e.eventId}:${e.action}`);
-            const STATE = ["entity", "relationship", "project", "objective", "task", "wait", "inference", "lesson", "exception", "approval"];
-            const stages = { input: evs.some((e) => e.action === "evidence_observed"), routing: evs.some((e) => e.action === "evidence_routed"), workflow: evs.some((e) => e.domain === "workflow"),
-                stateChange: evs.some((e) => STATE.includes(e.domain)), escalation: evs.some((e) => e.domain === "escalation"), notification: evs.some((e) => e.domain === "notification") };
-            const last = (pred) => [...evs].reverse().find(pred);
-            const deepest = last((e) => e.domain === "notification") ?? last((e) => e.domain === "escalation") ?? last((e) => STATE.includes(e.domain)) ?? last((e) => e.domain === "workflow") ?? evs.at(-1);
-            const stateChains = await Promise.all(evs.filter((e) => STATE.includes(e.domain)).slice(0, 5).map(async (e) => (await causalChain(pool, e.eventId)).map((x) => `${x.eventId}:${x.class}`)));
-            const chain = await causalChain(pool, deepest.eventId);
-            const routedWorkflow = evs.find((e) => e.action === "evidence_routed" && e.after?.routes?.length);
-            out.causalChain = { pass: stages.input && stages.routing && dangling.length === 0 && (!routedWorkflow || stages.workflow), correlationId: head.correlation_id, stages,
-                note: routedWorkflow ? "the input was routed to a workflow" : "the latest input was not routed to any Area workflow (ignored), so the chain legitimately ends at routing",
-                events: evs.map((e) => ({ seq: e.seq, eventId: e.eventId, at: e.at, class: e.class, area: e.area?.name ?? null, causes: e.cause.eventIds, summary: e.summary.slice(0, 140) })),
-                roots, danglingCauses: dangling, chainBehindDeepest: chain.map((e) => `${e.eventId}:${e.class}`), chainsBehindStateChanges: stateChains,
-                realInputsSinceDeploy: { observed: inputs.n, reachedAWorkflow: inputs.routed }, latestEngineCycle: latestTick };
+        const sinceIso = since.toISOString();
+        const STATE_DOMAINS = ["entity", "relationship", "project", "objective", "task", "wait", "inference", "lesson", "exception", "approval", "evidence"];
+        const isStateChange = (e) => STATE_DOMAINS.includes(e.domain) && !["evidence_observed", "evidence_routed"].includes(e.action);
+        const CREATION = /(_created|_tracked|_open|_set|^create)$|^opportunity_evidence_added$|^objective_set$/;
+        const groupOf = async (corr) => toEnvelopes(pool, (await pool.query(`SELECT l.seq, e.id, e.occurred_at, e.actor, e.action, e.entity_type, e.entity_id, e.before, e.after, e.request_id, e.approval_id, e.correlation_id, e.cause_ids, e.area_id
+        FROM event e LEFT JOIN live_event l ON l.event_id = e.id WHERE e.correlation_id = $1 ORDER BY e.id`, [corr])).rows);
+        const quality = (e, corr, cause) => [
+            !e.entity.id && "no affected object id", (!e.after || !Object.keys(e.after).length) && "no after-state",
+            !CREATION.test(e.action) && (!e.before || !Object.keys(e.before).length) && "no before-state",
+            e.cause.correlationId !== corr && "wrong correlation", !e.cause.eventIds.includes(cause) && `does not cite ${cause}`
+        ].filter(Boolean);
+        // 5a) incoming email -> routing -> workflow -> state change
+        const heads = (await pool.query(`SELECT id, correlation_id FROM event WHERE action = 'evidence_observed' AND after->>'source' = 'gmail' AND occurred_at >= $1 AND correlation_id IS NOT NULL ORDER BY id DESC LIMIT 300`, [sinceIso])).rows;
+        const tally = { emails: heads.length, ignoredAtRouting: 0, reachedWorkflow: 0, changedState: 0, linkDefects: [] };
+        let proof = null;
+        for (const h of heads) {
+            const evs = await groupOf(String(h.correlation_id));
+            const obs = evs.find((e) => e.eventId === Number(h.id));
+            const routed = evs.find((e) => e.action === "evidence_routed" && e.entity.id === obs.entity.id);
+            if (!routed || !routed.cause.eventIds.includes(obs.eventId)) {
+                tally.linkDefects.push(`${obs.eventId}: routing missing or not linked`);
+                continue;
+            }
+            const started = evs.filter((e) => e.action === "workflow_started" && e.cause.eventIds.includes(routed.eventId));
+            if (!started.length) {
+                tally.ignoredAtRouting++;
+                continue;
+            }
+            tally.reachedWorkflow++;
+            for (const st of started) {
+                const children = evs.filter((e) => e.cause.eventIds.includes(st.eventId));
+                const changes = children.filter(isStateChange);
+                const completed = children.find((e) => e.action === "workflow_completed" || e.action === "workflow_failed");
+                if (!completed)
+                    tally.linkDefects.push(`${st.eventId}: workflow has no linked completion`);
+                if (!changes.length)
+                    continue;
+                tally.changedState++;
+                if (!proof) {
+                    const defects = changes.flatMap((c) => quality(c, String(h.correlation_id), st.eventId).map((d) => `${c.eventId} ${c.action}: ${d}`));
+                    const fmt = (e) => ({ eventId: e.eventId, seq: e.seq, class: e.class, action: e.action, entity: e.entity, cites: e.cause.eventIds, before: e.before, after: e.after, summary: e.summary.slice(0, 120) });
+                    proof = { correlationId: h.correlation_id, email: fmt(obs), routing: fmt(routed), workflowStarted: fmt(st), stateChanges: changes.map(fmt), workflowCompleted: completed ? fmt(completed) : null, defects };
+                }
+            }
         }
+        out.emailToStateChain = { pass: proof ? !proof.defects.length && !tally.linkDefects.length : null, since: sinceIso, tally, proof,
+            ...(proof ? {} : { status: "waiting for a real post-deploy email that changes state" }) };
+        // 5b) escalation -> notification, from a real email
+        const escs = (await pool.query(`SELECT id FROM event WHERE action = 'escalation_opened' AND occurred_at >= $1 ORDER BY id DESC LIMIT 50`, [sinceIso])).rows.map((r) => Number(r.id));
+        let best = null;
+        let fromEmail = false;
+        for (const id of escs) {
+            const chain = await causalChain(pool, id);
+            const email = chain.find((e) => e.action === "evidence_observed" && e.after?.source === "gmail");
+            const notes = await toEnvelopes(pool, (await pool.query(`SELECT l.seq, e.id, e.occurred_at, e.actor, e.action, e.entity_type, e.entity_id, e.before, e.after, e.request_id, e.approval_id, e.correlation_id, e.cause_ids, e.area_id
+          FROM event e LEFT JOIN live_event l ON l.event_id = e.id WHERE e.action IN ('notification_delivered','notification_suppressed') AND $1 = ANY(e.cause_ids) ORDER BY e.id`, [id])).rows);
+            const note = notes.find((n) => n.action === "notification_delivered" || /quiet hours/.test(String(n.after?.reason ?? "")));
+            const c = { escalation: id, fromEmail: !!email, chain: chain.map((e) => ({ eventId: e.eventId, seq: e.seq, class: e.class, cites: e.cause.eventIds })), notification: note ? { eventId: note.eventId, seq: note.seq, class: note.class, cites: note.cause.eventIds, after: note.after } : null };
+            if (email && note) {
+                best = c;
+                fromEmail = true;
+                break;
+            }
+            best ??= c;
+        }
+        out.escalationNotificationChain = { pass: fromEmail ? true : null, since: sinceIso, escalationsSinceDeploy: escs.length, latest: best,
+            ...(fromEmail ? {} : { status: "waiting for a real email whose chain opens an escalation that is then notified (or held for quiet hours)" }) };
+        // 5c) every state-change event since deploy: object, before/after, unit of work, cause
+        const stateActs = (await pool.query(`SELECT l.seq, e.id, e.occurred_at, e.actor, e.action, e.entity_type, e.entity_id, e.before, e.after, e.request_id, e.approval_id, e.correlation_id, e.cause_ids, e.area_id
+        FROM event e LEFT JOIN live_event l ON l.event_id = e.id WHERE e.occurred_at >= $1 ORDER BY e.id DESC LIMIT 2000`, [sinceIso])).rows;
+        const stateEvs = (await toEnvelopes(pool, stateActs)).filter(isStateChange);
+        const bad = stateEvs.map((e) => ({ e, why: [!e.entity.id && "no object", (!e.after || !Object.keys(e.after).length) && "no after", !e.cause.correlationId && "no unit of work",
+                !e.cause.eventIds.length && "no cause"].filter(Boolean) })).filter((x) => x.why.length);
+        out.stateEventQuality = { pass: bad.length === 0, since: sinceIso, stateChangeEvents: stateEvs.length,
+            violations: bad.slice(0, 20).map((x) => `${x.e.eventId} ${x.e.action}: ${x.why.join(", ")}`), note: "detector-originated roots (an exception opened by a condition check) cite the entity's previous event when there is one" };
+        // 5d) no silent state change: every row whose state moved since deploy has an event about it at/after that moment
+        const silent = [];
+        for (const t of ["followup", "opportunity", "project", "objective", "area", "work_item"]) {
+            const rows = (await pool.query(`SELECT r.id, r.updated_at FROM ${t} r WHERE r.updated_at >= $1
+          AND NOT EXISTS (SELECT 1 FROM event e WHERE e.entity_id = r.id AND e.occurred_at >= r.updated_at - interval '1 second') LIMIT 20`, [sinceIso])).rows;
+            for (const r of rows)
+                silent.push(`${t} ${r.id} changed at ${new Date(r.updated_at).toISOString()} with no event`);
+        }
+        out.noSilentStateChanges = { pass: silent.length === 0, since: sinceIso, silent };
     }
     // 6) disconnect / reconnect over the real SSE handler: no semantic event missed, none duplicated
     {
@@ -277,6 +331,7 @@ export async function liveAcceptance(pool, opts = {}) {
             redaction: { pass: leaks.length === 0, envelopesScanned: scanned, storedEventsWithSecretShapedFields: rawWithSecrets, leaks: leaks.slice(0, 20) } };
     }
     const verdict = Object.entries(out).map(([k, v]) => `${k}: ${v.pass === true ? "PASS" : v.pass === false ? "FAIL" : "PENDING"}`);
-    return { adr: "0087", ranAt: new Date().toISOString(), allPass: Object.values(out).every((v) => v.pass === true), verdict, checks: out };
+    // allPass only when nothing is pending: a check that has not been observed live is not a pass.
+    return { adr: "0087", ranAt: new Date().toISOString(), since: since.toISOString(), allPass: Object.values(out).every((v) => v.pass === true), verdict, checks: out };
 }
 //# sourceMappingURL=acceptance.js.map

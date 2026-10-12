@@ -12,6 +12,7 @@ import http from "node:http";
 import { Readable } from "node:stream";
 import type { McpHttpHandler } from "@modelcontextprotocol/server";
 import { randomUUID } from "node:crypto";
+import { withCause } from "../db/live-context.js";
 import type { JWTVerifyGetKey } from "jose";
 import type { Config } from "../config/index.js";
 import { AuthError, extractBearer, verifyAccessToken, type VerifiedPrincipal } from "../auth/bearer.js";
@@ -124,7 +125,14 @@ export function createHandler(cfg: Config, info: AppInfo, log: LogFn, deps: AppD
     });
   }
 
+  // ADR-087: every HTTP request is one unit of work (approval page, concierge, MCP) — state changes it causes share a
+  // correlation id and, absent a more specific cause, cite the request itself.
   return (req, res) => {
+    const p0 = new URL(req.url ?? "/", "http://localhost").pathname;
+    void withCause({ correlationId: randomUUID(), causeIds: [], root: { actor: p0.startsWith("/approval") ? "julian" : "system", what: `http:${req.method ?? "GET"} ${p0.slice(0, 80)}` } },
+      async () => { handleRequest(req, res); });
+  };
+  function handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
     const requestId = randomUUID();
     res.setHeader("x-request-id", requestId);
     const path = new URL(req.url ?? "/", "http://localhost").pathname;
@@ -255,5 +263,5 @@ export function createHandler(cfg: Config, info: AppInfo, log: LogFn, deps: AppD
     }
 
     return send(res, 404, { error: "not_found" });
-  };
+  }
 }

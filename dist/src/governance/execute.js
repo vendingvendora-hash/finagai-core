@@ -1,3 +1,14 @@
+/**
+ * Phase 2 of two-phase governance (ADR-019, ADR-030): executes a decision that Julian authorized with
+ * a fresh WebAuthn assertion. Called only by the approval page AFTER verifyGovernanceApproval()
+ * succeeded. Everything here happens in ONE transaction:
+ *
+ *   lock request -> re-check status, expiry, challenge (unchanged, unused) -> re-check every target
+ *   version (stale -> superseded, nothing applied) -> consume challenge -> update credential counter
+ *   (compare-and-set) -> record decision with authenticated principal and credential -> apply the
+ *   action -> immutable event carrying approval ID and principal -> executed.
+ */
+import { recordTransition, rowState } from "../db/state-events.js";
 import { appendEvent, withTransaction } from "../db/index.js";
 const VERSIONED = new Set(["conflict", "proposal", "seed_batch", "work_item", "knowledge_item", "entity", "external_ref", "project"]);
 class Refused extends Error {
@@ -158,11 +169,15 @@ async function resolveConflict(tx, req, ev) {
     await tx.query(`UPDATE conflict SET status = $2, resolution_note = $3, resolved_at = now(), version = version + 1 WHERE id = $1`, [c.id, status, req.rationale]);
     // Clear the dispute only when no other conflict remains open on the same record.
     if (c.existing_type === "work_item") {
+        const before = await rowState(tx, "work_item", String(c.existing_id));
         await tx.query(`UPDATE work_item SET disputed = EXISTS (SELECT 1 FROM conflict WHERE existing_id = $1 AND status = 'open') WHERE id = $1`, [c.existing_id]);
+        await recordTransition(tx, { actor: "julian", action: "update", table: "work_item", id: String(c.existing_id), before, context: { via: "conflict_resolve", conflict: c.id } });
     }
     else if (c.existing_type === "knowledge_item") {
+        const before = await rowState(tx, "knowledge_item", String(c.existing_id));
         await tx.query(`UPDATE knowledge_item SET status = 'active' WHERE id = $1 AND status = 'disputed'
                       AND NOT EXISTS (SELECT 1 FROM conflict WHERE existing_id = $1 AND status = 'open')`, [c.existing_id]);
+        await recordTransition(tx, { actor: "julian", action: "update", table: "knowledge_item", id: String(c.existing_id), before, context: { via: "conflict_resolve", conflict: c.id } });
     }
     await ev("conflict_resolve", "conflict", c.id, { resolution });
     return { conflict: c.id, resolution };

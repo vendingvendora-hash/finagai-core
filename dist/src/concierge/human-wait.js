@@ -1,4 +1,5 @@
 import { reportLifecycleError } from "../ops/lifecycle-errors.js";
+import { recordTransition, rowState } from "../db/state-events.js";
 const H = 3_600_000;
 /** Reminder offsets (from awaiting_since) and expiry, per kind. Bounded: never more reminders than listed. */
 export const HUMAN_WAIT_POLICY = {
@@ -13,9 +14,11 @@ const TERMINAL_IX = `('completed','failed','superseded','expired','cancelled')`;
 /** Task starts waiting for Julian. `status` is the control_task status that represents the wait. */
 export async function enterAwaitingHuman(db, taskId, kind, reason, status = "waiting_approval") {
     const ms = HUMAN_WAIT_POLICY[kind].expireAfterMs;
+    const before = await rowState(db, "control_task", taskId);
     await db.query(`UPDATE control_task SET status = $2, awaiting_since = COALESCE(awaiting_since, now()), awaiting_kind = $3, awaiting_reason = $4,
             expires_at = COALESCE(awaiting_since, now()) + ($5 || ' milliseconds')::interval, updated_at = now()
       WHERE id = $1`, [taskId, status, kind, reason.slice(0, 500), String(ms)]);
+    await recordTransition(db, { actor: "j6", action: "control_task_state", table: "control_task", id: taskId, before, context: { waitingFor: "julian", kind, reason: reason.slice(0, 300) } });
     await db.query(`UPDATE interaction SET state = 'awaiting_human', awaiting_since = COALESCE(awaiting_since, now()), progress_note = $2, updated_at = now()
       WHERE $1 = ANY(task_ids) AND state NOT IN ${TERMINAL_IX}`, [taskId, `Waiting for Julian (${kind}): ${reason}`.slice(0, 500)]);
 }
@@ -27,8 +30,10 @@ export async function leaveAwaitingHuman(db, taskId, opts = {}) {
             terminal_reason = CASE WHEN terminal_reason = 'awaiting_human_expired' THEN NULL ELSE terminal_reason END,
             updated_at = now()
       WHERE $1 = ANY(task_ids) AND state NOT IN ('completed','failed','superseded','cancelled')`, [taskId, opts.intervention === false ? 0 : 1]);
+    const before = await rowState(db, "control_task", taskId);
     await db.query(`UPDATE control_task SET awaiting_since = NULL, awaiting_kind = NULL, awaiting_reason = NULL, expires_at = NULL,
             reminders_sent = 0, last_reminded_at = NULL WHERE id = $1`, [taskId]);
+    await recordTransition(db, { actor: "j6", action: "control_task_state", table: "control_task", id: taskId, before, context: { waitEnded: true } });
 }
 /**
  * Sweep human waits: due reminders (returned for delivery; counted only when `deliver` is true, i.e. a helper
@@ -68,6 +73,7 @@ export async function sweepHumanWaits(pool, opts = { deliver: false }) {
     return { reminders, expired };
 }
 export async function expireTask(pool, taskId, summary) {
+    const before = await rowState(pool, "control_task", taskId);
     await pool.query(`UPDATE control_task SET status = 'expired', terminal_reason = 'awaiting_human_expired', failure_class = COALESCE(failure_class, 'awaiting_human_expired'),
      result_summary = $2, updated_at = now() WHERE id = $1 AND status IN ('waiting_approval','paused')`, [taskId, summary.slice(0, 1000)]);
     await pool.query(`UPDATE control_step SET status = 'expired' WHERE task_id = $1 AND status = 'proposed'`, [taskId]);
@@ -76,7 +82,7 @@ export async function expireTask(pool, taskId, summary) {
             result_summary = $2, completed_at = now(), updated_at = now(),
             final_response_status = CASE WHEN conversation = 'chat' THEN 'pending' ELSE final_response_status END
       WHERE $1 = ANY(task_ids) AND state NOT IN ('completed','failed','superseded','cancelled')`, [taskId, summary.slice(0, 1000)]);
-    await pool.query(`INSERT INTO event (actor, action, entity_type, entity_id, after) VALUES ('system', 'control_task_expired', 'control_task', $1, $2::jsonb)`, [taskId, JSON.stringify({ summary: summary.slice(0, 300) })]);
+    await recordTransition(pool, { actor: "system", action: "control_task_expired", table: "control_task", id: taskId, before, context: { summary: summary.slice(0, 300) } });
 }
 /**
  * Resume a waiting/expired task by code: the same task and interaction continue (never a duplicate). Any stale
@@ -89,13 +95,14 @@ export async function resumeTask(pool, code) {
     if (!["expired", "paused", "waiting_approval"].includes(t.status))
         return { status: "not_resumable", state: t.status };
     await pool.query(`UPDATE control_step SET status = 'superseded' WHERE task_id = $1 AND status IN ('proposed','expired')`, [t.id]);
+    const before = await rowState(pool, "control_task", t.id);
     await pool.query(`UPDATE control_task SET status = 'active', resumed_count = resumed_count + 1, terminal_reason = NULL,
      failure_class = CASE WHEN failure_class = 'awaiting_human_expired' THEN NULL ELSE failure_class END,
      claimed_at = NULL, worker_id = NULL, lease_until = NULL, updated_at = now() WHERE id = $1`, [t.id]);
     // The "expired" notice is superseded by the resumed work: it no longer needs delivering.
     await pool.query(`UPDATE interaction SET final_response_status = 'not_needed' WHERE $1 = ANY(task_ids) AND state = 'expired' AND final_response_status = 'pending'`, [t.id]);
+    await recordTransition(pool, { actor: "julian", action: "control_task_resumed", table: "control_task", id: t.id, before, context: { from: t.status } });
     await leaveAwaitingHuman(pool, t.id);
-    await pool.query(`INSERT INTO event (actor, action, entity_type, entity_id, after) VALUES ('julian', 'control_task_resumed', 'control_task', $1, $2::jsonb)`, [t.id, JSON.stringify({ from: t.status })]);
     return { status: "resumed", taskId: t.id };
 }
 //# sourceMappingURL=human-wait.js.map

@@ -11,6 +11,7 @@
  *
  * The database is opened only when a slot is due, so the 15-minute cron does not keep Neon awake.
  */
+import { withCause } from "../db/live-context.js";
 import { randomUUID } from "node:crypto";
 import { dueJobs, type DueJob, type JobName, type ScheduleConfig } from "./schedule.js";
 
@@ -95,12 +96,13 @@ export async function dispatch(now: Date, deps: DispatchDeps): Promise<DispatchR
 
     let outcome: JobOutcome;
     try {
-      outcome = await deps.handlers[job.job]({
+      // ADR-087: one scheduled job run is one unit of work — its events share the job run's id as correlation id.
+      outcome = await withCause({ correlationId: claim.runId, causeIds: [], root: { actor: "job", what: `job:${job.job}`, detail: { scheduledFor: job.scheduledFor.toISOString() } } }, () => deps.handlers[job.job]!({
         ...job,
         attempt: claim.attempt,
         idempotencyKey: slotIdempotencyKey(job.job, job.scheduledFor),
         signal: abort.signal,
-      });
+      }));
     } catch (err) {
       outcome = { status: "failed", detail: err instanceof Error ? err.message : "unknown error" };
     } finally {

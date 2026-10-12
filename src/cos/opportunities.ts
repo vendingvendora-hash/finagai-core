@@ -13,6 +13,7 @@
 import { createHash } from "node:crypto";
 import type pg from "pg";
 import { appendEvent } from "../db/index.js";
+import { recordBulkTransitions, recordTransition, rowState } from "../db/state-events.js";
 import { normOrg, dedupeKey } from "./bootstrap.js";
 import { cleanTitle, normTitle } from "./career-evidence.js";
 import { policyFor } from "../learning/apply.js";
@@ -86,7 +87,9 @@ export async function reconcileJob(db: Db, jobId: string, now: Date, policyIn?: 
       const orphans = (await db.query(`SELECT id, summary, state, due_at, origin, rule FROM followup WHERE state IN ('open','waiting','overdue') AND opportunity_id IS NULL AND project_id IS NULL
           AND area_id = $1 AND (summary ILIKE ANY($2::text[]) OR counterparty ILIKE ANY($2::text[])) ORDER BY created_at`, [j.area_id, pats])).rows;
       for (const f of orphans) {
+        const before = await rowState(db, "followup", f.id);
         await db.query(`UPDATE followup SET opportunity_id = $2, project_id = COALESCE($3, project_id), updated_at = now() WHERE id = $1`, [f.id, j.id, j.project_id]);
+        await recordTransition(db, { actor: "cos", action: "followup_linked", table: "followup", id: f.id, before, areaId: j.area_id, context: { job: name } });
         open.push(f); changes.push({ job: name, change: "follow-up linked", detail: `${f.summary} now belongs to this job` });
       }
     }
@@ -94,8 +97,9 @@ export async function reconcileJob(db: Db, jobId: string, now: Date, policyIn?: 
   const mine = open.filter((f) => f.origin !== "julian");          // the engine (and the bootstrap's proposals) may be replaced
   const julians = open.filter((f) => f.origin === "julian");      // Julian's own commitments are never replaced by policy
   const closeF = async (f: { id: string; summary: string }, state: "done" | "cancelled", outcome: string) => {
+    const before = await rowState(db, "followup", f.id);
     await db.query(`UPDATE followup SET state = $2, outcome = $3, closed_at = now(), updated_at = now() WHERE id = $1`, [f.id, state, outcome.slice(0, 2000)]);
-    await appendEvent(db, { actor: "cos", action: state === "done" ? "followup_done" : "followup_cancelled", entityType: "followup", entityId: f.id, after: { outcome: outcome.slice(0, 200), by: "lifecycle" } });
+    await recordTransition(db, { actor: "cos", action: state === "done" ? "followup_done" : "followup_cancelled", table: "followup", id: f.id, before, areaId: j.area_id, context: { by: "lifecycle" } });
     changes.push({ job: name, change: state === "done" ? "follow-up closed" : "follow-up replaced", detail: `${f.summary} → ${outcome}`.slice(0, 300) });
   };
 
@@ -105,9 +109,10 @@ export async function reconcileJob(db: Db, jobId: string, now: Date, policyIn?: 
     if (terminal) for (const f of julians) await closeF(f, "done", `resolved by evidence: ${step.outcome}`);
     const stillOpen = terminal ? 0 : julians.length;
     if (j.project_id && !stillOpen) {
+      const before = await rowState(db, "project", j.project_id);
       const p = await db.query(`UPDATE project SET status = 'completed', updated_at = now(), version = version + 1 WHERE id = $1 AND status <> 'completed' RETURNING name`, [j.project_id]);
       if (p.rowCount) {
-        await appendEvent(db, { actor: "cos", action: "project_completed", entityType: "project", entityId: j.project_id, after: { reason: step.reason, outcome: step.outcome } });
+        await recordTransition(db, { actor: "cos", action: "project_completed", table: "project", id: j.project_id, before, areaId: j.area_id, context: { reason: step.reason, outcome: step.outcome } });
         changes.push({ job: name, change: "project completed", detail: `${p.rows[0].name}: ${step.reason}` });
       }
     }
@@ -118,18 +123,21 @@ export async function reconcileJob(db: Db, jobId: string, now: Date, policyIn?: 
   // An action: the job needs a live project and exactly one next step.
   let projectId = j.project_id;
   if (projectId) {
+    const before = await rowState(db, "project", projectId);
     const p = await db.query(`UPDATE project SET status = 'active', last_activity_at = now(), updated_at = now(), version = version + 1 WHERE id = $1 AND status <> 'active' RETURNING name`, [projectId]);
-    if (p.rowCount) { await appendEvent(db, { actor: "cos", action: "project_reopened", entityType: "project", entityId: projectId, after: { reason: step.reason } }); changes.push({ job: name, change: "project reopened", detail: step.reason }); }
+    if (p.rowCount) { await recordTransition(db, { actor: "cos", action: "project_reopened", table: "project", id: projectId, before, areaId: j.area_id, context: { reason: step.reason } }); changes.push({ job: name, change: "project reopened", detail: step.reason }); }
   } else {
     const ex = await db.query(`SELECT id FROM project WHERE archived_at IS NULL AND lower(name) = lower($1) LIMIT 1`, [name]);
     projectId = ex.rows[0]?.id ?? null;
     if (!projectId) {
       projectId = String((await db.query(`INSERT INTO project (name, description, last_activity_at, area_id, objective_id) VALUES ($1, $2, now(), $3, $4) RETURNING id`,
         [name.slice(0, 200), `Job opportunity (${j.status}).`, j.area_id, await objectiveOf(db, j.area_id)])).rows[0].id);
-      await appendEvent(db, { actor: "cos", action: "create", entityType: "project", entityId: projectId, after: { name, via: "lifecycle", status: j.status } });
+      await recordTransition(db, { actor: "cos", action: "create", table: "project", id: projectId, before: null, areaId: j.area_id, context: { via: "lifecycle", jobStatus: j.status } });
       changes.push({ job: name, change: "project created", detail: `${j.status}: ${step.reason}` });
     }
+    const beforeJob = await rowState(db, "opportunity", j.id);
     await db.query(`UPDATE opportunity SET project_id = $2, updated_at = now() WHERE id = $1`, [j.id, projectId]);
+    await recordTransition(db, { actor: "cos", action: "set_project", table: "opportunity", id: j.id, before: beforeJob, areaId: j.area_id, context: { job: name } });
   }
   if (julians.length) return { step: { ...step, reason: `${step.reason} — you are already tracking: ${julians.map((f) => f.summary).join("; ")}` }, changes };
   const same = mine.find((f) => f.origin === "lifecycle" && f.rule === step.rule);
@@ -137,14 +145,16 @@ export async function reconcileJob(db: Db, jobId: string, now: Date, policyIn?: 
   const dueAt = new Date(`${step.due}T16:00:00Z`);
   if (same) {
     if (!same.due_at || new Date(same.due_at).toISOString().slice(0, 10) !== step.due || same.summary !== step.summary) {
+      const before = await rowState(db, "followup", same.id);
       await db.query(`UPDATE followup SET summary = $2, due_at = $3, state = $4, counterparty = $5, updated_at = now() WHERE id = $1`, [same.id, step.summary.slice(0, 2000), dueAt, step.state, step.counterparty]);
+      await recordTransition(db, { actor: "cos", action: "followup_updated", table: "followup", id: same.id, before, areaId: j.area_id, context: { job: name, rule: step.rule, reason: step.reason.slice(0, 200), by: "lifecycle" } });
       changes.push({ job: name, change: "next step updated", detail: `${step.summary} (due ${step.due})` });
     }
   } else {
     const r = await db.query(`INSERT INTO followup (summary, counterparty, channel, state, due_at, last_action_at, area_id, project_id, opportunity_id, origin, rule)
       VALUES ($1, $2, NULL, $3, $4, COALESCE($5, now()), $6, $7, $8, 'lifecycle', $9) RETURNING id`,
       [step.summary.slice(0, 2000), step.counterparty, step.state, dueAt, j.last_evidence_at ?? j.applied_at, j.area_id, projectId, j.id, step.rule]);
-    await appendEvent(db, { actor: "cos", action: "followup_created", entityType: "followup", entityId: r.rows[0].id, after: { summary: step.summary, due: step.due, rule: step.rule, by: "lifecycle" } });
+    await recordTransition(db, { actor: "cos", action: "followup_created", table: "followup", id: String(r.rows[0].id), before: null, areaId: j.area_id, context: { rule: step.rule, by: "lifecycle", owner: step.owner } });
     changes.push({ job: name, change: step.owner === "julian" ? "needs Julian" : "Finagai watching", detail: `${step.summary} (due ${step.due}; ${step.reason}${step.needsJulian ? `; needs you because ${step.needsJulian.because}` : ""})` });
   }
   return { step, changes };
@@ -328,13 +338,19 @@ export async function trackOpportunity(db: Db, input: TrackInput, now = new Date
   let jobId: string; let previous: string | null = null; let outcome: "created" | "existing";
   if (hits[0]) {
     const h = hits[0]; jobId = h.id; previous = h.status; outcome = "existing";
+    const beforeJob = await rowState(db, "opportunity", jobId);
     await db.query(`UPDATE opportunity SET url = COALESCE(url, $2), location = COALESCE(location, $3), requisition_id = COALESCE(requisition_id, $4), fit_score = COALESCE($5, fit_score),
       contact = COALESCE(contact, $6), alias_keys = (SELECT array_agg(DISTINCT x ORDER BY x) FROM unnest(alias_keys || $7::text[]) x), updated_at = now() WHERE id = $1`,
       [jobId, url, input.location ?? null, reqId, input.fitScore ?? null, input.contact ?? null, keys.filter((k) => k !== h.dedupe_key)]);
+    await recordTransition(db, { actor: input.source === "j6" ? "j6" : "julian", action: "opportunity_updated", table: "opportunity", id: jobId, before: beforeJob, context: { via: "track_opportunity" } });
   } else {
     outcome = "created";
     let employerId = emp?.id ?? null;
-    if (!employerId) employerId = String((await db.query(`INSERT INTO employer (key, name, aliases) VALUES ($1, $2, ARRAY[$1]) ON CONFLICT (key) DO UPDATE SET updated_at = now() RETURNING id`, [empKey, employerName])).rows[0].id);
+    if (!employerId) {
+      const er = (await db.query(`INSERT INTO employer (key, name, aliases) VALUES ($1, $2, ARRAY[$1]) ON CONFLICT (key) DO UPDATE SET updated_at = now() RETURNING id, (xmax = 0) AS inserted`, [empKey, employerName])).rows[0];
+      employerId = String(er.id);
+      if (er.inserted) await recordTransition(db, { actor: input.source === "j6" ? "j6" : "julian", action: "employer_created", table: "employer", id: employerId, before: null });
+    }
     jobId = String((await db.query(`INSERT INTO opportunity (kind, area_id, org, title, url, location, status, fit_score, fit_notes, contact, source, dedupe_key, alias_keys, employer_id, requisition_id, identity_basis, source_ids, details)
        VALUES ('job', $1, $2, $3, $4, $5, 'discovered', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb) RETURNING id`,
       [area.id, employerName, title, url, input.location ?? null, input.fitScore ?? null, input.notes ?? null, input.contact ?? null, input.source, key, keys, employerId, reqId, reqId ? "requisition" : "title",
@@ -362,7 +378,11 @@ export async function recordOnJob(db: Db, jobId: string, e: { kind: EventKind; a
   const ins = await db.query(`INSERT INTO opportunity_event (opportunity_id, at, kind, source, source_id, summary, transition) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING RETURNING id`,
     [jobId, e.at, e.kind, e.source, e.sourceId.slice(0, 200), e.summary.slice(0, 300), transition ?? (t.anomaly ? `anomaly: ${t.anomaly}` : null)]);
   const inserted = !!ins.rowCount;
+  const actor = e.source === "julian" ? "julian" : e.source === "j6" ? "j6" : "cos";
   if (inserted) {
+    // ADR-087: the new piece of job history is itself a state change on the job.
+    await recordTransition(db, { actor, action: "opportunity_evidence_added", table: "opportunity_event", id: String(ins.rows[0].id), before: null, context: { sourceId: e.sourceId.slice(0, 200) } });
+    const beforeJob = await rowState(db, "opportunity", jobId);
     const contactEvent = e.kind !== "tracked" && e.kind !== "note";
     await db.query(`UPDATE opportunity SET status = CASE WHEN $2::text IS NOT NULL THEN $2 ELSE status END,
         applied_at = CASE WHEN $3 AND applied_at IS NULL THEN $4 ELSE applied_at END,
@@ -370,7 +390,7 @@ export async function recordOnJob(db: Db, jobId: string, e: { kind: EventKind; a
         first_evidence_at = CASE WHEN $5 THEN LEAST(coalesce(first_evidence_at, $4), $4) ELSE first_evidence_at END,
         contact = COALESCE($6, contact), updated_at = now() WHERE id = $1`,
       [jobId, transition ? target : null, target === "applied" || e.kind === "application", e.at, contactEvent, e.contact ?? null]);
-    if (transition) await appendEvent(db, { actor: e.source === "julian" ? "julian" : e.source === "j6" ? "j6" : "cos", action: "opportunity_status", entityType: "opportunity", entityId: jobId, before: { status: j.status }, after: { status: target, via: e.kind, source: e.source } });
+    await recordTransition(db, { actor, action: transition ? "opportunity_status" : "opportunity_updated", table: "opportunity", id: jobId, before: beforeJob, context: { via: e.kind, source: e.source } });
   }
   const rec = await reconcileJob(db, jobId, now);
   return { inserted, transition, anomaly: t.anomaly ?? null, changes: rec.changes, step: rec.step };
@@ -396,10 +416,19 @@ export async function recordOpportunityUpdate(db: Db, input: { job?: string | nu
 export async function archiveTestJob(db: Db, jobId: string) {
   const j = (await db.query(`SELECT o.id, a.name AS area FROM opportunity o LEFT JOIN area a ON a.id = o.area_id WHERE o.id = $1`, [jobId])).rows[0];
   if (!j || j.area !== TEST_AREA) return { error: "Only Finagai's own test (fixture) jobs can be removed." };
-  await db.query(`UPDATE followup SET state = 'cancelled', outcome = 'test job removed', closed_at = now(), updated_at = now() WHERE opportunity_id = $1 AND state IN ('open','waiting','overdue')`, [jobId]);
-  await db.query(`UPDATE project SET status = 'completed', archived_at = now(), updated_at = now() WHERE id = (SELECT project_id FROM opportunity WHERE id = $1)`, [jobId]);
+  const fs = await db.query(`WITH p AS (SELECT id, state, outcome, closed_at FROM followup WHERE opportunity_id = $1 AND state IN ('open','waiting','overdue') FOR UPDATE)
+    UPDATE followup f SET state = 'cancelled', outcome = 'test job removed', closed_at = now(), updated_at = now() FROM p WHERE f.id = p.id
+    RETURNING f.id, p.state AS "before.state", p.outcome AS "before.outcome", p.closed_at AS "before.closed_at"`, [jobId]);
+  await recordBulkTransitions(db, fs.rows, { actor: "cos", action: "followup_cancelled", table: "followup", context: { reason: "test fixture job removed" } });
+  const pid = (await db.query(`SELECT project_id FROM opportunity WHERE id = $1`, [jobId])).rows[0]?.project_id as string | null;
+  if (pid) {
+    const before = await rowState(db, "project", pid);
+    await db.query(`UPDATE project SET status = 'completed', archived_at = now(), updated_at = now() WHERE id = $1`, [pid]);
+    await recordTransition(db, { actor: "cos", action: "project_completed", table: "project", id: pid, before, context: { reason: "test fixture job removed" } });
+  }
+  const beforeJob = await rowState(db, "opportunity", jobId);
   await db.query(`UPDATE opportunity SET archived_at = now(), updated_at = now() WHERE id = $1`, [jobId]);
-  await appendEvent(db, { actor: "cos", action: "opportunity_archived", entityType: "opportunity", entityId: jobId, after: { reason: "test fixture job" } });
+  await recordTransition(db, { actor: "cos", action: "opportunity_archived", table: "opportunity", id: jobId, before: beforeJob, context: { reason: "test fixture job" } });
   return { archived: jobId };
 }
 export { isStatus };

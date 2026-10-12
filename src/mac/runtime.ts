@@ -12,6 +12,8 @@
  */
 import type pg from "pg";
 import { normalizeCapabilities } from "./capabilities.js";
+import { appendEvent } from "../db/events.js";
+import { recordBulkTransitions } from "../db/state-events.js";
 
 export const MAC_HEARTBEAT_FRESH_MS = 45_000;   // helper ticks every ~15s; 3 missed ticks = offline
 export const TASK_PROGRESS_FRESH_MS = 90_000;   // a healthy step reports progress well within this
@@ -51,8 +53,8 @@ export async function recordHeartbeat(pool: pg.Pool, hb: {
     [hb.helperVersion ?? null, JSON.stringify(hb.capabilities ? normalizeCapabilities(hb.capabilities) : {}), hb.frontmostApp ?? null, hb.frontmostWindow ?? null,
      hb.currentTaskId ?? null, hb.startedAt ?? null, hb.reconnects ?? 0, !!hb.reconnected]);
   if (hb.reconnected) {
-    await pool.query(`INSERT INTO event (actor, action, entity_type, after) VALUES ('system', 'mac_reconnected', 'mac_runtime', $1::jsonb)`,
-      [JSON.stringify({ downSince: hb.reconnected.downSince ?? null, downSeconds: hb.reconnected.downSeconds ?? null })]);
+    await appendEvent(pool, { actor: "system", action: "mac_reconnected", entityType: "mac_runtime",
+      after: { downSince: hb.reconnected.downSince ?? null, downSeconds: hb.reconnected.downSeconds ?? null } });
   }
 }
 
@@ -70,9 +72,8 @@ export async function workerMayComplete(pool: pg.Pool, taskId: string, workerId:
 /** Phase 1E: store one sanitized helper diagnostic. event.entity_id is a uuid → the Mac runtime is not an entity id. */
 export async function recordDiagnostic(pool: pg.Pool, d: { kind: string; detail: string; taskId?: string | null; helperVersion?: string | null }): Promise<void> {
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  await pool.query(`INSERT INTO event (actor, action, entity_type, entity_id, after) VALUES ('system', 'mac_diag', 'mac_runtime', $1, $2::jsonb)`,
-    [d.taskId && uuid.test(d.taskId) ? d.taskId : null,
-     JSON.stringify({ kind: d.kind.slice(0, 60), detail: d.detail.replace(/Bearer\s+\S+/gi, "[token]").slice(0, 400), taskId: d.taskId ?? null, helperVersion: d.helperVersion ?? null })]);
+  await appendEvent(pool, { actor: "system", action: "mac_diag", entityType: "mac_runtime", ...(d.taskId && uuid.test(d.taskId) ? { entityId: d.taskId } : {}),
+    after: { kind: d.kind.slice(0, 60), detail: d.detail.replace(/Bearer\s+\S+/gi, "[token]").slice(0, 400), taskId: d.taskId ?? null, helperVersion: d.helperVersion ?? null } });
 }
 
 /** Last helper diagnostics (Phase 1E), newest first. Errors propagate — an empty list must mean "none", not "query failed". */
@@ -175,14 +176,21 @@ export async function macStatus(pool: pg.Pool): Promise<Record<string, unknown>>
  * starves the queue (this is exactly how tasks #9/#32/#33/#34 blocked task #36).
  */
 export async function sweepStaleTasks(pool: pg.Pool): Promise<{ abandoned: number; stalled: number; reconcileErrors?: number }> {
+  const PREV = `id, status, verification_status, awaiting_kind, terminal_reason, failure_class`;
+  const RET = `RETURNING t.id, p.status AS "before.status", p.verification_status AS "before.verification_status", p.awaiting_kind AS "before.awaiting_kind",
+    p.terminal_reason AS "before.terminal_reason", p.failure_class AS "before.failure_class"`;
   const a = await pool.query(
-    `UPDATE control_task SET status = 'failed', failure_class = 'abandoned', updated_at = now(),
+    `WITH p AS (SELECT ${PREV} FROM control_task WHERE status = 'active' AND claimed_at IS NULL AND created_at < now() - interval '30 minutes' FOR UPDATE)
+     UPDATE control_task t SET status = 'failed', failure_class = 'abandoned', updated_at = now(),
        result_summary = 'Abandoned: no Mac worker claimed this task within 30 minutes (runtime was offline or the task was superseded). Ask again and it will run now.'
-     WHERE status = 'active' AND claimed_at IS NULL AND created_at < now() - interval '30 minutes' RETURNING id`);
+     FROM p WHERE t.id = p.id ${RET}`);
+  await recordBulkTransitions(pool, a.rows, { actor: "system", action: "control_task_state", table: "control_task", context: { why: "abandoned: no Mac worker claimed it within 30 min" } });
   const b = await pool.query(
-    `UPDATE control_task SET status = 'failed', failure_class = 'stalled', updated_at = now(),
+    `WITH p AS (SELECT ${PREV} FROM control_task WHERE status = 'active' AND claimed_at IS NOT NULL AND lease_until < now() AND last_progress_at < now() - interval '10 minutes' FOR UPDATE)
+     UPDATE control_task t SET status = 'failed', failure_class = 'stalled', updated_at = now(),
        result_summary = 'Stalled: the Mac worker stopped reporting progress and the lease was not reclaimed within 10 minutes.'
-     WHERE status = 'active' AND claimed_at IS NOT NULL AND lease_until < now() AND last_progress_at < now() - interval '10 minutes' RETURNING id`);
+     FROM p WHERE t.id = p.id ${RET}`);
+  await recordBulkTransitions(pool, b.rows, { actor: "system", action: "control_task_state", table: "control_task", context: { why: "stalled: no progress for 10 min after the lease expired" } });
   const { completeForTask, reconcileInteractions } = await import("../concierge/interactions.js");
   const { observed } = await import("../ops/lifecycle-errors.js");
   for (const r of [...a.rows, ...b.rows]) await completeForTask(pool, r.id, { ok: false, summary: "task did not complete on the Mac" }).catch(observed(pool, "sweep.complete", { taskId: r.id }));

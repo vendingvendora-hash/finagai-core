@@ -1,3 +1,4 @@
+import { recordBulkTransitions } from "../db/state-events.js";
 import { appendEvent, withTransaction } from "../db/index.js";
 import { areaHealth } from "./areas.js";
 import { STATE_CHANGING_KINDS } from "../exceptions/detectors.js";
@@ -85,7 +86,9 @@ export async function placeUnderArea(pool, item, areaName, objectiveName) {
             await appendEvent(tx, { actor: "julian", action: "create", entityType: "project", entityId: id, after: { name, via: "place_under_area" } });
         }
         await tx.query(`UPDATE project SET area_id = $2, objective_id = COALESCE($3, objective_id), updated_at = now(), version = version + 1 WHERE id = $1`, [id, a.id, objectiveId]);
-        await tx.query(`UPDATE followup SET area_id = $2 WHERE project_id = $1 AND area_id IS NULL`, [id, a.id]);
+        const fs = await tx.query(`WITH p AS (SELECT id, area_id FROM followup WHERE project_id = $1 AND area_id IS NULL FOR UPDATE)
+      UPDATE followup f SET area_id = $2 FROM p WHERE f.id = p.id RETURNING f.id, p.area_id AS "before.area_id"`, [id, a.id]);
+        await recordBulkTransitions(tx, fs.rows, { actor: "julian", action: "followup_linked", table: "followup", areaId: String(a.id), context: { area: a.name, via: "place_under_area" } });
         await appendEvent(tx, { actor: "julian", action: "project_placed", entityType: "project", entityId: id, after: { area: a.name, objectiveId } });
         return { project: name, area: a.name, projectCreated: created, linkedToObjective: !!objectiveId };
     });

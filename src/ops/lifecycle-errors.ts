@@ -7,6 +7,7 @@
  * execution_metrics. Reporting itself never throws and never blocks the user's work.
  */
 import type pg from "pg";
+import { appendEvent } from "../db/events.js";
 
 type Db = Pick<pg.Pool, "query">;
 
@@ -23,8 +24,8 @@ export async function reportLifecycleError(db: Db, where: string, err: unknown, 
   console.error(JSON.stringify({ level: "error", msg: "lifecycle_error", ...detail }));
   try {
     const entity = ref.taskId && UUID.test(ref.taskId) ? ref.taskId : ref.interactionId && UUID.test(ref.interactionId) ? ref.interactionId : null;
-    await db.query(`INSERT INTO event (actor, action, entity_type, entity_id, after) VALUES ('system', 'lifecycle_error', $1, $2, $3::jsonb)`,
-      [ref.taskId ? "control_task" : ref.interactionId ? "interaction" : "system", entity, JSON.stringify(detail)]);
+    await appendEvent(db, { actor: "system", action: "lifecycle_error", entityType: ref.taskId ? "control_task" : ref.interactionId ? "interaction" : "system",
+      ...(entity ? { entityId: entity } : {}), after: detail });
   } catch (e) {
     console.error(JSON.stringify({ level: "error", msg: "lifecycle_error_unrecorded", where, error: sanitizeError(e) }));
   }

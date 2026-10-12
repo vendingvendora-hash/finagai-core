@@ -8,8 +8,9 @@
  *   5. notify Julian of new escalations in one digest (outside quiet hours)
  * Single runner (advisory lock); a preview computes the same tick and writes nothing (no cursors, no events, no sends).
  */
+import { causeHere, recordBulkTransitions } from "../db/state-events.js";
 import { createHash, randomUUID } from "node:crypto";
-import { appendEvent, withCause } from "../db/index.js";
+import { appendEvent, currentCause, withCause } from "../db/index.js";
 import { areaHealth } from "../cos/areas.js";
 import { deliverOnce } from "../notify/delivery.js";
 import { RULE_NEEDS } from "../cos/lifecycle.js";
@@ -32,7 +33,7 @@ export async function runTick(pool, ctxIn, deps, trigger) {
                 result.tickId = String((await pool.query(`INSERT INTO event_tick (trigger) VALUES ($1) RETURNING id`, [trigger])).rows[0].id);
             try {
                 // ADR-087: one tick = one unit of work; every event it causes carries this correlation id.
-                await withCause({ correlationId: result.tickId ?? randomUUID(), causeIds: [] }, () => tick(ctx, deps, result));
+                await withCause({ correlationId: result.tickId ?? randomUUID(), causeIds: [], root: { actor: "cos", what: "engine:tick", detail: { trigger } } }, () => tick(ctx, deps, result));
                 if (result.tickId)
                     await pool.query(`UPDATE event_tick SET status = 'done', finished_at = now(), stats = $2::jsonb WHERE id = $1`, [result.tickId, JSON.stringify(statsOf(result))]);
             }
@@ -113,6 +114,20 @@ async function tick(ctx, deps, result) {
         const routes = [];
         // Phase 6 (ADR-085): Julian's stated routing correction for this sender comes first. "ignore" silences the Areas'
         // subscriptions only — waits and deadlines (area "*") still see the mail, so a reply still closes a wait.
+        // Hotfix 34: mail Finagai itself sent (digests, weekly review) is observed but is never evidence about the world —
+        // routing it would let Finagai's own summary text ("rejected", "interview") be read back as news about a job.
+        if (e.kind === "mail.received" && isOwnMail(e.payload)) {
+            routesOf.set(e.id, []);
+            const reason = "Finagai's own outgoing message — not evidence";
+            if (!ctx.dryRun) {
+                await pool.query(`UPDATE inbound_event SET status = 'ignored', routes = '[]'::jsonb, reason = $2, handled_at = now() WHERE id = $1`, [e.id, reason]);
+                const observed = observedEvent.get(e.id) ?? Number((await pool.query(`SELECT id FROM event WHERE action = 'evidence_observed' AND entity_id = $1 ORDER BY id DESC LIMIT 1`, [e.id])).rows[0]?.id ?? 0);
+                routedEvent.set(e.id, await appendEvent(pool, { actor: "system", action: "evidence_routed", entityType: "inbound_event", entityId: e.id, areaId: null,
+                    ...(observed ? { causeIds: [observed] } : {}), after: { summary: e.summary.slice(0, 200), routes: [], reason } }));
+            }
+            result.events.push({ summary: e.summary, kind: e.kind, status: "ignored", routes: [], reason });
+            continue;
+        }
         const override = e.kind === "mail.received" ? await routingOverride(pool, e.payload).catch(() => null) : null;
         if (override?.action === "route" && override.workflow && flows.has(override.workflow) && subs.some((s) => s.area !== "*" && s.workflow === override.workflow)) {
             const area = subs.find((s) => s.workflow === override.workflow).area;
@@ -201,6 +216,21 @@ async function tick(ctx, deps, result) {
     if (deps.notify)
         await notifyDigest(ctx, deps.notify, result);
 }
+/** The address Finagai sends from (NOTIFY_FROM, e.g. "Finagai <review@notify.example>"). */
+export function ownSenderAddress(env = process.env) {
+    const v = env.NOTIFY_FROM ?? "";
+    const m = /<([^>]+)>/.exec(v) ?? /([^\s<>]+@[^\s<>]+)/.exec(v);
+    return m ? m[1].trim().toLowerCase() : null;
+}
+/** Is this inbound mail one Finagai sent itself? */
+export function isOwnMail(payload, env = process.env) {
+    const own = ownSenderAddress(env);
+    const from = String(payload?.from ?? "").toLowerCase();
+    if (!own || !from)
+        return false;
+    const addr = (/<([^>]+)>/.exec(from)?.[1] ?? from).trim();
+    return addr === own;
+}
 /** What only Julian can do right now, read from state — independent of which event (if any) revealed it. */
 export async function stateNeeds(db, now) {
     const out = [];
@@ -233,7 +263,7 @@ async function reconcileEscalations(ctx, needs, result) {
                 result.escalations.resolved.push(o.summary);
                 if (!ctx.dryRun) {
                     await pool.query(`UPDATE escalation SET status = 'resolved', resolved_at = now(), resolution = 'told' WHERE id = $1`, [o.id]);
-                    await appendEvent(pool, { actor: "cos", action: "escalation_resolved", entityType: "escalation", entityId: o.id, after: { key: o.key, needs: o.needs, resolution: "told" } });
+                    await appendEvent(pool, { actor: "cos", action: "escalation_resolved", entityType: "escalation", entityId: o.id, causeIds: await notifiedBy(pool, String(o.id)), after: { key: o.key, needs: o.needs, resolution: "told" } });
                 }
             }
             continue;
@@ -244,7 +274,7 @@ async function reconcileEscalations(ctx, needs, result) {
             if (!ctx.dryRun) {
                 const resolution = o.fstate === "done" || o.fstate === "cancelled" ? `follow-up ${o.fstate}` : "no longer needed";
                 await pool.query(`UPDATE escalation SET status = 'resolved', resolved_at = now(), resolution = $2 WHERE id = $1`, [o.id, resolution]);
-                const cause = o.followup_id ? await lastEventOn(pool, "followup", o.followup_id) : [];
+                const cause = o.followup_id ? await lastEventOn(pool, "followup", o.followup_id) : await causeHere(pool);
                 await appendEvent(pool, { actor: "cos", action: "escalation_resolved", entityType: "escalation", entityId: o.id, ...(cause.length ? { causeIds: cause } : {}),
                     after: { key: o.key, needs: o.needs, resolution, summary: o.summary } });
             }
@@ -260,7 +290,9 @@ async function reconcileEscalations(ctx, needs, result) {
         result.escalations.opened.push(`[${n.needs}] ${n.summary}`);
         if (!ctx.dryRun) {
             const ins = await pool.query(`INSERT INTO escalation (key, area_id, needs, summary, detail, due_at, followup_id) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (key) DO NOTHING RETURNING id`, [n.key, n.areaId ?? null, n.needs, n.summary.slice(0, 500), n.detail?.slice(0, 1000) ?? null, n.dueAt ?? null, n.followupId ?? null]);
-            const cause = ins.rowCount ? await needCause(pool, n) : [];
+            let cause = ins.rowCount ? await needCause(pool, n) : [];
+            if (ins.rowCount && !cause.length)
+                cause = await causeHere(pool);
             if (ins.rowCount)
                 await appendEvent(pool, { actor: "cos", action: "escalation_opened", entityType: "escalation", entityId: String(ins.rows[0].id), areaId: n.areaId ?? null,
                     ...(cause.length ? { causeIds: cause } : {}), after: { key: n.key, needs: n.needs, summary: n.summary.slice(0, 300), dueAt: n.dueAt ?? null } });
@@ -289,6 +321,11 @@ async function needCause(pool, n) {
     if (n.key.startsWith("lesson:"))
         return by("lesson_proposed", n.key.slice("lesson:".length).replace(/:[^:]+$/, ""));
     return [];
+}
+/** ADR-087: a "requested" escalation is done once delivered — caused by that delivery. */
+async function notifiedBy(pool, escalationId) {
+    const r = (await pool.query(`SELECT max(id) AS id FROM event WHERE action = 'escalation_notified' AND entity_id = $1::uuid`, [escalationId])).rows[0];
+    return r?.id ? [Number(r.id)] : await causeHere(pool);
 }
 /** ADR-087: a notification is caused by the escalations it carries. */
 async function escalationEvents(pool, ids) {
@@ -331,9 +368,12 @@ async function notifyDigest(ctx, n, result) {
             act.length ? `\n\nAsk Finagai in Claude (e.g. "what needs me?") to act on any of them.` : ""].join(""),
     });
     if (r === "sent" || r === "already_sent") {
-        await ctx.pool.query(`UPDATE escalation SET notified_at = now() WHERE id = ANY($1::uuid[])`, [rows.map((x) => x.id)]);
         result.escalations.notified = rows.map((x) => x.summary);
-        await appendEvent(ctx.pool, { actor: "cos", action: "notification_delivered", causeIds: await escalationEvents(ctx.pool, rows.map((x) => String(x.id))), after: { channel: "email", purpose: "escalation_digest", items: rows.length, keys: rows.map((x) => x.key).slice(0, 20), result: r } });
+        const delivered = await appendEvent(ctx.pool, { actor: "cos", action: "notification_delivered", causeIds: await escalationEvents(ctx.pool, rows.map((x) => String(x.id))), after: { channel: "email", purpose: "escalation_digest", items: rows.length, keys: rows.map((x) => x.key).slice(0, 20), result: r } });
+        // ADR-087: each escalation's own state moves to "notified" — caused by that delivery.
+        const marked = await ctx.pool.query(`WITH p AS (SELECT id, notified_at FROM escalation WHERE id = ANY($1::uuid[]) FOR UPDATE)
+      UPDATE escalation e SET notified_at = now() FROM p WHERE e.id = p.id RETURNING e.id, p.notified_at AS "before.notified_at"`, [rows.map((x) => x.id)]);
+        await recordBulkTransitions(ctx.pool, marked.rows, { actor: "cos", action: "escalation_notified", table: "escalation", causeIds: [delivered], context: { channel: "email" } });
     }
     else {
         result.escalations.held = `digest not sent: ${r}`;
@@ -368,7 +408,10 @@ async function recordAreaHealth(pool) {
         const last = (await pool.query(`SELECT after->>'color' AS color FROM event WHERE action = 'area_health_changed' AND entity_id = $1 ORDER BY id DESC LIMIT 1`, [a.id])).rows[0]?.color;
         if (last === color)
             continue;
-        await appendEvent(pool, { actor: "cos", action: "area_health_changed", entityType: "area", entityId: a.id, areaId: a.id,
+        // Cause: the latest change in this Area during this unit of work (what moved its health), else the tick itself.
+        const corr = currentCause()?.correlationId;
+        const trigger = corr ? (await pool.query(`SELECT max(id) AS id FROM event WHERE correlation_id = $1 AND area_id = $2 AND action <> 'area_health_changed'`, [corr, a.id])).rows[0]?.id : null;
+        await appendEvent(pool, { actor: "cos", action: "area_health_changed", entityType: "area", entityId: a.id, areaId: a.id, causeIds: trigger ? [Number(trigger)] : await causeHere(pool),
             before: last ? { color: last } : null, after: { color, area: h.name, breaches: h.breaches } });
     }
 }

@@ -3,6 +3,7 @@
  * store, deliver. Facts in the output come from the database; the model contributes prioritization
  * and wording only. At the hard ceiling, or after a failed repair, the zero-model degraded review is used.
  */
+import { recordTransition, rowState } from "../../db/state-events.js";
 import type pg from "pg";
 import { z } from "zod";
 import { appendEvent, withTransaction } from "../../db/index.js";
@@ -178,7 +179,10 @@ export async function deliverReview(pool: pg.Pool, store: DeliveryStore, sender:
   // Only a delivery Core recorded under its own lease counts. lease_lost, in_progress, and
   // needs_reconciliation leave the review undelivered for retry or reconciliation.
   if (result === "sent" || result === "already_sent") {
+    const before = await rowState(pool, "review", reviewId);
     await pool.query(`UPDATE review SET delivered_at = coalesce(delivered_at, now()), delivery_status = 'sent' WHERE id = $1`, [reviewId]);
+    // ADR-087: the review reaching Julian is a notification on the Live State Stream.
+    await recordTransition(pool, { actor: "j3", action: "review_delivered", table: "review", id: reviewId, before, context: { channel: "email", purpose: "weekly_review", result } });
   }
   return result;
 }

@@ -1,3 +1,9 @@
+/**
+ * Interaction reliability (product mandate): durable artifact continuity + inbound idempotency.
+ * Fixes the screenshot bug: "send Santiago" resolves the real last chart from the DB (survives restart),
+ * and a duplicated inbound iMessage never processes or replies twice.
+ */
+import { recordTransition, rowState } from "../db/state-events.js";
 import { appendEvent } from "../db/index.js";
 /** Register an artifact Finagai produced. Durable — this is what "send that" resolves against. */
 export async function registerArtifact(pool, a) {
@@ -21,7 +27,9 @@ export async function resolveRecentArtifact(pool, opts = {}) {
     return r.rows[0] ? mapArtifact(r.rows[0]) : null;
 }
 export async function markArtifactSent(pool, id) {
+    const before = await rowState(pool, "artifact", id);
     await pool.query(`UPDATE artifact SET state = 'sent' WHERE id = $1`, [id]);
+    await recordTransition(pool, { actor: "system", action: "artifact_sent", table: "artifact", id, before });
 }
 /**
  * Claim an inbound message for processing, idempotently. Returns:

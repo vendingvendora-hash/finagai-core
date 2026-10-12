@@ -10,6 +10,7 @@
  */
 import type pg from "pg";
 import { appendEvent, withTransaction } from "../db/index.js";
+import { recordTransition, rowState } from "../db/state-events.js";
 import type { GoogleSearch } from "../resources/retrieve.js";
 import { GMAIL_EXTRACTOR, type GmailRecord } from "../google/client.js";
 import { ensureArea } from "./operating.js";
@@ -318,13 +319,20 @@ export async function applyBootstrap(pool: pg.Pool, code: number, opts: { object
   return withTransaction(pool, async (tx) => {
     const objName = opts.objective ?? pl.objective.proposed;
     const ob = await tx.query(`SELECT id FROM objective WHERE area_id = $1 AND lower(name) = lower($2)`, [area.id, objName]);
-    const objectiveId: string = ob.rows[0]?.id ?? (await tx.query(`INSERT INTO objective (area_id, name) VALUES ($1, $2) RETURNING id`, [area.id, objName])).rows[0].id;
+    let objectiveId: string = ob.rows[0]?.id;
+    if (!objectiveId) {
+      objectiveId = (await tx.query(`INSERT INTO objective (area_id, name) VALUES ($1, $2) RETURNING id`, [area.id, objName])).rows[0].id;
+      await recordTransition(tx, { actor: "julian", action: "objective_set", table: "objective", id: objectiveId, before: null, areaId: area.id, context: { via: "bootstrap", code } });
+    }
     const empId = new Map<string, string>();
     for (const e of pl.employers!) {
+      const prev = (await tx.query(`SELECT id FROM employer WHERE key = $1`, [e.key])).rows[0];
+      const before = prev ? await rowState(tx, "employer", String(prev.id)) : null;
       const r = await tx.query(`INSERT INTO employer (key, name, aliases, party, details) VALUES ($1, $2, $3, $4, $5::jsonb)
         ON CONFLICT (key) DO UPDATE SET aliases = (SELECT array_agg(DISTINCT x ORDER BY x) FROM unnest(employer.aliases || EXCLUDED.aliases) x), party = EXCLUDED.party, updated_at = now() RETURNING id`,
         [e.key, e.name, e.aliases, e.party, JSON.stringify({ partyReason: e.partyReason })]);
       empId.set(e.key, r.rows[0].id);
+      await recordTransition(tx, { actor: "julian", action: before ? "employer_updated" : "employer_created", table: "employer", id: String(r.rows[0].id), before, context: { via: "bootstrap", code } });
     }
     const oppId = new Map<string, string>();
     let inserted = 0, updated = 0, events = 0;
@@ -333,8 +341,9 @@ export async function applyBootstrap(pool: pg.Pool, code: number, opts: { object
       const details = JSON.stringify({ folder: o.folder, sheetUpdatedAt: o.updatedAt, statusSource: o.statusSource, anomalies: o.anomalies });
       let employerId = empId.get(o.employerKey) ?? null;
       if (!employerId) {
-        const r = await tx.query(`INSERT INTO employer (key, name, aliases) VALUES ($1, $2, ARRAY[$1]) ON CONFLICT (key) DO UPDATE SET updated_at = now() RETURNING id`, [o.employerKey, o.org]);
+        const r = await tx.query(`INSERT INTO employer (key, name, aliases) VALUES ($1, $2, ARRAY[$1]) ON CONFLICT (key) DO UPDATE SET updated_at = now() RETURNING id, (xmax = 0) AS inserted`, [o.employerKey, o.org]);
         employerId = r.rows[0].id; empId.set(o.employerKey, employerId!);
+        if (r.rows[0].inserted) await recordTransition(tx, { actor: "julian", action: "employer_created", table: "employer", id: String(employerId), before: null, context: { via: "bootstrap", code } });
       }
       // Exact identity first; an alias match must be unambiguous (two candidates = never merge, insert a new job instead).
       const ex0 = await tx.query(`SELECT id FROM opportunity WHERE kind = 'job' AND archived_at IS NULL AND dedupe_key = $1`, [o.dedupe]);
@@ -343,11 +352,13 @@ export async function applyBootstrap(pool: pg.Pool, code: number, opts: { object
       let id: string;
       if (ex.rows[0]) {
         id = ex.rows[0].id; updated++;
+        const beforeJob = await rowState(tx, "opportunity", id);
         await tx.query(`UPDATE opportunity SET status = $2, fit_score = COALESCE($3, fit_score), employer_id = $4, requisition_id = COALESCE($5, requisition_id), identity_basis = $6,
           alias_keys = (SELECT array_agg(DISTINCT x ORDER BY x) FROM unnest(alias_keys || $7::text[]) x), source_ids = (SELECT array_agg(DISTINCT x ORDER BY x) FROM unnest(source_ids || $8::text[]) x),
           contact = COALESCE($9, contact), first_evidence_at = COALESCE($10, first_evidence_at), last_evidence_at = COALESCE($11, last_evidence_at), applied_at = COALESCE(applied_at, $12),
           details = details || $13::jsonb, updated_at = now() WHERE id = $1`,
           [id, o.status, o.fitScore, employerId, o.reqId, o.identityBasis, aliases, o.sourceIds, o.contact, o.firstEvidenceAt, o.lastEvidenceAt, o.appliedAt, details]);
+        await recordTransition(tx, { actor: "julian", action: "opportunity_updated", table: "opportunity", id, before: beforeJob, areaId: area.id, context: { via: "bootstrap", code } });
       } else {
         inserted++;
         id = (await tx.query(
@@ -357,12 +368,14 @@ export async function applyBootstrap(pool: pg.Pool, code: number, opts: { object
           [area.id, o.org, o.title, o.url, o.location, o.workMode, o.salary, o.eligibility, o.status, o.fitScore, o.fitNotes, o.resume, o.nextAction,
            o.nextActionAt && !Number.isNaN(Date.parse(o.nextActionAt)) ? o.nextActionAt : null, o.statusSource === "evidence" ? "gmail" : `career_copilot:${o.sourceId}`, o.dedupe, details,
            employerId, o.reqId, o.identityBasis, aliases, o.sourceIds, o.contact, o.firstEvidenceAt, o.lastEvidenceAt, o.appliedAt])).rows[0].id;
+        await recordTransition(tx, { actor: "julian", action: "opportunity_tracked", table: "opportunity", id, before: null, areaId: area.id, context: { via: "bootstrap", code } });
       }
       oppId.set(o.dedupe, id);
       for (const e of o.events) {
-        const r = await tx.query(`INSERT INTO opportunity_event (opportunity_id, at, kind, source, source_id, summary, transition) VALUES ($1, $2, $3, 'gmail', $4, $5, $6) ON CONFLICT DO NOTHING`,
+        const r = await tx.query(`INSERT INTO opportunity_event (opportunity_id, at, kind, source, source_id, summary, transition) VALUES ($1, $2, $3, 'gmail', $4, $5, $6) ON CONFLICT DO NOTHING RETURNING id`,
           [id, e.at, e.kind, e.sourceId, e.subject, e.transition]);
         events += r.rowCount ?? 0;
+        if (r.rowCount) await recordTransition(tx, { actor: "julian", action: "opportunity_evidence_added", table: "opportunity_event", id: String(r.rows[0].id), before: null, areaId: area.id, context: { via: "bootstrap", sourceId: `gmail:${e.sourceId}` } });
       }
     }
     const created: string[] = [];
@@ -370,14 +383,26 @@ export async function applyBootstrap(pool: pg.Pool, code: number, opts: { object
       const ex = await tx.query(`SELECT id FROM project WHERE archived_at IS NULL AND lower(name) = lower($1) LIMIT 1`, [a.existingProject ?? a.name]);
       let pid: string;
       if (ex.rows[0]) pid = ex.rows[0].id;
-      else { pid = (await tx.query(`INSERT INTO project (name, description, last_activity_at) VALUES ($1, $2, now()) RETURNING id`, [a.name, `Job opportunity (${a.status}; ${a.evidence.slice(-3).join("; ")})`.slice(0, 500)])).rows[0].id; created.push(a.name); }
+      else {
+        pid = (await tx.query(`INSERT INTO project (name, description, last_activity_at) VALUES ($1, $2, now()) RETURNING id`, [a.name, `Job opportunity (${a.status}; ${a.evidence.slice(-3).join("; ")})`.slice(0, 500)])).rows[0].id; created.push(a.name);
+        await recordTransition(tx, { actor: "julian", action: "create", table: "project", id: pid, before: null, context: { via: "bootstrap", code } });
+      }
+      const beforeProject = await rowState(tx, "project", pid);
       await tx.query(`UPDATE project SET area_id = $2, objective_id = $3, updated_at = now() WHERE id = $1`, [pid, area.id, objectiveId]);
+      await recordTransition(tx, { actor: "julian", action: "project_placed", table: "project", id: pid, before: beforeProject, areaId: area.id, context: { via: "bootstrap", code } });
       const oid = oppId.get(a.opportunityKey);
-      if (oid) await tx.query(`UPDATE opportunity SET project_id = $2, contact = COALESCE(contact, $3) WHERE id = $1`, [oid, pid, a.contact]);
+      if (oid) {
+        const beforeJob = await rowState(tx, "opportunity", oid);
+        await tx.query(`UPDATE opportunity SET project_id = $2, contact = COALESCE(contact, $3) WHERE id = $1`, [oid, pid, a.contact]);
+        await recordTransition(tx, { actor: "julian", action: "set_project", table: "opportunity", id: oid, before: beforeJob, areaId: area.id, context: { via: "bootstrap", code } });
+      }
       if (a.proposedFollowup && !opts.skipFollowups) {
         const dup = await tx.query(`SELECT 1 FROM followup WHERE project_id = $1 AND state IN ('open','waiting','overdue')`, [pid]);
-        if (!dup.rowCount) await tx.query(`INSERT INTO followup (summary, counterparty, state, due_at, last_action_at, area_id, project_id, opportunity_id, origin) VALUES ($1, $2, 'waiting', COALESCE($7::date + time '16:00', now() + interval '3 days'), $3, $4, $5, $6, 'bootstrap')`,
-          [a.proposedFollowup, a.contact ?? a.employer, a.lastContact ?? new Date().toISOString(), area.id, pid, oid ?? null, a.followupDue]);   // live: the stored due must be the due the text states
+        if (!dup.rowCount) {
+          const f = await tx.query(`INSERT INTO followup (summary, counterparty, state, due_at, last_action_at, area_id, project_id, opportunity_id, origin) VALUES ($1, $2, 'waiting', COALESCE($7::date + time '16:00', now() + interval '3 days'), $3, $4, $5, $6, 'bootstrap') RETURNING id`,
+            [a.proposedFollowup, a.contact ?? a.employer, a.lastContact ?? new Date().toISOString(), area.id, pid, oid ?? null, a.followupDue]);   // live: the stored due must be the due the text states
+          await recordTransition(tx, { actor: "julian", action: "followup_created", table: "followup", id: String(f.rows[0].id), before: null, areaId: area.id, context: { via: "bootstrap", code } });
+        }
       }
     }
     await tx.query(`UPDATE bootstrap_proposal SET status = 'applied', applied_at = now() WHERE id = $1`, [p.id]);

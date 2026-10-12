@@ -13,6 +13,7 @@ export function withCause(ctx, fn) {
         correlationId: ctx.correlationId ?? parent.correlationId ?? randomUUID(),
         causeIds: ctx.causeIds ?? parent.causeIds ?? [],
         areaId: ctx.areaId !== undefined ? ctx.areaId : parent.areaId ?? null,
+        ...(ctx.root ?? parent.root ? { root: ctx.root ?? parent.root } : {}),
     };
     return store.run(next, fn);
 }

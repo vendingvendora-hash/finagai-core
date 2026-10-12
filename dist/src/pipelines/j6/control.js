@@ -21,6 +21,7 @@ async function taskContext(deps, taskId, request) {
 }
 import { deriveContract, verifyCompletion, recoveryDecision, REJECTION_MARKER } from "../../mac/acceptance.js";
 import { appendEvent, withTransaction } from "../../db/index.js";
+import { recordTransition, rowState } from "../../db/state-events.js";
 import { BudgetBlockedError } from "../../llm/types.js";
 import { skillsFor } from "./skills.js";
 import { enterAwaitingHuman, leaveAwaitingHuman, resumeTask } from "../../concierge/human-wait.js";
@@ -336,8 +337,10 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
             await pool.query(`UPDATE control_task SET model_calls = model_calls + 1 WHERE id = $1`, [taskId]).catch(observed(pool, "j6.modelCalls", { taskId }));
             step = parseStep(repair.text);
             if (!step) {
+                const before = await rowState(pool, "control_task", taskId);
                 await pool.query(`UPDATE control_task SET status = 'failed', failure_class = 'model_parse', terminal_reason = 'model_parse',
           result_summary = 'The planner returned an unreadable reply twice; nothing was done after the last completed step.', updated_at = now() WHERE id = $1`, [taskId]);
+                await recordTransition(pool, { actor: "j6", action: "control_task_state", table: "control_task", id: taskId, before, context: { why: "planner reply unreadable twice" } });
                 await completeForTask(pool, taskId, { ok: false, summary: "Stopped: the planner's reply could not be read (twice)." }).catch(observed(pool, "j6.complete.model_parse", { taskId }));
                 return { status: "failed", message: "planner reply unreadable twice" };
             }
@@ -349,12 +352,16 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
             return { status: "failed", message: "budget reached" };
         }
         deps.log?.("planner failed", { error: String(err?.message ?? err).slice(0, 160) });
+        const before = await rowState(pool, "control_task", taskId);
         await pool.query(`UPDATE control_task SET status = 'failed', failure_class = 'model_error', terminal_reason = 'model_error',
       result_summary = $2, updated_at = now() WHERE id = $1`, [taskId, `The planner model call failed: ${String(err?.message ?? err).slice(0, 200)}`]);
+        await recordTransition(pool, { actor: "j6", action: "control_task_state", table: "control_task", id: taskId, before, context: { why: "planner model call failed" } });
         return { status: "failed", message: "couldn't plan the next step" };
     }
     if (!step) {
+        const before = await rowState(pool, "control_task", taskId);
         await pool.query(`UPDATE control_task SET status = 'failed', failure_class = 'model_parse', terminal_reason = 'model_parse', result_summary = 'Could not plan the next step.', updated_at = now() WHERE id = $1`, [taskId]);
+        await recordTransition(pool, { actor: "j6", action: "control_task_state", table: "control_task", id: taskId, before, context: { why: "could not plan the next step" } });
         return { status: "failed", message: "could not plan the next step" };
     }
     if (step.done) {
@@ -372,7 +379,9 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
             const wrote = prior.some((x) => x.status === "done" && !READ_KINDS.has(x.kind));
             epistemic = wrote || contract.verificationStrategy !== "model_graded" ? "needs_review" : "unverified";
             step = { ...step, summary: `${epistemic === "needs_review" ? "NEEDS YOUR REVIEW" : "Done, but NOT independently verified"} (${verdict.reason}). Planner's report: ${step.summary}`.slice(0, 600) };
+            const before = await rowState(pool, "control_task", taskId);
             await pool.query(`UPDATE control_task SET terminal_reason = 'verifier_unavailable', verification_status = $2 WHERE id = $1`, [taskId, epistemic]).catch(observed(pool, "j6.verifierUnavailable", { taskId }));
+            await recordTransition(pool, { actor: "j6", action: "control_task_state", table: "control_task", id: taskId, before, context: { why: "verifier unavailable" } });
         }
         if (!verdict.pass && !verdict.unavailable) {
             // A rejected claim = false_completion (never shown to Julian as success). Then BOUNDED RECOVERY, not failure.
@@ -384,7 +393,9 @@ export async function planNext(deps, taskId, screenshotB64, lastResult, percepti
             await pool.query(`UPDATE control_task SET verification_rejections = $2, recovery_strategy_changed = recovery_strategy_changed OR $3 WHERE id = $1`, [taskId, rejections, decision.strategyChanged]);
             await pool.query(`UPDATE interaction SET false_completion = true, verification_attempts = verification_attempts + 1 WHERE $1 = ANY(task_ids)`, [taskId]).catch(observed(pool, "j6.falseCompletion", { taskId }));
             if (decision.action === "terminal") {
+                const before = await rowState(pool, "control_task", taskId);
                 await pool.query(`UPDATE control_task SET status = 'failed', failure_class = 'false_completion', terminal_reason = $3, result_summary = $2, updated_at = now() WHERE id = $1`, [taskId, `Not completed — the result could not be verified (${decision.terminalReason}): ${verdict.reason}`.slice(0, 1000), decision.terminalReason]);
+                await recordTransition(pool, { actor: "j6", action: "control_task_state", table: "control_task", id: taskId, before, context: { why: "result could not be verified" } });
                 await completeForTask(pool, taskId, { ok: false, summary: `Not completed — could not verify the result (${decision.terminalReason.replace(/_/g, " ")}): ${verdict.reason}` }).catch(observed(pool, "j6.complete.unverifiable", { taskId }));
                 return { status: "failed", message: `not verified: ${verdict.reason}` };
             }
@@ -531,7 +542,9 @@ async function decideStepTx(pool, code, approve) {
             return { status: "already_handled" };
         const next = approve ? "approved" : "rejected";
         await tx.query(`UPDATE control_step SET status = $2, decided_at = now() WHERE id = $1`, [s.id, next]);
+        const before = await rowState(tx, "control_task", s.task_id);
         await tx.query(`UPDATE control_task SET status = $2, updated_at = now() WHERE id = $1`, [s.task_id, approve ? "active" : "paused"]);
+        await recordTransition(tx, { actor: "julian", action: "control_task_state", table: "control_task", id: s.task_id, before, context: { decision: approve ? "step approved" : "step rejected" } });
         await leaveAwaitingHuman(tx, s.task_id);
         if (!approve)
             await enterAwaitingHuman(tx, s.task_id, "rejected", "Julian declined the proposed step; waiting for direction (or stop)", "paused");

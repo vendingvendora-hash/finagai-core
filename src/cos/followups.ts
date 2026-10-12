@@ -5,6 +5,7 @@
  */
 import type pg from "pg";
 import { appendEvent, withTransaction } from "../db/index.js";
+import { recordBulkTransitions } from "../db/state-events.js";
 
 export type FollowupState = "open" | "waiting" | "overdue" | "done" | "cancelled";
 
@@ -54,8 +55,10 @@ export async function closeFollowup(pool: pg.Pool, id: string, outcome: string, 
 /** Sweep: flip past-due open/waiting follow-ups to 'overdue'. Returns how many changed. Idempotent. */
 export async function sweepOverdue(pool: pg.Pool, now = new Date()): Promise<number> {
   const r = await pool.query(
-    `UPDATE followup SET state='overdue', updated_at=now()
-     WHERE state IN ('open','waiting') AND due_at IS NOT NULL AND due_at < $1 RETURNING id`, [now]);
+    `WITH p AS (SELECT id, state FROM followup WHERE state IN ('open','waiting') AND due_at IS NOT NULL AND due_at < $1 FOR UPDATE)
+     UPDATE followup f SET state = 'overdue', updated_at = now() FROM p WHERE f.id = p.id RETURNING f.id, p.state AS "before.state"`, [now]);
+  // ADR-087: each follow-up passing its date is its own observable transition (cause: the follow-up's previous event).
+  await recordBulkTransitions(pool, r.rows, { actor: "system", action: "followup_overdue", table: "followup", context: { asOf: now.toISOString() } });
   return r.rowCount ?? 0;
 }
 

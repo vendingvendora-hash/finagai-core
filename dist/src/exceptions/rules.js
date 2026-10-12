@@ -1,3 +1,9 @@
+/**
+ * Phase 7 (ADR-086) — Julian's own "tell me when …" rules. A rule only OBSERVES and NOTIFIES: it never acts, never
+ * changes a policy, and never puts a task on Julian's plate. Closed registry of metrics and events; edge-triggered
+ * (fires when the condition becomes true, re-arms when it becomes false), so a rule never repeats itself.
+ */
+import { recordTransition, rowState } from "../db/state-events.js";
 import { appendEvent } from "../db/index.js";
 import { areaHealth } from "../cos/areas.js";
 import { budgetReader } from "./detectors.js";
@@ -119,9 +125,12 @@ export async function evaluateRules(pool, now, dryRun, deps = {}) {
                     out.fired.push(r.statement);
                     out.needs.push({ key: `rule:${r.code}:${n}`, needs: "requested", areaId: r.area_id, summary: `You asked to be told: “${r.statement}” — now ${fmt(v)} (${r.metric} ${r.op} ${Number(r.value)})` });
                 }
-                if (!dryRun)
+                if (!dryRun) {
+                    const before = await rowState(pool, "watch_rule", String(r.id));
                     await pool.query(`UPDATE watch_rule SET last_value = $2, last_checked_at = $3, armed = $4, last_fired_at = CASE WHEN $5 THEN $3 ELSE last_fired_at END,
             fired_count = fired_count + CASE WHEN $5 THEN 1 ELSE 0 END WHERE id = $1`, [r.id, v, now, !holds, fire]);
+                    await recordTransition(pool, { actor: "cos", action: "watch_rule_state", table: "watch_rule", id: String(r.id), before, areaId: r.area_id ?? null, context: { value: v, fired: fire } });
+                }
             }
             else {
                 const mark = Number(r.last_value ?? 0);

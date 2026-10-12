@@ -3,6 +3,7 @@
  * Fixes the screenshot bug: "send Santiago" resolves the real last chart from the DB (survives restart),
  * and a duplicated inbound iMessage never processes or replies twice.
  */
+import { recordTransition, rowState } from "../db/state-events.js";
 import type pg from "pg";
 import { appendEvent } from "../db/index.js";
 
@@ -33,7 +34,9 @@ export async function resolveRecentArtifact(pool: pg.Pool, opts: { conversation?
 }
 
 export async function markArtifactSent(pool: pg.Pool, id: string): Promise<void> {
+  const before = await rowState(pool, "artifact", id);
   await pool.query(`UPDATE artifact SET state = 'sent' WHERE id = $1`, [id]);
+  await recordTransition(pool, { actor: "system", action: "artifact_sent", table: "artifact", id, before });
 }
 
 /**

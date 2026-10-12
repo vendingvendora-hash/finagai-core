@@ -9,6 +9,9 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { cancelTask, createTask, decideStep, resumeByCode, getStep, getTaskResult, parseControlCommand, planNext, recordRun, setResultImage } from "../pipelines/j6/control.js";
 import { analyzeWorkbookToChart, rankCandidates } from "../mac/operator.js";
 import { registerArtifact, resolveRecentArtifact, markArtifactSent, claimInbound, finishInbound } from "./interaction.js";
+import { withCause } from "../db/index.js";
+import { randomUUID } from "node:crypto";
+import { recordTransition, rowState } from "../db/state-events.js";
 import { maybeRefresh } from "../resources/registry.js";
 import { recordDiagnostic, recordHeartbeat, claimTask, taskProgress, macStatus, workerMayComplete, recordSuccess, sweepStaleTasks } from "../mac/runtime.js";
 import { completeForTask, setState as setInteractionState } from "./interactions.js";
@@ -57,7 +60,9 @@ export function createControlHandler(deps, token, log) {
         }
         return null;
     }
-    return async function handle(req, res, path) {
+    // ADR-087: every Mac-runtime request is one unit of work — the events it causes share a correlation id.
+    return (req, res, path) => withCause({ correlationId: randomUUID(), causeIds: [], root: { actor: "j6", what: `mac:${path}` } }, () => handle(req, res, path));
+    async function handle(req, res, path) {
         if (!token)
             return json(res, 404, { error: "not_found" });
         if (!helperAuthorized(req.headers.authorization, token))
@@ -259,7 +264,9 @@ export function createControlHandler(deps, token, log) {
                     return json(res, 409, { error: "not_lease_holder" });
                 if (typeof body.taskId === "string" && body.done === true && typeof body.imageB64 !== "string") {
                     // Non-image completion (e.g. mac_ping round-trip).
+                    const before = await rowState(deps.pool, "control_task", body.taskId);
                     await deps.pool.query(`UPDATE control_task SET status = 'done', result_summary = $2, updated_at = now() WHERE id = $1 AND status = 'active'`, [body.taskId, String(body.summary ?? "done").slice(0, 1000)]);
+                    await recordTransition(deps.pool, { actor: "j6", action: "control_task_state", table: "control_task", id: body.taskId, before, context: { reportedBy: "mac", summary: String(body.summary ?? "done").slice(0, 200) } });
                     await recordSuccess(deps.pool, body.taskId);
                     await completeForTask(deps.pool, body.taskId, { ok: true, verification: "not_applicable", summary: String(body.summary ?? "done") }).catch(observed(deps.pool, "chartDone.complete", { taskId: body.taskId }));
                     return json(res, 200, { ok: true });
@@ -267,13 +274,17 @@ export function createControlHandler(deps, token, log) {
                 if (typeof body.taskId === "string" && body.failed === true) {
                     // Terminal failure with a concrete reason (ADR-066): a task must never remain 'active' after the
                     // worker has given up on it.
+                    const before = await rowState(deps.pool, "control_task", body.taskId);
                     await deps.pool.query(`UPDATE control_task SET status = 'failed', result_summary = $2, updated_at = now() WHERE id = $1 AND status = 'active'`, [body.taskId, String(body.summary ?? "failed on the Mac").slice(0, 1000)]);
+                    await recordTransition(deps.pool, { actor: "j6", action: "control_task_state", table: "control_task", id: body.taskId, before, context: { reportedBy: "mac", summary: String(body.summary ?? "failed on the Mac").slice(0, 200) } });
                     await completeForTask(deps.pool, body.taskId, { ok: false, summary: String(body.summary ?? "failed on the Mac") }).catch(observed(deps.pool, "chartDone.fail", { taskId: body.taskId }));
                     return json(res, 200, { ok: true, failed: true });
                 }
                 if (typeof body.taskId === "string" && typeof body.imageB64 === "string") {
                     await setResultImage(deps.pool, body.taskId, body.imageB64);
+                    const before = await rowState(deps.pool, "control_task", body.taskId);
                     await deps.pool.query(`UPDATE control_task SET status = 'done', result_summary = $2, updated_at = now() WHERE id = $1`, [body.taskId, String(body.summary ?? "chart ready").slice(0, 1000)]);
+                    await recordTransition(deps.pool, { actor: "j6", action: "control_task_state", table: "control_task", id: body.taskId, before, context: { reportedBy: "mac", artifact: "chart" } });
                     await recordSuccess(deps.pool, body.taskId);
                     // M01 posts an image only after its own acceptance checks pass on the Mac (artifact contract).
                     await completeForTask(deps.pool, body.taskId, { ok: true, verification: "verified", summary: String(body.summary ?? "chart ready"), imageB64: body.imageB64 }).catch(observed(deps.pool, "chartDone.complete", { taskId: body.taskId }));
@@ -293,6 +304,7 @@ export function createControlHandler(deps, token, log) {
             log("control route bad_request", { path, reason });
             return json(res, 400, { error: "bad_request", reason });
         }
-    };
+    }
+    ;
 }
 //# sourceMappingURL=control-routes.js.map

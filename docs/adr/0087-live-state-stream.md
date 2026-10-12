@@ -174,3 +174,93 @@ Core against the production database and reports every acceptance property with 
 - **Redaction:** scans every envelope in the window.
 
 An integration test runs the same self-check on a fresh database.
+
+## Failed acceptance criterion and fix (2026-10-12, hotfix 34)
+
+**The failure, observed live.** At 14:40Z a real email ("Your application was viewed by Vantage Network") ran a
+correctly linked chain: observed → routed → workflow. Inside that workflow, two pieces of authoritative state changed
+with **no semantic event of their own**:
+- the follow-up "Waiting on Vantage Network…" was rescheduled to 2026-10-26;
+- a new job-history record was added.
+
+Both existed only as prose inside `workflow_completed`. This is treated as a failed ADR-087 acceptance criterion:
+meaningful state changed without a corresponding event.
+
+**The class of defect.** A write path that bypasses the event writer. The original ontology guard only checked that
+event *actions* were classified. It could not see SQL writes that never produce an event.
+
+### Fix 1 — the authoritative-state model (`src/db/state-events.ts`)
+- **Every table Finagai writes is classified:**
+  - **STATE**: it lists its *semantic* columns, and a change to them is a state transition.
+  - **OPERATIONAL**: bookkeeping, with the reason it needs no event.
+- **`recordTransition()`** emits the event for one transition. It reads the row's semantic state after the write,
+  diffs it against the state captured before, and appends one event. That event carries:
+  - the affected object;
+  - **only the changed fields**, before and after;
+  - the unit of work's correlation id;
+  - a cause.
+- **`recordBulkTransitions()`** does the same for set-based writes, using `WITH prev AS (… FOR UPDATE) UPDATE … RETURNING
+  prev.<col> AS "before.<col>"`.
+- **Cause.** Each state change cites:
+  1. the explicit cause; else
+  2. the surrounding unit of work's cause (e.g. its workflow run); else
+  3. **the unit of work itself**.
+
+  The unit of work is recorded lazily as one `work_invoked` event for a tool call, Mac-runtime request, HTTP request,
+  scheduled job, dead-man check or engine pass that changes something. A unit that changes nothing leaves no trace.
+  `appendEvent()` applies the same rule to any state-entity event that has no more specific cause.
+- **Every entry point is a unit of work.** Each runs in `withCause(…)` with a correlation id and a root: MCP tool calls,
+  every HTTP request, Mac-runtime routes, each scheduled job run (correlation = the `job_run` id), the scheduler's
+  dead-man check, and engine ticks.
+
+### Fix 2 — the bypass paths, now evented
+- **The three confirmed paths:**
+  - lifecycle follow-up reschedule, link, close and create (`followup_updated` / `_linked` / `_done` / `_cancelled` /
+    `_created`, with before/after);
+  - new job-history records (`opportunity_evidence_added`), in career sync, `recordOnJob` and bootstrap;
+  - `sweepOverdue` (`followup_overdue`, per follow-up).
+- **Everything else the guard found:**
+  - J6/Mac task state: terminal failures, Mac-reported done/failed, awaiting/leave/expire/resume, verification status.
+  - Stale-task sweeps.
+  - Exception refresh, reopen and resolve, and the scheduler's dead-man exception.
+  - Watch-rule fire and re-arm.
+  - Escalation `notified` (citing the delivery).
+  - Lesson status and updates; proposal open and supersede.
+  - Employer upserts; opportunity updates in sync, track and bootstrap.
+  - Project placement and completion.
+  - Review delivery; artifact sent.
+  - Knowledge and work-item updates in conflict resolution.
+  - Credential revocation.
+- **Raw `INSERT INTO event` removed.** Five sites wrote the event log directly: `mac_reconnected`, `mac_diag`,
+  `lifecycle_error`, and task expired and resumed. All now go through `appendEvent`, and their actions are classified.
+
+### Fix 3 — the structural guard (`test/unit/live-coverage.test.ts`)
+It parses every SQL write in `src` with the TypeScript compiler.
+- **(1) Every table is classified.** A new table fails until someone classifies it.
+- **(2) The event log is written only by `appendEvent`.**
+- **(3) Same-block rule.** A write that changes a STATE table's semantic columns must emit an event about that kind of
+  object **in the same block**. An event the workflow emits nearby about something else does not count.
+- **(4) Exemptions are explicit and reasoned.** Only backup restore is exempt, and an unused exemption fails.
+- **Mutation-tested.** Deleting the `followup_updated` emission makes the guard fail at `cos/opportunities.ts`, in the
+  reschedule.
+
+### Fix 4 — the runtime guard and a strict self-check (`finagai-job: live-acceptance`)
+- **`emailToStateChain`.** Takes the latest real post-deploy **Gmail** input that changed state and requires explicit
+  links: email ← routing ← workflow ← each state change. Each state change must carry its object, before/after (for
+  updates), the same correlation id, and cite the workflow run.
+- **`escalationNotificationChain`.** Separate. Requires a real email whose causal chain reaches an escalation **and** a
+  notification delivered, or held for quiet hours, that cites that escalation.
+- **`stateEventQuality`.** Checks every state-change event since the deploy for an object, an after-state, a unit of
+  work and a cause.
+- **`noSilentStateChanges`.** The runtime detector. Any follow-up, opportunity, project, objective, Area or work item
+  whose `updated_at` moved without an event about it is a failure.
+- **Pending is not a pass.** A check not yet observed live reports `PENDING`, and `allPass` stays false. Internal inputs
+  (the learning pass) no longer count as an email chain.
+
+### Also fixed
+- **Finagai's own outgoing mail** (digests, weekly review) is observed but routed as *ignored — Finagai's own message*.
+  It can never be read back as evidence about a job.
+
+**Status.** ADR-087 stays **open** after this deploy. Closing requires, live, both:
+- a real post-deploy state-changing email passing `emailToStateChain`;
+- the separate `escalationNotificationChain`.

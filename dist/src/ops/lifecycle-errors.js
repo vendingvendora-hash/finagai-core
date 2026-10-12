@@ -1,3 +1,4 @@
+import { appendEvent } from "../db/events.js";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export function sanitizeError(err) {
     const m = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
@@ -9,7 +10,8 @@ export async function reportLifecycleError(db, where, err, ref = {}) {
     console.error(JSON.stringify({ level: "error", msg: "lifecycle_error", ...detail }));
     try {
         const entity = ref.taskId && UUID.test(ref.taskId) ? ref.taskId : ref.interactionId && UUID.test(ref.interactionId) ? ref.interactionId : null;
-        await db.query(`INSERT INTO event (actor, action, entity_type, entity_id, after) VALUES ('system', 'lifecycle_error', $1, $2, $3::jsonb)`, [ref.taskId ? "control_task" : ref.interactionId ? "interaction" : "system", entity, JSON.stringify(detail)]);
+        await appendEvent(db, { actor: "system", action: "lifecycle_error", entityType: ref.taskId ? "control_task" : ref.interactionId ? "interaction" : "system",
+            ...(entity ? { entityId: entity } : {}), after: detail });
     }
     catch (e) {
         console.error(JSON.stringify({ level: "error", msg: "lifecycle_error_unrecorded", where, error: sanitizeError(e) }));

@@ -10,6 +10,7 @@
  */
 import type pg from "pg";
 import { reportLifecycleError } from "../ops/lifecycle-errors.js";
+import { recordTransition, rowState } from "../db/state-events.js";
 
 type Db = Pick<pg.Pool, "query">;
 export type Origin = "chat" | "imessage" | "contact" | "system";
@@ -98,8 +99,10 @@ export async function completeForTask(pool: Db, taskId: string, outcome: { ok: b
        cost_usd = (SELECT sum(cost_usd) FROM llm_call c WHERE c.request_id = ANY(i.task_ids))   -- ADR-075: was never written
      WHERE $1 = ANY(task_ids) AND state NOT IN ('completed','failed','superseded','cancelled')`,
     [taskId, state, outcome.summary.slice(0, 1000), outcome.imageB64 ?? null, outcome.artifactId ?? null, outcome.verification ?? null]);
+  const before = await rowState(pool, "control_task", taskId);
   await pool.query(`UPDATE control_task SET verification_status = COALESCE(verification_status, $2) WHERE id = $1`,
     [taskId, outcome.ok && !outcome.cancelled ? (outcome.verification ?? "not_applicable") : null]);
+  await recordTransition(pool, { actor: "j6", action: "control_task_state", table: "control_task", id: taskId, before });
 }
 
 /** Completed/failed interactions whose result has NOT yet reached this conversation. */

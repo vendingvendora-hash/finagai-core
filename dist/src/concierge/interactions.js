@@ -1,4 +1,5 @@
 import { reportLifecycleError } from "../ops/lifecycle-errors.js";
+import { recordTransition, rowState } from "../db/state-events.js";
 /** Stable logical identity for a request: lowercase, collapse whitespace, strip punctuation + filler. */
 export function requestKey(text) {
     return text.toLowerCase().replace(/[“”"'`]/g, "").replace(/\b(please|finagai|can you|could you|for me|now)\b/g, "")
@@ -67,7 +68,9 @@ export async function completeForTask(pool, taskId, outcome) {
        terminal_reason = (SELECT terminal_reason FROM control_task WHERE id = $1),
        cost_usd = (SELECT sum(cost_usd) FROM llm_call c WHERE c.request_id = ANY(i.task_ids))   -- ADR-075: was never written
      WHERE $1 = ANY(task_ids) AND state NOT IN ('completed','failed','superseded','cancelled')`, [taskId, state, outcome.summary.slice(0, 1000), outcome.imageB64 ?? null, outcome.artifactId ?? null, outcome.verification ?? null]);
+    const before = await rowState(pool, "control_task", taskId);
     await pool.query(`UPDATE control_task SET verification_status = COALESCE(verification_status, $2) WHERE id = $1`, [taskId, outcome.ok && !outcome.cancelled ? (outcome.verification ?? "not_applicable") : null]);
+    await recordTransition(pool, { actor: "j6", action: "control_task_state", table: "control_task", id: taskId, before });
 }
 /** Completed/failed interactions whose result has NOT yet reached this conversation. */
 export async function undelivered(pool, conversation, limit = 3) {

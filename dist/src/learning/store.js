@@ -1,3 +1,15 @@
+/**
+ * Phase 6 (ADR-085) — keeping lessons. Deterministic upsert by key, with provenance and confidence on every row.
+ *
+ *   observed  → 'active' at once (it is a fact about Finagai's own records); retired when the records stop supporting it
+ *               or its evidence goes stale (freshness < 0.25, i.e. older than ~60 days)
+ *   inferred  → with an effect: 'proposed' — a proposal through the EXISTING governance path (Julian approves with his
+ *               passkey; the approval creates the procedure/preference row that is what actually applies); without an
+ *               effect: informational 'active'
+ *   stated    → written only by teach_finagai (Julian's words), never by a learner; never auto-retired
+ * A rejected lesson stays rejected (no re-asking). A forgotten one stays forgotten.
+ */
+import { recordTransition, rowState } from "../db/state-events.js";
 import { appendEvent } from "../db/index.js";
 import { EffectRejected, encodeEffect, validateEffect } from "./guard.js";
 import { MIN_FRESHNESS, freshness } from "./apply.js";
@@ -20,6 +32,7 @@ const rationaleOf = (c) => `Learned by Finagai (basis: ${c.basis}${c.basis === "
 async function propose(db, lessonId, c, effect) {
     const r = await db.query(`INSERT INTO proposal (kind, target_type, target_id, proposed_text, rationale, classification) VALUES ($1, 'lesson', $2, $3, $4, 'internal') RETURNING id`, [PROPOSAL_KIND(effect), lessonId, `${c.statement}\n\n${encodeEffect(effect)}`, rationaleOf(c)]);
     const id = String(r.rows[0].id);
+    await recordTransition(db, { actor: "cos", action: "proposal_open", table: "proposal", id, before: null, context: { lesson: c.key } });
     await appendEvent(db, { actor: "cos", action: "lesson_proposed", entityType: "lesson", entityId: lessonId, after: { key: c.key, proposal: id, statement: c.statement, effect } });
     return id;
 }
@@ -31,8 +44,9 @@ export async function storeLessons(db, candidates, now) {
         EXISTS (SELECT 1 FROM proposal q WHERE q.target_type = 'lesson' AND q.target_id = l.id AND q.status = 'approved') AS ever_approved
       FROM lesson l JOIN proposal p ON p.id = l.proposal_id WHERE l.status = 'proposed' AND p.status <> 'pending'`)).rows) {
         const status = l.pstatus === "approved" || l.ever_approved ? "approved" : l.pstatus === "rejected" ? "rejected" : "active";
+        const before = await rowState(db, "lesson", String(l.id));
         await db.query(`UPDATE lesson SET status = $2, updated_at = $3 WHERE id = $1`, [l.id, status, now]);
-        await appendEvent(db, { actor: "cos", action: `lesson_${status}`, entityType: "lesson", entityId: l.id, after: { key: l.key, proposal: l.pstatus } });
+        await recordTransition(db, { actor: "cos", action: `lesson_${status}`, table: "lesson", id: String(l.id), before, context: { key: l.key, proposal: l.pstatus } });
         res.decided.push(`${status}: ${l.statement}`);
     }
     const produced = new Set();
@@ -82,8 +96,11 @@ export async function storeLessons(db, candidates, now) {
         if (!forgotten && c.basis === "inferred" && effect && (prev.status === "proposed" || prev.status === "approved" || prev.status === "retired" || prev.status === "active")
             && (prev.status === "retired" || prev.status === "active" || materialChange(prev.effect, effect))) {
             if (fresh >= MIN_FRESHNESS) {
-                if (prev.status === "proposed" && proposalId)
+                if (prev.status === "proposed" && proposalId) {
+                    const bp = await rowState(db, "proposal", String(proposalId));
                     await db.query(`UPDATE proposal SET status = 'superseded', updated_at = now(), version = version + 1 WHERE id = $1 AND status = 'pending'`, [proposalId]);
+                    await recordTransition(db, { actor: "cos", action: "proposal_superseded", table: "proposal", id: String(proposalId), before: bp, context: { why: "replaced by a new proposal" } });
+                }
                 proposalId = await propose(db, id, c, effect);
                 status = "proposed";
                 res.proposed.push(c.statement);
@@ -99,8 +116,10 @@ export async function storeLessons(db, candidates, now) {
             res.unchanged++;
             continue;
         }
+        const beforeLesson = await rowState(db, "lesson", id);
         await db.query(`UPDATE lesson SET statement = $2, effect = $3::jsonb, support = $4, positives = $5, confidence = $6, evidence = $7::jsonb, last_evidence_at = $8, status = $9, proposal_id = $10,
         retired_reason = CASE WHEN $9 = 'retired' THEN retired_reason ELSE NULL END, updated_at = $11 WHERE id = $1`, [id, c.statement, keepEffect ? JSON.stringify(keepEffect) : null, c.support, c.positives ?? null, c.confidence.toFixed(3), JSON.stringify(c.evidence), c.lastEvidenceAt, status, proposalId, now]);
+        await recordTransition(db, { actor: "cos", action: "lesson_updated", table: "lesson", id, before: beforeLesson, areaId: c.areaId ?? null, context: { key: c.key, support: c.support, basis: c.basis } });
         res.updated++;
     }
     // Observed lessons the records no longer support, or whose evidence went stale, retire (history is kept). A pending
@@ -110,10 +129,14 @@ export async function storeLessons(db, candidates, now) {
         if (produced.has(l.key) && !stale)
             continue;
         const reason = stale ? `stale: last evidence ${new Date(l.last_evidence_at).toISOString().slice(0, 10)}` : "no longer supported by the records";
-        if (l.status === "proposed" && l.proposal_id)
+        if (l.status === "proposed" && l.proposal_id) {
+            const bp = await rowState(db, "proposal", String(l.proposal_id));
             await db.query(`UPDATE proposal SET status = 'superseded', updated_at = now(), version = version + 1 WHERE id = $1 AND status = 'pending'`, [l.proposal_id]);
+            await recordTransition(db, { actor: "cos", action: "proposal_superseded", table: "proposal", id: String(l.proposal_id), before: bp, context: { why: "no longer supported by the records" } });
+        }
+        const before = await rowState(db, "lesson", String(l.id));
         await db.query(`UPDATE lesson SET status = 'retired', retired_reason = $2, updated_at = $3 WHERE id = $1`, [l.id, reason, now]);
-        await appendEvent(db, { actor: "cos", action: "lesson_retired", entityType: "lesson", entityId: l.id, after: { key: l.key, reason } });
+        await recordTransition(db, { actor: "cos", action: "lesson_retired", table: "lesson", id: String(l.id), before, context: { key: l.key, reason } });
         res.retired.push(`${l.statement} (${reason})`);
     }
     return res;
