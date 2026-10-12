@@ -1,6 +1,6 @@
 # ADR-087 — Live State / Visualization Contract (prerequisite to Phase 8)
 
-Status: Decided (builder, under Julian's 2026-10-11 requirement)
+Status: Decided (builder, under Julian's 2026-10-11 requirement) — **CLOSED 2026-10-12 20:10Z after live acceptance on hotfix 35**
 Date: 2026-10-11
 
 ## Context
@@ -330,4 +330,64 @@ It parses every SQL write in `src` with the TypeScript compiler.
   - `alsoIds` reconciliation;
   - the self-check rejecting a transition that has no before-state.
 
-**Status.** ADR-087 stays **open** until hotfix 35 is deployed and verified live, with every check green.
+**Status at hotfix 35 commit.** ADR-087 stayed open until hotfix 35 was deployed and verified live.
+
+## Final live acceptance and closure (2026-10-12, hotfix 35 live as Core `c84ffbe7090c`)
+All four of Julian's close criteria hold:
+1. Canary 2 passed live.
+2. Cleanup ran through normal non-destructive paths.
+3. The before-state gap is fixed and tested.
+4. All checks are green on the deployed fix.
+
+**Canary 3, the post-deploy email path (20:05Z).** A real external email went through the monitored mailbox (Gmail
+`1a131b731089e283`, interview wording). One correlation id (`077e9a48…`) carries the whole chain, and each step cites
+the one before:
+
+| Step | Event | What it shows |
+|---|---|---|
+| Email observed | 1940 | — |
+| Routed | 1941 | to Career / `career.sync` |
+| Workflow started | 1942 | — |
+| `opportunity_status` | 1943 | applied → interviewing, filed under **Finagai Test** (the job's own Area) |
+| `opportunity_evidence_added` | 1944 | filed under Finagai Test |
+| **Cross-Area lifecycle reconciliation** | 1945, 1946 | `followup_cancelled` (before {state waiting}) and `followup_created` (interviewing.awaiting_decision), both filed under Finagai Test |
+| Workflow completed | 1948 | — |
+| `escalation_opened` | 1949 | cites 1943 |
+| `notification_delivered` | 1950 | sent, cites 1949 |
+| `escalation_notified` | 1951 | — |
+| `escalation_resolved` | 1956 | before {status open, resolved_at null}; the same path had **no** before-state on hotfix 34 (event 1912) |
+
+Finagai's own notification email coming back into the mailbox was ignored as its own (1955).
+
+**Cleanup (20:10Z), normal tools.** Every event below carries a before-state:
+
+| Event | Change |
+|---|---|
+| `watch_rule_removed` 1959 | before {status active, removed_at null}; event 1915 on hotfix 34 had none |
+| `opportunity_status` 1963 | interviewing → withdrawn |
+| `followup_done` 1964 | waiting → done |
+| `project_completed` 1965 | active → completed |
+
+**`live-acceptance` at 20:10:50Z: all 12 checks PASS.** The checks are noDeletePrivilege, health, ordering,
+snapshotCorrespondsToStream, needsMeAgreement, emailToStateChain, escalationNotificationChain, stateEventQuality,
+noSilentStateChanges, resume, expiredCursor and protections.
+- **ordering:** 1–1936, no gaps.
+- **snapshotCorrespondsToStream:** cursor 1936 = newest.
+- **stateEventQuality:** 15 state events since the deploy, 0 violations. This check now enforces the before-state rule.
+- **noSilentStateChanges:** 0 silent changes.
+- The earlier canary evidence and cleanup (events 1866–1921) were re-read and are unchanged.
+
+The full ledger is in the Finagai project doc `claude/ADR-087_LIVE_EVIDENCE.md`.
+
+**Residual items carried into Phase 8.** None blocks closure; each is listed with why.
+- **`watch_rule_removed` has no Area** (1959): the rule table has no `area_id`. The event is unattributed rather than
+  misattributed (no data leaks into another Area), but a Finagai Test filter misses it.
+- **Workflow (non-state-derived) escalations never auto-resolve.**
+- **Scheduler job runs are not on the stream.**
+- **The `mac:offline` exception flaps**: it opens and clears about every hour while the Mac sleeps.
+- **Detector-opened exceptions are causal roots.**
+- **Job-history transition label.** The career interpreter labels job history "analyzed→X" when the stored status was
+  further along.
+
+**ADR-087 is CLOSED.** Phase 8 (continuous reliability) builds on this stream. Per this ADR, it adds no parallel
+monitoring store.
