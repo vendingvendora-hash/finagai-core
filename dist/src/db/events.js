@@ -6,6 +6,8 @@ import { currentCause } from "./live-context.js";
  */
 export const STATE_ENTITY_TYPES = new Set(["area", "objective", "project", "work_item", "followup", "opportunity", "employer", "entity", "relationship", "knowledge_item",
     "conflict", "proposal", "governance_request", "escalation", "operating_exception", "watch_rule", "lesson", "control_task", "artifact", "review", "webauthn_credential"]);
+/** Non-state objects whose events still read as work on the stream (a Mac task's steps, its artifacts' delivery). */
+export const CAUSED_ENTITY_TYPES = new Set(["control_step", "control_task", "interaction", "artifact", "concierge_draft", "concierge_message"]);
 /** The cause of a change made here: the unit of work's cause (e.g. its workflow run) ▸ the unit of work itself. */
 export async function causeHere(db) {
     const ctx = currentCause();
@@ -19,7 +21,11 @@ export async function causeHere(db) {
 }
 export async function appendEvent(db, e) {
     const ctx = currentCause();
-    if (e.causeIds === undefined && !ctx?.causeIds?.length && ctx?.root && e.entityType && STATE_ENTITY_TYPES.has(e.entityType))
+    // ADR-087 / Phase 8: an event ABOUT something, appended inside a unit of work, cites that unit of work when it has no
+    // more specific cause. Live (2026-10-12 21:04Z): Mac step proposals (entity control_step, shown on the stream as
+    // task / authority events) carried no cause because only state-table entities were rooted — the hourly self-check
+    // caught it. Tool-call audit rows (entity "tool") stay unrooted: a read-only tool call leaves no trace.
+    if (e.causeIds === undefined && !ctx?.causeIds?.length && ctx?.root && e.entityType && (STATE_ENTITY_TYPES.has(e.entityType) || CAUSED_ENTITY_TYPES.has(e.entityType)))
         e = { ...e, causeIds: await causeHere(db) };
     const res = await db.query(`INSERT INTO finagai.event (actor, action, entity_type, entity_id, before, after, reason,
                         capture_id, request_id, client, approval_id, principal, correlation_id, cause_ids, area_id)

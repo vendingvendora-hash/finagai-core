@@ -130,3 +130,23 @@ The live ADR-087 acceptance (canaries 1–3) left these known gaps:
 The 24-hour report stays "degraded" until the pre-fix idle-Mac flaps (all before 20:31Z) age out of its window. That is correct evidence, not a defect.
 
 **Tests:** 522 unit and 281 integration, all passing.
+
+## Increment 1: first hotfix-37 self-check (2026-10-12 21:34Z) — real failure caught, fixed in hotfix 38
+- **Redaction and verdict proof.** `reliability_checked` 2019 (seq 1988), version `7de3917a501e`, cites tick 2018. On
+  the stream it shows `passed: 9` and `allPass: false` (real values, no longer "[redacted]"), with
+  `failing: ["stateEventQuality"]`. The redaction scan still PASSes over 1,991 envelopes.
+- **The failure is genuine.**
+  - At 21:04Z Julian ran a Mac task (task 88b9bb57…: reading the weekly-review email in Firefox).
+  - Its step proposals (`control_step_proposed` 1994, 2002, 2008, 2012), shown on the stream as task / authority
+    events, cited no cause. Only state-table entities were rooted in their unit of work (`mac:/control/next`), and
+    `control_step` is not a state table.
+  - No Mac task had run since the guards went live, so the self-check found this the first time one did.
+  - Left unfixed, a second failing run would open `reliability:stateEventQuality`, which would reach Julian an hour
+    later. The violations stay in the self-check's window until Core restarts.
+- **Fix (hotfix 38, fix only).** An event about a non-state work object (`control_step`, `control_task`,
+  `interaction`, `artifact`, concierge drafts and messages) appended inside a unit of work now cites that unit of
+  work's root. Tool-call audit rows stay unrooted, so a read-only tool call still leaves no trace.
+- **Tests.** The regression test checks that a step proposal in a `mac:/control/next` unit cites
+  `work_invoked mac:/control/next`, that a read-only tool call creates no root, and that `stateEventQuality` PASSes.
+  Removing the fix fails it. Full suites: 522 unit and 282 integration, all passing.
+- Increment 2 is held; it becomes hotfix 39 once the fix is live and Increment 1 passes.

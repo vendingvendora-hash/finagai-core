@@ -390,4 +390,20 @@ describe.skipIf(!admin || !migT || !appT)("Live State Stream (ADR-087)", () => {
     expect(sq.pass).toBe(false);
     expect(sq.violations).toEqual([expect.stringMatching(/followup_updated: .*transition without before-state/)]);
   }, 30_000);
+
+  it("live 2026-10-12 21:04Z: work events about non-state objects (Mac step proposals) cite their unit of work", async () => {
+    const t0 = new Date(Date.now() - 1000);
+    const stepId = randomUUID();
+    await withCause({ correlationId: randomUUID(), causeIds: [], root: { actor: "j6", what: "mac:/control/next" } },
+      () => appendEvent(pool, { actor: "j6", action: "control_step_proposed", entityType: "control_step", entityId: stepId, after: { code: 1, kind: "scroll", risk: "write", summary: "scroll" } }));
+    // a read-only tool call's audit row still leaves no root behind
+    await withCause({ correlationId: randomUUID(), causeIds: [], root: { actor: "julian", what: "tool:waiting_on" } },
+      () => appendEvent(pool, { actor: "system", action: "tool_called", entityType: "tool", after: { tool: "waiting_on", outcome: "ok" } }));
+    const step = (await q(`SELECT cause_ids FROM event WHERE entity_id = $1`, [stepId]))[0];
+    expect(step.cause_ids.length).toBe(1);
+    expect((await q(`SELECT action, after->>'what' AS what FROM event WHERE id = $1`, [step.cause_ids[0]]))[0]).toEqual({ action: "work_invoked", what: "mac:/control/next" });
+    expect(await q(`SELECT 1 FROM event WHERE action = 'work_invoked' AND after->>'what' = 'tool:waiting_on' AND occurred_at > $1`, [t0])).toEqual([]);
+    const r = await liveAcceptance(pool, { version: "test", port: Number(new URL(base).port), since: t0 });
+    expect((r.checks as Record<string, { pass: boolean | null; violations?: string[] }>).stateEventQuality).toEqual(expect.objectContaining({ pass: true, violations: [] }));
+  }, 30_000);
 });
