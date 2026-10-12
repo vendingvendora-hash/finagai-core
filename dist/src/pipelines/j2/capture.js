@@ -6,6 +6,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { appendEvent, withTransaction } from "../../db/index.js";
+import { rowState } from "../../db/state-events.js";
 import { checkCandidate, checkRelationTarget, extractionResultSchema, relationResultSchema, resolveProject, } from "../../guards/extraction.js";
 import { redactSensitive } from "../../guards/sensitive.js";
 import { zonedParts, zonedWallTimeToUtc } from "../../jobs/time.js";
@@ -518,8 +519,9 @@ async function applyCandidate(deps, tx, cap, w, j, summary) {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, [subjectType, subjectType === "project" ? w.projectId : null, c.fields.claim ?? c.source_quote, c.epistemic_status,
             c.source_visibility, cap.receivedAt, supersedes, cap.id, c.source_quote, c.classification]);
         if (supersedes) {
+            const prev = await rowState(tx, "knowledge_item", supersedes);
             await tx.query(`UPDATE knowledge_item SET status = 'superseded', version = version + 1 WHERE id = $1`, [supersedes]);
-            await ev("supersede", "knowledge_item", supersedes, { superseded_by: k.rows[0].id });
+            await ev("supersede", "knowledge_item", supersedes, { status: "superseded", superseded_by: k.rows[0].id }, { status: prev?.status ?? null });
         }
         const eid = await ev("create", "knowledge_item", k.rows[0].id, { claim: c.fields.claim ?? c.source_quote, epistemic_status: c.epistemic_status });
         await tx.query(`UPDATE knowledge_item SET last_event_id = $2 WHERE id = $1`, [k.rows[0].id, eid]);

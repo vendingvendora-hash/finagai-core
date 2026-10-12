@@ -161,13 +161,13 @@ export async function reconcileJob(db: Db, jobId: string, now: Date, policyIn?: 
 }
 
 /** Jobs the lifecycle is responsible for: engaged statuses, or anything holding a live project / open follow-up. */
-export async function lifecycleTick(db: Db, now: Date, opts: { areaId?: string | null; policy?: LifecyclePolicy } = {}) {
+export async function lifecycleTick(db: Db, now: Date, opts: { areaId?: string | null; policy?: LifecyclePolicy; /** jobs the caller just changed, whatever their Area */ alsoIds?: string[] } = {}) {
   const ids = (await db.query(`SELECT o.id FROM opportunity o LEFT JOIN project p ON p.id = o.project_id
-     WHERE o.archived_at IS NULL AND ($1::uuid IS NULL OR o.area_id = $1)
+     WHERE o.archived_at IS NULL AND ($1::uuid IS NULL OR o.area_id = $1 OR o.id = ANY($3::uuid[]))
        AND (o.status IN ('preparing','ready_for_review','applied','interviewing','offer') AND (o.project_id IS NOT NULL OR o.last_evidence_at > $2::timestamptz - interval '30 days' OR o.source IN ('julian','j6'))
             OR (p.id IS NOT NULL AND p.status = 'active')
             OR EXISTS (SELECT 1 FROM followup f WHERE f.opportunity_id = o.id AND f.state IN ('open','waiting','overdue')))
-     ORDER BY o.id`, [opts.areaId ?? null, now])).rows.map((r) => String(r.id));
+     ORDER BY o.id`, [opts.areaId ?? null, now, opts.alsoIds ?? []])).rows.map((r) => String(r.id));
   const changes: LifecycleChange[] = [];
   for (const id of ids) changes.push(...(await reconcileJob(db, id, now, opts.policy)).changes);
   return { jobsChecked: ids.length, changes };

@@ -66,20 +66,22 @@ export async function executeGovernanceDecision(pool: pg.Pool, input: ExecutionI
         if (!VERSIONED.has(t.type)) throw new Refused(`unsupported target type ${t.type}`);
         const cur = (await tx.query<{ version: number }>(`SELECT version FROM ${t.type} WHERE id = $1 FOR UPDATE`, [t.id])).rows[0];
         if (!cur || cur.version !== t.version) {
+          const before = await rowState(tx, "governance_request", String(req.id));
           await tx.query(`UPDATE governance_request SET status = 'superseded' WHERE id = $1`, [req.id]);
-          await appendEvent(tx, { actor: "julian", action: "governance_superseded", entityType: "governance_request", entityId: req.id,
-            reason: `${t.type} ${t.id} changed after the request was staged`, approvalId: req.id, principal: input.principal, client: "approval_page" });
+          await recordTransition(tx, { actor: "julian", action: "governance_superseded", table: "governance_request", id: String(req.id), before,
+            reason: `${t.type} ${t.id} changed after the request was staged`, audit: { approvalId: req.id, principal: input.principal, client: "approval_page" } });
           return { kind: "superseded", reason: `${t.type} changed since the request was staged; request a new approval` } as ExecutionResult;
         }
       }
 
+      const beforeDecision = await rowState(tx, "governance_request", String(req.id));
       await tx.query(
         `UPDATE governance_request SET status = $2, decided_at = now(), decided_by_principal = $3, approval_credential_id = $4 WHERE id = $1`,
         [req.id, decision === "approve" ? "approved" : "rejected", input.principal, input.credentialUuid]);
 
       if (decision === "reject") {
-        const eventId = await appendEvent(tx, { actor: "julian", action: "governance_rejected", entityType: "governance_request",
-          entityId: req.id, reason: req.rationale, approvalId: req.id, principal: input.principal, client: "approval_page" });
+        const eventId = await recordTransition(tx, { actor: "julian", action: "governance_rejected", table: "governance_request", id: String(req.id), before: beforeDecision,
+          reason: req.rationale, audit: { approvalId: req.id, principal: input.principal, client: "approval_page" } });
         return { kind: "rejected", eventId } as ExecutionResult;
       }
 
@@ -97,7 +99,9 @@ export async function executeGovernanceDecision(pool: pg.Pool, input: ExecutionI
           break;
         default: throw new Refused(`unsupported action ${req.action}`);
       }
-      const eventId = await ev("governance_executed", "governance_request", req.id, { action: req.action, ...detail });
+      // pending → (approved) → executed in this one transaction: the event carries the request's state before the decision.
+      const eventId = await ev("governance_executed", "governance_request", req.id, { status: "executed", action: req.action, ...detail },
+        { status: beforeDecision?.status ?? null, decided_at: beforeDecision?.decided_at ?? null });
       await tx.query(`UPDATE governance_request SET status = 'executed', executed_event_id = $2 WHERE id = $1`, [req.id, eventId]);
       return { kind: "executed", eventId, detail } as ExecutionResult;
     });
@@ -116,7 +120,7 @@ async function decideProposal(tx: pg.PoolClient, req: Req, ev: Ev) {
   const approve = req.proposed_after_state.status === "approved";
   if (!approve) {
     await tx.query(`UPDATE proposal SET status = 'rejected', decided_at = now(), decision_note = $2, version = version + 1 WHERE id = $1`, [p.id, req.rationale]);
-    await ev("proposal_decide", "proposal", p.id, { status: "rejected" });
+    await ev("proposal_decide", "proposal", p.id, { status: "rejected" }, { status: p.status });
     return { proposal: p.id, status: "rejected" };
   }
   let created: { table: string; id: string };
@@ -137,7 +141,7 @@ async function decideProposal(tx: pg.PoolClient, req: Req, ev: Ev) {
     throw new Refused(`proposal kind ${p.kind} is not executable in v1`);
   }
   await tx.query(`UPDATE proposal SET status = 'approved', decided_at = now(), decision_note = $2, version = version + 1 WHERE id = $1`, [p.id, req.rationale]);
-  await ev("proposal_decide", "proposal", p.id, { status: "approved", created });
+  await ev("proposal_decide", "proposal", p.id, { status: "approved", created }, { status: p.status });
   return { proposal: p.id, status: "approved", created };
 }
 
@@ -177,7 +181,7 @@ async function resolveConflict(tx: pg.PoolClient, req: Req, ev: Ev) {
         [old.subject_type, old.subject_id, claim, old.source_visibility, old.purpose, old.retention_review_at, old.id, c.capture_id,
          resolution === "custom" ? claim : c.new_quote, old.classification])).rows[0]!;
       await tx.query(`UPDATE knowledge_item SET status = 'superseded', version = version + 1 WHERE id = $1`, [old.id]);
-      await ev("supersede", "knowledge_item", old.id, { superseded_by: k.id });
+      await ev("supersede", "knowledge_item", old.id, { status: "superseded", superseded_by: k.id }, { status: old.status });
       await ev("create", "knowledge_item", k.id, { claim, epistemic_status: "user_provided" });
     } else {
       throw new Refused(`conflicts on ${c.existing_type} cannot be resolved automatically`);
@@ -199,16 +203,16 @@ async function resolveConflict(tx: pg.PoolClient, req: Req, ev: Ev) {
                       AND NOT EXISTS (SELECT 1 FROM conflict WHERE existing_id = $1 AND status = 'open')`, [c.existing_id]);
     await recordTransition(tx, { actor: "julian", action: "update", table: "knowledge_item", id: String(c.existing_id), before, context: { via: "conflict_resolve", conflict: c.id } });
   }
-  await ev("conflict_resolve", "conflict", c.id, { resolution });
+  await ev("conflict_resolve", "conflict", c.id, { status, resolution }, { status: c.status });
   return { conflict: c.id, resolution };
 }
 
 async function archiveRecords(tx: pg.PoolClient, req: Req, ev: Ev) {
   const archived: string[] = [];
   for (const t of req.target_refs) {
-    const r = await tx.query(`UPDATE ${t.type} SET archived_at = now(), version = version + 1 WHERE id = $1 AND archived_at IS NULL`, [t.id]);
+    const r = await tx.query<{ archived_at: Date }>(`UPDATE ${t.type} SET archived_at = now(), version = version + 1 WHERE id = $1 AND archived_at IS NULL RETURNING archived_at`, [t.id]);
     if (r.rowCount !== 1) throw new Refused(`${t.type} ${t.id} is already archived`);
-    await ev("archive", t.type, t.id, { archived: true });
+    await ev("archive", t.type, t.id, { archived: true, archived_at: r.rows[0]!.archived_at.toISOString() }, { archived_at: null });
     archived.push(t.id);
   }
   return { archived };

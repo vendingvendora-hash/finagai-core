@@ -19,8 +19,9 @@ import type { AreaModule } from "../../src/events/types.js";
 import { liveHandler } from "../../src/live/http.js";
 import { causalChain, history, publish, readAfter, snapshot, type LiveEvent } from "../../src/live/stream.js";
 import { liveAcceptance } from "../../src/live/acceptance.js";
-import { recordOnJob, trackOpportunity } from "../../src/cos/opportunities.js";
-import { sweepOverdue } from "../../src/cos/followups.js";
+import { lifecycleTick, recordOnJob, trackOpportunity } from "../../src/cos/opportunities.js";
+import { closeFollowup, markWaiting, sweepOverdue } from "../../src/cos/followups.js";
+import { recordTransition, rowState } from "../../src/db/state-events.js";
 import { isOwnMail } from "../../src/events/engine.js";
 import type { EmailMessage, EmailSender } from "../../src/notify/delivery.js";
 import { createHandler } from "../../src/server/app.js";
@@ -335,5 +336,58 @@ describe.skipIf(!admin || !migT || !appT)("Live State Stream (ADR-087)", () => {
     await q(`UPDATE followup SET due_at = due_at + interval '1 day', updated_at = now() WHERE summary = 'Waiting on Lee'`);
     const r1 = await liveAcceptance(pool, { version: "test", port: Number(new URL(base).port), since: t });
     expect((r1.checks as Record<string, { pass: boolean | null; silent?: string[] }>).noSilentStateChanges).toEqual(expect.objectContaining({ pass: false, silent: [expect.stringMatching(/^followup .* with no event$/)] }));
+  }, 30_000);
+
+  it("hotfix 35 — state transitions say what they moved FROM: follow-up waiting/done, escalation told, area health baseline", async () => {
+    const unit = <T,>(fn: () => Promise<T>) => withCause({ correlationId: randomUUID(), causeIds: [], root: { actor: "julian", what: "tool:track_waiting" } }, fn);
+    const from = new Date(Date.now() - 1000).toISOString();
+    const f = (await q(`INSERT INTO followup (area_id, summary, counterparty, state, due_at, origin) VALUES ($1, 'Waiting on Ana', 'Ana', 'open', now() + interval '3 days', 'julian') RETURNING id, due_at`, [careerId]))[0];
+    await unit(() => appendEvent(pool, { actor: "julian", action: "followup_created", entityType: "followup", entityId: f.id, after: { summary: "Waiting on Ana", state: "open" } }));
+    const due = new Date(Date.now() + 9 * 86_400_000);
+    await unit(() => markWaiting(pool, f.id, due));
+    await unit(() => closeFollowup(pool, f.id, "Ana replied"));
+    const evs = (await history(pool, { from })).filter((e) => e.entity.id === f.id);
+    const waiting = evs.find((e) => e.action === "followup_waiting")!, done = evs.find((e) => e.action === "followup_done")!;
+    expect(waiting.before).toEqual({ state: "open", due_at: new Date(f.due_at).toISOString() });
+    expect(waiting.after).toEqual(expect.objectContaining({ state: "waiting", due_at: due.toISOString() }));
+    expect(done.before).toEqual({ state: "waiting", closed_at: null, outcome: null });
+    expect(done.after).toEqual(expect.objectContaining({ state: "done", outcome: "Ana replied" }));
+    // the "you asked to be told" escalation from the earlier tests was notified → resolved as told, from open
+    const told = (await history(pool, { from: since34.toISOString() })).filter((e) => e.action === "escalation_resolved");
+    for (const e of told) expect(e.before).toEqual(expect.objectContaining({ status: "open" }));
+    // an Area's first health reading is an explicit "none recorded before", not a missing before-state
+    const baseline = (await history(pool, { from: new Date(0).toISOString() })).find((e) => e.action === "area_health_changed")!;
+    expect(baseline.before).toEqual({ color: null });
+  });
+
+  it("hotfix 35 — a transition is filed under the OBJECT's Area, and a sync reconciles every job it touched (canary 2 findings)", async () => {
+    const testArea = (await ensureArea(pool, "Finagai Test")).id;
+    const asTool = <T,>(fn: () => Promise<T>) => withCause({ correlationId: randomUUID(), causeIds: [], root: { actor: "julian", what: "tool:track_opportunity" } }, fn);
+    const T0 = new Date("2026-10-01T15:00:00Z");
+    const job = await asTool(() => trackOpportunity(pool, { employer: "ADR087-CANARY-IT", title: "Acceptance Canary", status: "applied", at: T0.toISOString(), source: "julian", area: "Finagai Test" } as Parameters<typeof trackOpportunity>[1], T0)) as { jobId: string };
+    expect((await q(`SELECT area_id FROM opportunity WHERE id = $1`, [job.jobId]))[0].area_id).toBe(testArea);
+    // a Career workflow (career.sync) moves the test job — the event belongs to Finagai Test, not Career
+    const before = await rowState(pool, "opportunity", job.jobId);
+    await q(`UPDATE opportunity SET status = 'offer', updated_at = now() WHERE id = $1`, [job.jobId]);
+    const id = await asTool(() => recordTransition(pool, { actor: "cos", action: "opportunity_status", table: "opportunity", id: job.jobId, before, areaId: careerId }));
+    const ev = (await q(`SELECT area_id, before, after FROM event WHERE id = $1`, [id]))[0];
+    expect(ev.area_id).toBe(testArea);
+    expect(ev.before).toEqual({ status: "applied" });
+    // the Career-scoped lifecycle tick still reconciles a job the sync touched in another Area
+    const scoped = await lifecycleTick(pool, new Date(), { areaId: careerId });
+    const withTouched = await lifecycleTick(pool, new Date(), { areaId: careerId, alsoIds: [job.jobId] });
+    expect(withTouched.jobsChecked).toBe(scoped.jobsChecked + 1);
+  });
+
+  it("hotfix 35 — the self-check fails a transition that omits its before-state when the object had one", async () => {
+    await new Promise((r) => setTimeout(r, 1100));
+    const t = new Date(Date.now() - 200);
+    const f = (await q(`SELECT id FROM followup WHERE summary = 'Waiting on Ana'`))[0];
+    await withCause({ correlationId: randomUUID(), causeIds: [], root: { actor: "julian", what: "tool:resolve_waiting" } },
+      () => appendEvent(pool, { actor: "cos", action: "followup_updated", entityType: "followup", entityId: f.id, after: { note: "no before here" } }));
+    const r = await liveAcceptance(pool, { version: "test", port: Number(new URL(base).port), since: t });
+    const sq = (r.checks as Record<string, { pass: boolean | null; violations?: string[] }>).stateEventQuality!;
+    expect(sq.pass).toBe(false);
+    expect(sq.violations).toEqual([expect.stringMatching(/followup_updated: .*transition without before-state/)]);
   }, 30_000);
 });

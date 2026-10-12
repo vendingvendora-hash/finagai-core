@@ -38,12 +38,16 @@ export async function teachFinagai(db: Db, t: Teaching, ctx: { allowedWorkflows:
     return { error: `Not learned: ${e.message}. Learning can't change approvals, verification, commitments or credentials — those only change through governance.` };
   }
   const evidence = { source: `Julian (${ctx.client ?? "chat"})`, said: (t.said ?? "").slice(0, 400), at: now.toISOString() };
+  const prevLesson = (await db.query(`SELECT id FROM lesson WHERE key = $1`, [key])).rows[0];
+  const beforeLesson = prevLesson ? await rowState(db, "lesson", String(prevLesson.id)) : null;
   const r = await db.query(`INSERT INTO lesson (key, kind, basis, scope, statement, effect, support, positives, confidence, evidence, first_seen_at, last_evidence_at, status, created_at, updated_at)
       VALUES ($1, $2, 'stated', $3, $4, $5::jsonb, 1, 1, 1, $6::jsonb, $7, $7, 'active', $7, $7)
       ON CONFLICT (key) DO UPDATE SET statement = EXCLUDED.statement, effect = EXCLUDED.effect, support = lesson.support + 1, evidence = EXCLUDED.evidence,
         last_evidence_at = EXCLUDED.last_evidence_at, status = 'active', retired_reason = NULL, updated_at = EXCLUDED.updated_at
       RETURNING id, (xmax = 0) AS created`, [key, kind, scope, statement, JSON.stringify(effect), JSON.stringify(evidence), now]);
-  await appendEvent(db, { actor: "julian", action: "lesson_stated", entityType: "lesson", entityId: String(r.rows[0].id), after: { key, statement, effect }, ...(ctx.client ? { client: ctx.client } : {}) });
+  // first statement = a creation (before null); restating an existing lesson = a transition with its prior state
+  const ev = await recordTransition(db, { actor: "julian", action: "lesson_stated", table: "lesson", id: String(r.rows[0].id), before: beforeLesson, context: { key, basis: "stated" }, ...(ctx.client ? { audit: { client: ctx.client } } : {}) });
+  if (!ev) await appendEvent(db, { actor: "julian", action: "lesson_stated", entityType: "lesson", entityId: String(r.rows[0].id), before: beforeLesson, after: { key, statement, unchanged: true } });
   return { learned: statement, key, basis: "stated (Julian said so)", applies: "now", created: !!r.rows[0].created };
 }
 

@@ -1,10 +1,16 @@
-import { appendEvent } from "../db/index.js";
+/**
+ * Daily maintenance (03:00 America/New_York). Idempotent; safe to run more than once per slot.
+ *   1. expire governance requests past their expiry (event per request; nothing else changes)
+ *   2. replay budget-deferred captures in arrival order while budget allows (ADR-038)
+ * Staleness, retention eligibility, and uncertain deliveries need no writes: J3 derives them from
+ * dates on every review.
+ */
+import { recordBulkTransitions } from "../db/state-events.js";
 import { replayDeferred } from "../pipelines/j2/capture.js";
 export async function expireGovernanceRequests(pool) {
-    const expired = await pool.query(`UPDATE governance_request SET status = 'expired' WHERE status = 'pending' AND expires_at < now() RETURNING id`);
-    for (const r of expired.rows) {
-        await appendEvent(pool, { actor: "job", action: "governance_expired", entityType: "governance_request", entityId: r.id, client: "scheduler" });
-    }
+    const expired = await pool.query(`WITH p AS (SELECT id, status, decided_at FROM governance_request WHERE status = 'pending' AND expires_at < now() FOR UPDATE)
+     UPDATE governance_request g SET status = 'expired' FROM p WHERE g.id = p.id RETURNING g.id, p.status AS "before.status", p.decided_at AS "before.decided_at"`);
+    await recordBulkTransitions(pool, expired.rows, { actor: "job", action: "governance_expired", table: "governance_request", audit: { client: "scheduler" } });
     return expired.rowCount ?? 0;
 }
 export function dailyMaintenanceHandler(pool, j2) {

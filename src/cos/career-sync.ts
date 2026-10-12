@@ -133,7 +133,9 @@ export async function syncCareer(pool: pg.Pool, google: GoogleSearch | CareerSou
         decisions.push(`${label(o)}: ${flagged.map((e) => `${e.at.slice(0, 10)} ${e.kind}`).join(", ")} arrived after the job was ${isTerminal(stored.status) ? stored.status : o.status} — recorded as history, status unchanged (a new application is a new job)`);
     }
     const unassigned = (payload.unassigned ?? []).filter((u) => !seenRecords.has(u.recordId)).map((u) => `${u.at.slice(0, 10)} ${u.employer} ${u.kind} (record ${u.recordId}): ${u.reason}`);
-    const tick = await lifecycleTick(tx, now, { areaId: String(area.id) });
+    // A job this sync changed is reconciled even when it lives in another Area (ADR-087 canary 2: an offer on a
+    // Finagai Test job left its "waiting for a response" follow-up open because the tick only looked at Career).
+    const tick = await lifecycleTick(tx, now, { areaId: String(area.id), alsoIds: [...touched] });
     // Older pending bootstrap proposals are evidence of earlier runs, not candidates any more.
     const sup = (await tx.query(`UPDATE bootstrap_proposal SET status = 'discarded' WHERE area = 'Career' AND status = 'pending' RETURNING code`)).rows.map((r) => Number(r.code)).sort((a, b) => a - b);
     const newSourceRecords = new Set(changes.flatMap((c) => c.sources).filter((s) => s.startsWith("gmail:"))).size;
@@ -141,7 +143,6 @@ export async function syncCareer(pool: pg.Pool, google: GoogleSearch | CareerSou
       counts: { jobsCreated, eventsAdded, statusChanges, lifecycleChanges: tick.changes.length, decisions: decisions.length } };
     await appendEvent(tx, { actor: "cos", action: "career_synced", entityType: "area", entityId: String(area.id),
       after: { dryRun, snapshot: acq.digest, counts: result.counts, decisions: decisions.slice(0, 20), changes: changes.slice(0, 40).map((c) => `${c.change}: ${c.job} — ${c.detail}`), lifecycle: tick.changes.slice(0, 40).map((c) => `${c.change}: ${c.job} — ${c.detail}`) } });
-    void touched;
     return result;
   });
 }

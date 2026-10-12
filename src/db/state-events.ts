@@ -8,7 +8,7 @@
  * compares it with the state captured before, and appends one event carrying the affected object, before/after, the
  * surrounding unit-of-work (correlation id) and its cause.
  */
-import { appendEvent, causeHere, type EventActor } from "./events.js";
+import { appendEvent, causeHere, type EventActor, type NewEvent } from "./events.js";
 export { causeHere };
 import { currentCause } from "./live-context.js";
 import type { Queryable } from "./pool.js";
@@ -106,6 +106,8 @@ export interface Transition {
   /** extra, non-state context (why, by what rule) */
   context?: Record<string, unknown>;
   reason?: string; areaId?: string | null; causeIds?: number[];
+  /** audit fields carried through unchanged (approval flow, client, capture) */
+  audit?: Pick<NewEvent, "approvalId" | "principal" | "client" | "captureId" | "requestId">;
 }
 
 /**
@@ -121,9 +123,24 @@ export async function recordTransition(db: Queryable, t: Transition): Promise<nu
   const entityId = t.table === "opportunity_event" ? String((after ?? t.before)?.opportunity_id ?? t.id) : t.id;
   let causeIds = t.causeIds?.length ? t.causeIds : await causeHere(db);
   if (!causeIds.length) causeIds = await lastEventOn(db, table.entity, entityId);
+  const areaId = (await objectArea(db, t.table, entityId, after ?? t.before)) ?? t.areaId;
   return appendEvent(db, { actor: t.actor, action: t.action, entityType: table.entity, entityId,
     before: d.before, after: { ...(d.after ?? {}), ...(t.context ?? {}) }, ...(t.reason ? { reason: t.reason } : {}),
-    ...(t.areaId !== undefined ? { areaId: t.areaId } : {}), causeIds });
+    ...(areaId !== undefined ? { areaId } : {}), ...(t.audit ?? {}), causeIds });
+}
+
+/**
+ * The Area an event about this object belongs to is the OBJECT's Area, not the Area of the workflow that changed it
+ * (ADR-087 canary 2: career.sync — a Career workflow — moved a Finagai Test job to offer and the events were filed
+ * under Career). Undefined when the object has no Area of its own; the caller's areaId is used then.
+ */
+async function objectArea(db: Queryable, table: string, entityId: string, row: Record<string, unknown> | null): Promise<string | undefined> {
+  if (row && row.area_id) return String(row.area_id);
+  if (table === "opportunity_event") {
+    const r = (await db.query(`SELECT area_id FROM finagai.opportunity WHERE id = $1`, [entityId])).rows[0];
+    if (r?.area_id) return String(r.area_id);
+  }
+  return undefined;
 }
 
 /**
@@ -138,3 +155,41 @@ export async function recordBulkTransitions(db: Queryable, rows: Array<Record<st
   }
   return out;
 }
+
+/**
+ * ADR-087 (hotfix 35): what each event about a STATE object means, so its shape can be checked.
+ *   creation   — the object did not exist before: `before` is absent/null by definition
+ *   transition — the object existed and its semantic state moved: the event MUST carry `before` (the changed fields'
+ *                prior values) and `after` — emitted through recordTransition()/recordBulkTransitions()
+ *   occurrence — something happened TO/ABOUT the object without changing its semantic state (a refusal, a remedy
+ *                attempt, a recorded use, an aggregate run summary); no before/after state applies
+ * test/unit/live-coverage.test.ts requires every state-entity event action to be classified here, transitions to carry
+ * a before-state, and every state-entity event to name its object.
+ */
+export const EVENT_SEMANTICS: Record<string, "creation" | "transition" | "occurrence"> = {
+  // creations
+  create: "creation", area_created: "creation", objective_set: "creation", opportunity_tracked: "creation", employer_created: "creation",
+  followup_created: "creation", control_task_created: "creation", review_generated: "creation", watch_rule_added: "creation",
+  escalation_opened: "creation", artifact_registered: "creation", lesson_learned: "creation", passkey_enrolled: "creation",
+  governance_request_staged: "creation", proposal_open: "creation", opportunity_evidence_added: "creation", conflict_open: "creation",
+  // occurrences (no semantic state change of the object itself)
+  false_completion: "occurrence", lesson_applied: "occurrence", authority_refused: "occurrence", exception_remedied: "occurrence",
+  career_synced: "occurrence", bootstrap_applied: "occurrence", governance_approval_refused: "occurrence", lesson_proposed: "occurrence",
+  learning_ran: "occurrence", lifecycle_error: "occurrence",
+  // transitions (before/after required)
+  update: "transition", set_project: "transition", project_placed: "transition", project_completed: "transition", project_reopened: "transition",
+  opportunity_status: "transition", opportunity_updated: "transition", opportunity_archived: "transition", employer_updated: "transition",
+  followup_updated: "transition", followup_linked: "transition", followup_waiting: "transition", followup_done: "transition",
+  followup_cancelled: "transition", followup_overdue: "transition",
+  control_task_state: "transition", control_task_done: "transition", control_task_cancelled: "transition", control_task_expired: "transition",
+  control_task_resumed: "transition",
+  exception_opened: "transition", exception_updated: "transition", exception_resolved: "transition",
+  escalation_notified: "transition", escalation_resolved: "transition",
+  watch_rule_state: "transition", watch_rule_removed: "transition",
+  lesson_updated: "transition", lesson_retired: "transition", lesson_forgotten: "transition", lesson_approved: "transition",
+  lesson_rejected: "transition", lesson_active: "transition", lesson_stated: "transition",
+  proposal_superseded: "transition", governance_expired: "transition", governance_superseded: "transition", governance_rejected: "transition",
+  governance_executed: "transition", review_delivered: "transition", artifact_sent: "transition", credential_revoked: "transition",
+  area_health_changed: "transition", proposal_decide: "transition", supersede: "transition", conflict_resolve: "transition",
+  archive: "transition", status_change: "transition",
+};

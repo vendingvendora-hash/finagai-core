@@ -65,9 +65,9 @@ export async function addRule(db: Db, input: RuleInput, deps: DetectorDeps = {},
     if (ev.params?.status && !status) return { error: `${input.event} needs a status.` };
     // High-water mark = the newest audit event id now (ids, not timestamps: a JS Date drops microseconds and would re-fire).
     const mark = Number((await db.query(`SELECT COALESCE(max(id), 0) AS m FROM event`)).rows[0].m);
-    const r = (await db.query(`INSERT INTO watch_rule (statement, kind, metric, area_id, params, last_checked_at, last_value) VALUES ($1, 'event', $2, $3, $4::jsonb, $5, $6) RETURNING code`,
+    const r = (await db.query(`INSERT INTO watch_rule (statement, kind, metric, area_id, params, last_checked_at, last_value) VALUES ($1, 'event', $2, $3, $4::jsonb, $5, $6) RETURNING id, code`,
       [statement, input.event, area, JSON.stringify(status ? { status } : {}), now, mark])).rows[0];
-    await appendEvent(db, { actor: "julian", action: "watch_rule_added", entityType: "watch_rule", after: { code: Number(r.code), statement, event: input.event, status } });
+    await appendEvent(db, { actor: "julian", action: "watch_rule_added", entityType: "watch_rule", entityId: String(r.id), areaId: area ?? null, after: { code: Number(r.code), statement, event: input.event, status } });
     return { rule: Number(r.code), statement, watching: `${EVENTS[input.event]!.describe}${status ? ` → ${status}` : ""}`, from: now.toISOString(), note: "Notification only — Finagai tells you, it does not act on it." };
   }
   const m = input.metric ? METRICS[input.metric] : undefined;
@@ -80,9 +80,9 @@ export async function addRule(db: Db, input: RuleInput, deps: DetectorDeps = {},
   if (!Number.isFinite(value) || Math.abs(value) > 1e7) return { error: "value must be a number" };
   const current = await m.compute(db, { areaId: area, params: status ? { status } : {}, now, deps });
   const holds = Number.isFinite(current) && OPS[input.op](current, value);
-  const r = (await db.query(`INSERT INTO watch_rule (statement, kind, metric, area_id, params, op, value, armed, last_value, last_checked_at) VALUES ($1, 'metric', $2, $3, $4::jsonb, $5, $6, $7, $8, $9) RETURNING code`,
+  const r = (await db.query(`INSERT INTO watch_rule (statement, kind, metric, area_id, params, op, value, armed, last_value, last_checked_at) VALUES ($1, 'metric', $2, $3, $4::jsonb, $5, $6, $7, $8, $9) RETURNING id, code`,
     [statement, input.metric, area, JSON.stringify(status ? { status } : {}), input.op, value, !holds, Number.isFinite(current) ? current : null, now])).rows[0];
-  await appendEvent(db, { actor: "julian", action: "watch_rule_added", entityType: "watch_rule", after: { code: Number(r.code), statement, metric: input.metric, op: input.op, value } });
+  await appendEvent(db, { actor: "julian", action: "watch_rule_added", entityType: "watch_rule", entityId: String(r.id), areaId: area ?? null, after: { code: Number(r.code), statement, metric: input.metric, op: input.op, value } });
   return { rule: Number(r.code), statement, watching: `${input.metric}${status ? `[${status}]` : ""} ${input.op} ${value}`, currentValue: Number.isFinite(current) ? current : null,
     note: holds ? "This is already true right now; you'll be told the next time it becomes true after it stops being true." : "You'll be told once when it becomes true (and again only after it has cleared)." };
 }
@@ -93,8 +93,9 @@ export async function removeRule(db: Db, ref: string | number, reason = "Julian 
     ? (await db.query(`SELECT id, code, statement FROM watch_rule WHERE code = $1 AND status = 'active'`, [code])).rows[0]
     : (await db.query(`SELECT id, code, statement FROM watch_rule WHERE status = 'active' AND statement ILIKE '%' || $1 || '%' ORDER BY code DESC LIMIT 1`, [String(ref)])).rows[0];
   if (!row) return { error: `No active rule matches "${ref}".` };
+  const before = await rowState(db, "watch_rule", String(row.id));
   await db.query(`UPDATE watch_rule SET status = 'removed', removed_at = now(), removed_reason = $2 WHERE id = $1`, [row.id, reason.slice(0, 200)]);
-  await appendEvent(db, { actor: "julian", action: "watch_rule_removed", entityType: "watch_rule", entityId: row.id, after: { code: Number(row.code), statement: row.statement } });
+  await recordTransition(db, { actor: "julian", action: "watch_rule_removed", table: "watch_rule", id: String(row.id), before, context: { code: Number(row.code), statement: row.statement, reason: reason.slice(0, 200) } });
   return { removed: Number(row.code), statement: row.statement };
 }
 

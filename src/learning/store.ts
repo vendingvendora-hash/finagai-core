@@ -54,7 +54,7 @@ export async function storeLessons(db: Db, candidates: Candidate[], now: Date): 
     const status = l.pstatus === "approved" || l.ever_approved ? "approved" : l.pstatus === "rejected" ? "rejected" : "active";
     const before = await rowState(db, "lesson", String(l.id));
     await db.query(`UPDATE lesson SET status = $2, updated_at = $3 WHERE id = $1`, [l.id, status, now]);
-    await recordTransition(db, { actor: "cos", action: `lesson_${status}`, table: "lesson", id: String(l.id), before, context: { key: l.key, proposal: l.pstatus } });
+    await recordTransition(db, { actor: "cos", action: status === "approved" ? "lesson_approved" : status === "rejected" ? "lesson_rejected" : "lesson_active", table: "lesson", id: String(l.id), before, context: { key: l.key, proposal: l.pstatus } });
     res.decided.push(`${status}: ${l.statement}`);
   }
 

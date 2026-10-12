@@ -8,7 +8,7 @@
  * search). Area health is green/yellow/red with the exact reasons, so "why is Career yellow?" has an answer.
  */
 import type pg from "pg";
-import { recordBulkTransitions } from "../db/state-events.js";
+import { recordBulkTransitions, recordTransition, rowState } from "../db/state-events.js";
 import { appendEvent, withTransaction } from "../db/index.js";
 import { areaHealth } from "./areas.js";
 import { STATE_CHANGING_KINDS } from "../exceptions/detectors.js";
@@ -87,11 +87,12 @@ export async function placeUnderArea(pool: pg.Pool, item: string, areaName: stri
       id = r.rows[0].id; name = r.rows[0].name; created = true;
       await appendEvent(tx, { actor: "julian", action: "create", entityType: "project", entityId: id, after: { name, via: "place_under_area" } });
     }
+    const beforePlace = await rowState(tx, "project", id);
     await tx.query(`UPDATE project SET area_id = $2, objective_id = COALESCE($3, objective_id), updated_at = now(), version = version + 1 WHERE id = $1`, [id, a.id, objectiveId]);
     const fs = await tx.query(`WITH p AS (SELECT id, area_id FROM followup WHERE project_id = $1 AND area_id IS NULL FOR UPDATE)
       UPDATE followup f SET area_id = $2 FROM p WHERE f.id = p.id RETURNING f.id, p.area_id AS "before.area_id"`, [id, a.id]);
     await recordBulkTransitions(tx, fs.rows, { actor: "julian", action: "followup_linked", table: "followup", areaId: String(a.id), context: { area: a.name, via: "place_under_area" } });
-    await appendEvent(tx, { actor: "julian", action: "project_placed", entityType: "project", entityId: id, after: { area: a.name, objectiveId } });
+    await recordTransition(tx, { actor: "julian", action: "project_placed", table: "project", id, before: beforePlace, areaId: String(a.id), context: { area: a.name } });
     return { project: name, area: a.name, projectCreated: created, linkedToObjective: !!objectiveId };
   });
 }
@@ -137,8 +138,9 @@ export async function resolveWaiting(pool: pg.Pool, counterparty: string, outcom
   if (!rows.length) return { error: `Nothing open is waiting on "${counterparty}".` };
   await withTransaction(pool, async (tx) => {
     for (const r of rows) {
+      const before = await rowState(tx, "followup", String(r.id));
       await tx.query(`UPDATE followup SET state = 'done', outcome = $2, closed_at = now(), updated_at = now() WHERE id = $1`, [r.id, outcome.slice(0, 2000)]);
-      await appendEvent(tx, { actor: "julian", action: "followup_done", entityType: "followup", entityId: r.id, after: { outcome: outcome.slice(0, 200) } });
+      await recordTransition(tx, { actor: "julian", action: "followup_done", table: "followup", id: String(r.id), before, context: { via: "resolve_waiting" } });
     }
   });
   return { closed: rows.map((r) => r.summary as string) };

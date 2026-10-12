@@ -432,9 +432,10 @@ const ctxLine = ctx && (ctx.app || ctx.window || ctx.url)
     if (needs.length) step = { ...step, summary: `${step.summary}\nNeeds you: ${needs.join("; ")}`.slice(0, 1000) };
     const detail = [packet, found].filter(Boolean).join("\n\n").slice(0, 20000);
     await completeForTask(pool, taskId, { ok: true, verification: epistemic, summary: step.summary, imageB64: screenshotB64 && screenshotB64.length < 8_000_000 ? screenshotB64 : null }).catch(observed(pool, "j6.complete.done", { taskId }));
+    const beforeDone = await rowState(pool, "control_task", taskId);
     await pool.query(`UPDATE control_task SET status = 'done', terminal_reason = COALESCE(terminal_reason, 'verified'), result_summary = $2, result_detail = $3, result_image_b64 = COALESCE($4, result_image_b64), updated_at = now() WHERE id = $1`,
       [taskId, step.summary.slice(0, 1000), detail || null, screenshotB64 && screenshotB64.length < 8_000_000 ? screenshotB64 : null]);
-    await appendEvent(pool, { actor: "j6", action: "control_task_done", entityType: "control_task", entityId: taskId, after: { summary: step.summary } });
+    await recordTransition(pool, { actor: "j6", action: "control_task_done", table: "control_task", id: taskId, before: beforeDone, context: { summary: step.summary.slice(0, 300) } });
     await pool.query(`UPDATE mac_runtime SET last_success_at = now(), last_success_code = (SELECT code FROM control_task WHERE id = $1) WHERE id = 'primary'`, [taskId]).catch(observed(pool, "j6.lastSuccess", { taskId }));
     return task.requester ? { status: "done", message: step.summary, requester: task.requester } : { status: "done", message: step.summary };
     }
@@ -575,9 +576,10 @@ export async function cancelTask(pool: pg.Pool, code: number): Promise<DecisionR
   return withTransaction(pool, async (tx) => {
     const t = (await tx.query<{ id: string; status: string }>(`SELECT id, status FROM control_task WHERE code = $1 FOR UPDATE`, [code])).rows[0];
     if (!t) return { status: "not_found" as const };
+    const beforeCancel = await rowState(tx, "control_task", t.id);
     await tx.query(`UPDATE control_task SET status = 'cancelled', updated_at = now() WHERE id = $1`, [t.id]);
     await tx.query(`UPDATE control_step SET status = 'superseded' WHERE task_id = $1 AND status IN ('proposed','approved')`, [t.id]);
-    await appendEvent(tx, { actor: "julian", action: "control_task_cancelled", entityType: "control_task", entityId: t.id, client: "imessage_helper" });
+    await recordTransition(tx, { actor: "julian", action: "control_task_cancelled", table: "control_task", id: t.id, before: beforeCancel, audit: { client: "imessage_helper" } });
     await leaveAwaitingHuman(tx, t.id, { intervention: true });
     await completeForTask(tx, t.id, { ok: false, cancelled: true, summary: "Cancelled by Julian." });
     return { status: "cancelled" as const };

@@ -8,7 +8,7 @@
  *   5. notify Julian of new escalations in one digest (outside quiet hours)
  * Single runner (advisory lock); a preview computes the same tick and writes nothing (no cursors, no events, no sends).
  */
-import { causeHere, recordBulkTransitions } from "../db/state-events.js";
+import { causeHere, recordBulkTransitions, recordTransition, rowState } from "../db/state-events.js";
 import { createHash, randomUUID } from "node:crypto";
 import { appendEvent, currentCause, withCause } from "../db/index.js";
 import { areaHealth } from "../cos/areas.js";
@@ -262,8 +262,9 @@ async function reconcileEscalations(ctx, needs, result) {
             if (o.notified_at) {
                 result.escalations.resolved.push(o.summary);
                 if (!ctx.dryRun) {
+                    const before = await rowState(pool, "escalation", String(o.id));
                     await pool.query(`UPDATE escalation SET status = 'resolved', resolved_at = now(), resolution = 'told' WHERE id = $1`, [o.id]);
-                    await appendEvent(pool, { actor: "cos", action: "escalation_resolved", entityType: "escalation", entityId: o.id, causeIds: await notifiedBy(pool, String(o.id)), after: { key: o.key, needs: o.needs, resolution: "told" } });
+                    await recordTransition(pool, { actor: "cos", action: "escalation_resolved", table: "escalation", id: String(o.id), before, causeIds: await notifiedBy(pool, String(o.id)), context: { key: o.key, needs: o.needs, resolution: "told" } });
                 }
             }
             continue;
@@ -273,10 +274,11 @@ async function reconcileEscalations(ctx, needs, result) {
             result.escalations.resolved.push(o.summary);
             if (!ctx.dryRun) {
                 const resolution = o.fstate === "done" || o.fstate === "cancelled" ? `follow-up ${o.fstate}` : "no longer needed";
+                const before = await rowState(pool, "escalation", String(o.id));
                 await pool.query(`UPDATE escalation SET status = 'resolved', resolved_at = now(), resolution = $2 WHERE id = $1`, [o.id, resolution]);
                 const cause = o.followup_id ? await lastEventOn(pool, "followup", o.followup_id) : await causeHere(pool);
-                await appendEvent(pool, { actor: "cos", action: "escalation_resolved", entityType: "escalation", entityId: o.id, ...(cause.length ? { causeIds: cause } : {}),
-                    after: { key: o.key, needs: o.needs, resolution, summary: o.summary } });
+                await recordTransition(pool, { actor: "cos", action: "escalation_resolved", table: "escalation", id: String(o.id), before, ...(cause.length ? { causeIds: cause } : {}),
+                    context: { key: o.key, needs: o.needs, resolution, summary: o.summary } });
             }
         }
     }
@@ -412,7 +414,7 @@ async function recordAreaHealth(pool) {
         const corr = currentCause()?.correlationId;
         const trigger = corr ? (await pool.query(`SELECT max(id) AS id FROM event WHERE correlation_id = $1 AND area_id = $2 AND action <> 'area_health_changed'`, [corr, a.id])).rows[0]?.id : null;
         await appendEvent(pool, { actor: "cos", action: "area_health_changed", entityType: "area", entityId: a.id, areaId: a.id, causeIds: trigger ? [Number(trigger)] : await causeHere(pool),
-            before: last ? { color: last } : null, after: { color, area: h.name, breaches: h.breaches } });
+            before: { color: last ?? null }, after: { color, area: h.name, breaches: h.breaches } }); // first time: no recorded health before
     }
 }
 //# sourceMappingURL=engine.js.map

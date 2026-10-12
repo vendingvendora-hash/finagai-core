@@ -264,3 +264,70 @@ It parses every SQL write in `src` with the TypeScript compiler.
 **Status.** ADR-087 stays **open** after this deploy. Closing requires, live, both:
 - a real post-deploy state-changing email passing `emailToStateChain`;
 - the separate `escalationNotificationChain`.
+
+## Controlled canaries and the before-state gap (2026-10-12, hotfix 35)
+
+### Live canaries on hotfix 34 (normal paths, Area "Finagai Test", no code change)
+- **Canary 1 (19:30Z) PASS.** Canary job `e97bf660…`, driven through the normal MCP tools: tracked → applied →
+  "application viewed". The follow-up reschedule is its own `followup_updated` event (1881, due 10-15 → 10-26, cites the
+  tool's `work_invoked` 1879), and the job history and status changes each have their own events.
+- **Canary 2 (19:40Z) PASS.** A real external email sent through the monitored mailbox (Gmail `1a1319cc55bb46e0`, offer
+  wording, labeled as acceptance data). The chain, with each step citing the one before:
+  - evidence_observed 1895 → evidence_routed 1896 → workflow_started 1897;
+  - `opportunity_status` 1898 (applied → offer);
+  - `escalation_opened` 1902 (watch rule 1);
+  - `notification_delivered` 1903 (email sent);
+  - `escalation_notified` 1904;
+  - `escalation_resolved` (told) 1912.
+
+  The notification email coming back into the mailbox was ignored as Finagai's own (1911). The self-check reported
+  allPass.
+- **Cleanup (19:47Z).** Normal tools only, non-destructive, no event deleted: watch rule removed (1915); job withdrawn
+  (1919, offer → withdrawn); follow-up done (1920); project completed (1921). The self-check reported allPass after
+  cleanup.
+
+### What the canaries exposed (fixed here)
+1. **Events filed under the workflow's Area, not the object's.** career.sync is a Career workflow. It moved a Finagai
+   Test job, and the job's events (1898, 1899) were filed under Career. `recordTransition` now files an event under the
+   object's own Area (`area_id`; for job history, the job's Area). The caller's Area is only a fallback for objects that
+   have none.
+2. **A job the sync changed in another Area was not reconciled.** Its "waiting for a response" follow-up stayed open
+   after the offer. `lifecycleTick(…, { alsoIds })` now also reconciles every job the sync touched.
+3. **Transitions with no before-state** (live instances: 1912 `escalation_resolved`, 1915 `watch_rule_removed`).
+
+### The before-state rule, made structural
+- **`EVENT_SEMANTICS`** (`src/db/state-events.ts`) classifies every action emitted about a state object:
+  - **creation** — no prior state;
+  - **transition** — must carry `before` and `after`;
+  - **occurrence** — something happened to the object without changing its semantic state.
+- **Paths converted to `recordTransition` / `recordBulkTransitions`,** each taking the before-state from the row:
+  - governance expired / superseded / rejected / executed;
+  - control task done / cancelled;
+  - follow-up waiting / done / cancelled, including the email-reply close;
+  - escalation resolved (told and moved-on);
+  - project placed;
+  - lesson stated / approved / rejected / active;
+  - watch rule removed.
+- **Positional emitters** in J2 capture and governance pass an explicit `before`: proposal decided, conflict resolved,
+  knowledge superseded, archive.
+- **Area health baseline.** The first health reading records `before: {color: null}`, i.e. "none recorded".
+- **`watch_rule_added`** now names its object.
+- **`test/unit/live-transitions.test.ts`** checks every emit site, parsed with the TypeScript compiler (including the
+  positional `ev(action, entityType, id, after, before?)` emitters). It fails when:
+  - a state action is unclassified;
+  - a state event does not name its object;
+  - a transition does not carry `before`;
+  - `recordTransition({ before: null })` is used for a non-creation, or an occurrence or bulk path is misclassified;
+  - an action computed at runtime is not in the reviewed `DYNAMIC` list, which itself cannot rot.
+  - A regression test pins the sites that lacked a before-state.
+- **Runtime check.** `stateEventQuality` in `live-acceptance` now fails any transition with no before-state about an
+  object that already had events, and any unclassified state action.
+- **Integration tests** cover:
+  - follow-up waiting / done before-states;
+  - told escalations moving from open;
+  - the health baseline;
+  - object-Area attribution;
+  - `alsoIds` reconciliation;
+  - the self-check rejecting a transition that has no before-state.
+
+**Status.** ADR-087 stays **open** until hotfix 35 is deployed and verified live, with every check green.

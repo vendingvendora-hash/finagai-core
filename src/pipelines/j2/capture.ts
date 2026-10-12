@@ -7,6 +7,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { appendEvent, withTransaction, type Queryable } from "../../db/index.js";
+import { rowState } from "../../db/state-events.js";
 import {
   checkCandidate, checkRelationTarget, extractionResultSchema, relationResultSchema, resolveProject,
   type Candidate, type GuardReason, type ProjectRef, type RelationResult,
@@ -610,8 +611,9 @@ async function applyCandidate(
       [subjectType, subjectType === "project" ? w.projectId : null, c.fields.claim ?? c.source_quote, c.epistemic_status,
        c.source_visibility, cap.receivedAt, supersedes, cap.id, c.source_quote, c.classification]);
     if (supersedes) {
+      const prev = await rowState(tx, "knowledge_item", supersedes);
       await tx.query(`UPDATE knowledge_item SET status = 'superseded', version = version + 1 WHERE id = $1`, [supersedes]);
-      await ev("supersede", "knowledge_item", supersedes, { superseded_by: k.rows[0]!.id });
+      await ev("supersede", "knowledge_item", supersedes, { status: "superseded", superseded_by: k.rows[0]!.id }, { status: prev?.status ?? null });
     }
     const eid = await ev("create", "knowledge_item", k.rows[0]!.id, { claim: c.fields.claim ?? c.source_quote, epistemic_status: c.epistemic_status });
     await tx.query(`UPDATE knowledge_item SET last_event_id = $2 WHERE id = $1`, [k.rows[0]!.id, eid]);

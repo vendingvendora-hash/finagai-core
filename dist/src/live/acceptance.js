@@ -1,5 +1,7 @@
 import { EventEmitter } from "node:events";
 import { liveHandler } from "./http.js";
+import { EVENT_SEMANTICS } from "../db/state-events.js";
+import { STATE_ENTITY_TYPES } from "../db/events.js";
 import { RETENTION_DAYS, causalChain, publish, readAfter, snapshot, streamBounds, toEnvelopes } from "./stream.js";
 const SECRET_VALUE = /Bearer\s+[A-Za-z0-9._~+/-]{16,}|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{4,}|\bsk-[A-Za-z0-9_-]{16,}|\bre_[A-Za-z0-9]{16,}|-----BEGIN [A-Z ]*PRIVATE KEY/;
 const SECRET_KEY = /^(password|passwd|secret|client_secret|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|token|authorization|cookie|session|private[_-]?key|credential)$/i;
@@ -140,7 +142,7 @@ export async function liveAcceptance(pool, opts = {}) {
         FROM event e LEFT JOIN live_event l ON l.event_id = e.id WHERE e.correlation_id = $1 ORDER BY e.id`, [corr])).rows);
         const quality = (e, corr, cause) => [
             !e.entity.id && "no affected object id", (!e.after || !Object.keys(e.after).length) && "no after-state",
-            !CREATION.test(e.action) && (!e.before || !Object.keys(e.before).length) && "no before-state",
+            (EVENT_SEMANTICS[e.action] ? EVENT_SEMANTICS[e.action] === "transition" : !CREATION.test(e.action)) && (!e.before || !Object.keys(e.before).length) && "no before-state",
             e.cause.correlationId !== corr && "wrong correlation", !e.cause.eventIds.includes(cause) && `does not cite ${cause}`
         ].filter(Boolean);
         // 5a) incoming email -> routing -> workflow -> state change
@@ -203,8 +205,13 @@ export async function liveAcceptance(pool, opts = {}) {
         const stateActs = (await pool.query(`SELECT l.seq, e.id, e.occurred_at, e.actor, e.action, e.entity_type, e.entity_id, e.before, e.after, e.request_id, e.approval_id, e.correlation_id, e.cause_ids, e.area_id
         FROM event e LEFT JOIN live_event l ON l.event_id = e.id WHERE e.occurred_at >= $1 ORDER BY e.id DESC LIMIT 2000`, [sinceIso])).rows;
         const stateEvs = (await toEnvelopes(pool, stateActs)).filter(isStateChange);
+        // A transition (EVENT_SEMANTICS) about an object that already had events must say what it moved FROM (hotfix 35).
+        const beforeless = stateEvs.filter((e) => EVENT_SEMANTICS[e.action] === "transition" && e.entity.id && (!e.before || !Object.keys(e.before).length));
+        const hadPrior = new Set(beforeless.length ? (await pool.query(`SELECT x.id FROM event x WHERE x.id = ANY($1::bigint[])
+        AND EXISTS (SELECT 1 FROM event p WHERE p.entity_type = x.entity_type AND p.entity_id = x.entity_id AND p.id < x.id)`, [beforeless.map((e) => e.eventId)])).rows.map((r) => Number(r.id)) : []);
         const bad = stateEvs.map((e) => ({ e, why: [!e.entity.id && "no object", (!e.after || !Object.keys(e.after).length) && "no after", !e.cause.correlationId && "no unit of work",
-                !e.cause.eventIds.length && "no cause"].filter(Boolean) })).filter((x) => x.why.length);
+                !e.cause.eventIds.length && "no cause", hadPrior.has(e.eventId) && "transition without before-state (the object had a prior state)",
+                !!e.entity.type && STATE_ENTITY_TYPES.has(e.entity.type) && !(e.action in EVENT_SEMANTICS) && "unclassified state action"].filter(Boolean) })).filter((x) => x.why.length);
         out.stateEventQuality = { pass: bad.length === 0, since: sinceIso, stateChangeEvents: stateEvs.length,
             violations: bad.slice(0, 20).map((x) => `${x.e.eventId} ${x.e.action}: ${x.why.join(", ")}`), note: "detector-originated roots (an exception opened by a condition check) cite the entity's previous event when there is one" };
         // 5d) no silent state change: every row whose state moved since deploy has an event about it at/after that moment

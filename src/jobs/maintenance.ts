@@ -5,6 +5,7 @@
  * Staleness, retention eligibility, and uncertain deliveries need no writes: J3 derives them from
  * dates on every review.
  */
+import { recordBulkTransitions } from "../db/state-events.js";
 import type pg from "pg";
 import { appendEvent } from "../db/index.js";
 import { replayDeferred, type J2Deps } from "../pipelines/j2/capture.js";
@@ -12,10 +13,9 @@ import type { JobHandler } from "./dispatcher.js";
 
 export async function expireGovernanceRequests(pool: pg.Pool): Promise<number> {
   const expired = await pool.query<{ id: string }>(
-    `UPDATE governance_request SET status = 'expired' WHERE status = 'pending' AND expires_at < now() RETURNING id`);
-  for (const r of expired.rows) {
-    await appendEvent(pool, { actor: "job", action: "governance_expired", entityType: "governance_request", entityId: r.id, client: "scheduler" });
-  }
+    `WITH p AS (SELECT id, status, decided_at FROM governance_request WHERE status = 'pending' AND expires_at < now() FOR UPDATE)
+     UPDATE governance_request g SET status = 'expired' FROM p WHERE g.id = p.id RETURNING g.id, p.status AS "before.status", p.decided_at AS "before.decided_at"`);
+  await recordBulkTransitions(pool, expired.rows, { actor: "job", action: "governance_expired", table: "governance_request", audit: { client: "scheduler" } });
   return expired.rowCount ?? 0;
 }
 

@@ -5,7 +5,7 @@
  */
 import type pg from "pg";
 import { appendEvent, withTransaction } from "../db/index.js";
-import { recordBulkTransitions } from "../db/state-events.js";
+import { recordBulkTransitions, recordTransition, rowState } from "../db/state-events.js";
 
 export type FollowupState = "open" | "waiting" | "overdue" | "done" | "cancelled";
 
@@ -38,17 +38,19 @@ export async function createFollowup(pool: pg.Pool, input: { summary: string; co
 /** Mark that we acted on it and are now waiting for a response, optionally setting/extending the due date. */
 export async function markWaiting(pool: pg.Pool, id: string, dueAt?: Date): Promise<void> {
   await withTransaction(pool, async (tx) => {
+    const before = await rowState(tx, "followup", id);
     await tx.query(`UPDATE followup SET state='waiting', last_action_at=now(), due_at=COALESCE($2,due_at), updated_at=now()
       WHERE id=$1 AND state NOT IN ('done','cancelled')`, [id, dueAt ?? null]);
-    await appendEvent(tx, { actor: "cos", action: "followup_waiting", entityType: "followup", entityId: id, after: { dueAt: dueAt ?? null } });
+    await recordTransition(tx, { actor: "cos", action: "followup_waiting", table: "followup", id, before });
   });
 }
 
 export async function closeFollowup(pool: pg.Pool, id: string, outcome: string, cancelled = false): Promise<void> {
   await withTransaction(pool, async (tx) => {
+    const before = await rowState(tx, "followup", id);
     await tx.query(`UPDATE followup SET state=$2, outcome=$3, closed_at=now(), updated_at=now() WHERE id=$1`,
       [id, cancelled ? "cancelled" : "done", outcome.slice(0, 2000)]);
-    await appendEvent(tx, { actor: "cos", action: cancelled ? "followup_cancelled" : "followup_done", entityType: "followup", entityId: id, after: { outcome: outcome.slice(0, 200) } });
+    await recordTransition(tx, { actor: "cos", action: cancelled ? "followup_cancelled" : "followup_done", table: "followup", id, before });
   });
 }
 

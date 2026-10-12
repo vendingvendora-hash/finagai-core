@@ -3,6 +3,7 @@
  * deadlines of tracked follow-ups) and the generic reactions (a reply from someone Julian is waiting on; a follow-up
  * reaching or passing its date; lifecycle next steps whose time has come).
  */
+import { recordTransition, rowState } from "../db/state-events.js";
 import type pg from "pg";
 import type { GmailRecord } from "../google/client.js";
 import { GMAIL_EXTRACTOR } from "../google/client.js";
@@ -116,8 +117,9 @@ export const genericModule: AreaModule = {
         await inTx(ctx.pool, ctx.dryRun, async (tx) => {
           for (const e of events) for (const f of await waitedFollowupsFor(tx, e)) {
             const outcome = `${f.counterparty} replied ${e.occurredAt.slice(0, 10)}: “${String(e.payload.subject ?? "").slice(0, 120)}”`;
+            const before = await rowState(tx, "followup", String(f.id));
             await tx.query(`UPDATE followup SET state = 'done', outcome = $2, closed_at = now(), last_action_at = $3, updated_at = now() WHERE id = $1 AND state IN ('open','waiting','overdue')`, [f.id, outcome, e.occurredAt]);
-            await appendEvent(tx, { actor: "cos", action: "followup_done", entityType: "followup", entityId: f.id, after: { outcome, by: "event:reply", inboundEvent: e.id } });
+            await recordTransition(tx, { actor: "cos", action: "followup_done", table: "followup", id: String(f.id), before, context: { by: "event:reply", inboundEvent: e.id } });
             changes.push(`${outcome} — wait closed: ${f.summary}`);
           }
         });
