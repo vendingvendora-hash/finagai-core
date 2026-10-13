@@ -8,6 +8,7 @@
  */
 import type pg from "pg";
 import { areaHealth } from "../cos/areas.js";
+import { recurringFailures } from "../live/failures.js";
 
 type Db = Pick<pg.Pool, "query">;
 export type Severity = "info" | "warning" | "critical";
@@ -225,4 +226,17 @@ export const canaryFailing: Detector = async (db, now) => {
     detail: steps.flatMap((s) => s.problems ?? []).join(" | ").slice(0, 900) }];
 };
 
-export const DETECTORS: Record<string, Detector> = { watcherFailing, workflowFailing, deadLetters, budget, deliveryFailing, areaBreach, macOffline, stuckTasks, reviewBacklog, selfCheck, canaryFailing };
+/**
+ * Phase 8 (ADR-088, increment 3): failure mining. The other detectors catch a part that is DOWN (failing every time,
+ * N in a row). This one catches what keeps failing intermittently — the same class (where + normalized what) at least 3
+ * times in 24 h, still happening on the running Core, in Finagai's own machinery — which no single-streak detector sees.
+ * Finagai owns it; it reaches Julian only as a "have it fixed" judgment if it persists a day; it clears when the class
+ * falls below the threshold. A class another exception already owns is left to that one.
+ */
+export const failureRecurring: Detector = async (db, now) => (await recurringFailures(db, now)).map((c) => ({
+  key: `failure:${c.key}`, detector: "failure_recurring", owner: "finagai" as const, severity: "warning" as const, escalateAfterMin: 24 * 60,
+  summary: `${c.source.replace("_", " ")} ${c.subject} keeps failing the same way (${c.last24h}× in 24 h): ${c.example.slice(0, 140)}`,
+  detail: `failure class ${c.key} — "${c.signature}"; first seen ${c.firstSeen}, last ${c.lastSeen}; finagai-job: failures for the evidence`,
+  evidence: c.evidence, evidenceRefs: { failureClass: c.key, signature: c.signature, last24h: c.last24h, sinceStart: c.sinceStart } }));
+
+export const DETECTORS: Record<string, Detector> = { watcherFailing, workflowFailing, deadLetters, budget, deliveryFailing, areaBreach, macOffline, stuckTasks, reviewBacklog, selfCheck, canaryFailing, failureRecurring };

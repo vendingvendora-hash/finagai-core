@@ -48,7 +48,7 @@ export async function resourcePerformance(db, now) {
             out.push({ key: `perf:workflow:${f.name}`, kind: "resource_performance", basis: "observed", scope: `workflow:${f.name}`, support: f.n, positives: f.ok,
                 confidence: claimConfidence(f.ok, f.n), statement: `Workflow ${f.name} succeeded ${f.ok}/${f.n} runs in the last 30 days (${pct(f.ok, f.n)}).`, lastEvidenceAt: iso(f.last), evidence: { source: "event_tick.stats", window: "30 days", successRate95: wilsonInterval(f.ok, f.n) } });
     const tools = (await db.query(`SELECT reason AS tool, count(*)::int AS n, count(*) FILTER (WHERE after->>'outcome' = 'ok')::int AS ok, max(occurred_at) AS last
-    FROM event WHERE action = 'tool_called' AND reason IS NOT NULL AND reason <> 'call_tool' AND occurred_at > $1::timestamptz - interval '30 days' GROUP BY reason`, [now])).rows;
+    FROM event WHERE action = 'tool_called' AND reason IS NOT NULL AND reason <> 'call_tool' AND after->>'outcome' IN ('ok','error') AND occurred_at > $1::timestamptz - interval '30 days' GROUP BY reason`, [now])).rows;
     for (const t of tools)
         if (t.n >= 5)
             out.push({ key: `perf:tool:${t.tool}`, kind: "resource_performance", basis: "observed", scope: `tool:${t.tool}`, support: t.n, positives: t.ok,

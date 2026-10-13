@@ -240,3 +240,64 @@ quiet hours (03:20 ET). Its tick is now pinned to daytime.
 | `call_tool` exclusion | 0 failures in 53 calls in the report window |
 
 Increment 2 is released as hotfix 39.
+
+## Increment 2 live acceptance on hotfix 39 (2026-10-13, Core `f82cd21b2b8a`, started 16:54Z)
+**Green on first look (17:02–17:04Z).**
+- **Internal canary.** It ran on the first tick after deploy, at 16:56:26Z. It is `canary_ran` 2203 (seq 2172): `ok: true`, all four steps passed (track 8 events, evidence 3, withdraw 5, cleanup 3), 315 ms, citing tick 2202.
+  - Every step is its own unit of work. Each `work_invoked canary:<step>` root (2183 / 2191 / 2194 / 2199) is the cause of every event in that step.
+  - Every state event is filed under Area Finagai Test. Transitions carry before-state: `opportunity_status` 2187 discovered→applied, 2196 applied→withdrawn; `followup_updated` 2193 due 10-24→10-27; `followup_done` 2197; `project_completed` 2198.
+  - Cleanup archived the objects and deleted nothing (`opportunity_archived` 2201).
+  - Actors are `system` / `cos`, never Julian. Nothing reached Julian: needs-Julian is empty and the brief carries no canary text.
+- **`reliability since 2026-10-13T16:45Z`.** The window starts at the requested moment and reports `healthy`: 4 ticks, 1 canary run, 0 failures. The rolling 24-hour report is `degraded`, but only from pre-fix history (stateEventQuality 19 of 21 runs before hotfix 38; mac:offline opened 4×).
+- **Brief.** It shows exactly one line, "Finagai reliability (last 24 h) is degraded: …", as a risk. Decisions are empty.
+- **Increment 1 checks.** live-acceptance at 17:02:33Z passes 10/10, with 2 pending (the email chains, which wait for a post-deploy email).
+
+**Two live findings, fixed in hotfix 40 (`7b8fd32`).**
+1. *The Finagai Test Area still reached the brief.* These lines appeared: "Finagai Test is yellow: no open objective — what is this area trying to achieve?", "area created: Finagai Test", and "Finagai Test: yellow" in `rest.areas`.
+   - The test Area is now excluded from area health, changes (including its own `area_created`), overdue and at-risk follow-ups, open exceptions, and the waiting count.
+   - A real decision about test data still reaches Julian as a decision.
+   - An empty test Area id no longer drops rows whose Area is null (`x IS DISTINCT FROM NULL`).
+2. *Five detectors cited only the tick.* These were watcher_failing, dead_letter, area_breach, mac_offline (with work) and budget. Each now cites what tripped it:
+   - mac_offline: the waiting Mac task's latest event;
+   - dead_letter: the dead event's last stream event;
+   - area_breach: the Area's `area_health_changed` and the stale project's latest event;
+   - watcher_failing and budget: their evidence is not an event, so they name it in `evidenceRefs` on `exception_opened` (the failing tick-ledger rows and the problem; the spend meter reading).
+- Also fixed: the canary's cleanup recorded the project's archival as a second `project_completed` (event 2200). It is now `project_archived` (`entity.archived`), and the canary checks it.
+- A test fixture that was due relative to wall time (it failed after 10-13 17:00Z) is now relative to the tick's clock.
+- Tests: 525 unit and 287 integration, all passing.
+
+**Email canary 4 (requested from Julian at ~17:16Z).** Criteria that only a real email exercises:
+- the Career history label, through career sync;
+- a workflow-raised judgment that resolves itself when its job moves on.
+
+Fixtures, all ACCEPTANCE-TEST DATA in Area Finagai Test, created through the normal tools:
+- 4A `78a2a2ba-805f-4303-8802-bbe20f534ee7` (applied);
+- 4B `39a63fc3-9421-4708-8af9-e96a53adc536` (applied, then withdrawn).
+
+The 14-day expiry cannot be observed live inside 14 days without moving a clock. It is proven by the integration test against the real engine (the tick's clock at 13 days: still open; at 15 days: resolved "expired: no answer in 14 days").
+
+## Increment 3 — failure mining (built off-production; held until Increment 2 passes live)
+Before this, failure mining was manual (current-state audit §19). The reliability report counted failures; nothing said
+*what* keeps failing.
+
+- **Failure classes** (`src/live/failures.ts`, `finagai-job: failures [days]`).
+  - Each recorded failure is reduced to a class: its source and subject, plus a normalized signature of the message, with ids, numbers, dates and quoted values removed.
+  - Sources come from the stream: `workflow_failed`, failed `job_finished`, tool calls with outcome `error`, Mac tasks turning `failed`, notices that could not be delivered, failed canary steps, failing self-check checks, and `lifecycle_error`. Watcher poll problems come from the tick ledger.
+  - Each class has its count, last-24-hour count, first and last seen, count since the running Core started, and status: recurring, isolated, or "not seen since restart" (likely fixed by the running version). It also lists up to 5 evidence events and the open exception that already owns it, if any.
+- **`failure_recurring` detector.** A class opens a Finagai-owned warning exception `failure:<key>` when all of these hold:
+  - it is in Finagai's own machinery;
+  - it occurred ≥3 times in 24 hours;
+  - it has occurred at least once on the running Core;
+  - no other exception owns it.
+
+  The exception cites its failures. If it persists a day, it reaches Julian as a "have it fixed" judgment. It clears when the class falls below the threshold. It catches the intermittent case the streak detectors miss.
+
+  Some failures are mined and reported but never open this exception:
+  - tool errors (they include Julian's own unanswerable asks);
+  - watcher problems (streak-detected);
+  - Mac tasks abandoned while the Mac slept (availability; the Mac-offline exception covers them).
+- **Report.** `reliabilityReport` gains `failures` (the top classes). A recurring class is named in `why`, so the brief's single reliability line picks it up.
+- **First mined defect: tool outcomes recorded twice.** The live 7-day report showed `resolve_reference: 3/6` failing with no errors. That tool, `mac_status`, `mac_get_context`, and the `mac_offline` / `stalled` answers of `control_mac`, `make_mac_chart` and `control_result` wrote a second `tool_called` record carrying their domain result. Those records were classed `tool.failed` on the stream, counted as failed calls by the report, and counted against the tool by the learning pass ("answered without error 3/6").
+  - Each call now writes exactly one record, `outcome` ok | error. The domain result is a `result` field, and an error carries its sanitized message.
+  - The report and the learner count only ok/error records. Legacy second records classify as `tool.answered`.
+- Tests: `test/integration/phase8-failures.test.ts` (2), additions to `mcp.test.ts`, `live-contract.test.ts` and `phase8.test.ts`. Full suites: 526 unit, 289 integration, all passing. No migration, and the MCP tool surface is unchanged.

@@ -114,7 +114,7 @@ export async function runExceptions(pool, now, dryRun, deps = {}) {
     return res;
 }
 const detectorName = (fn) => ({ watcherFailing: "watcher_failing", workflowFailing: "workflow_failing", deadLetters: "dead_letter", budget: "budget", deliveryFailing: "delivery_failing",
-    areaBreach: "area_breach", macOffline: "mac_offline", stuckTasks: "stuck_task", reviewBacklog: "review_backlog", selfCheck: "self_check", canaryFailing: "canary" }[fn] ?? fn);
+    areaBreach: "area_breach", macOffline: "mac_offline", stuckTasks: "stuck_task", reviewBacklog: "review_backlog", selfCheck: "self_check", canaryFailing: "canary", failureRecurring: "failure_recurring" }[fn] ?? fn);
 /** Read-only: what is wrong right now, who owns it, what Finagai is doing about it. */
 export async function exceptionsStatus(db, now = new Date()) {
     const open = (await db.query(`SELECT e.key, e.detector, e.owner, e.severity, e.needs, e.summary, e.detail, e.first_seen_at, e.last_seen_at, e.remediation, e.remediation_attempts,

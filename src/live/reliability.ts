@@ -5,6 +5,7 @@
  * open.
  */
 import type pg from "pg";
+import { mineFailures, NOT_A_DEFECT, PROCESS_STARTED_AT, RECURRING } from "./failures.js";
 
 type Db = Pick<pg.Pool, "query">;
 
@@ -25,7 +26,7 @@ export const RELIABILITY_BUDGET = {
  * `since` evaluates behaviour after a given moment (e.g. a deploy) separately from the rolling window, so history that
  * predates a fix is preserved in the stream but does not stand in for the fixed behaviour.
  */
-export async function reliabilityReport(db: Db, opts: { days?: number; now?: Date; since?: Date } = {}) {
+export async function reliabilityReport(db: Db, opts: { days?: number; now?: Date; since?: Date; startedAt?: Date } = {}) {
   const now = opts.now ?? new Date();
   const days = Math.min(Math.max(opts.days ?? 1, 1), 30);
   const from = opts.since && !Number.isNaN(opts.since.getTime()) ? opts.since : new Date(now.getTime() - days * 86_400_000);
@@ -53,9 +54,11 @@ export async function reliabilityReport(db: Db, opts: { days?: number; now?: Dat
   const workflows = wf.map((w) => ({ name: w.name, completed: w.ok, failed: w.failed, successRate: w.ok + w.failed ? Math.round((w.ok / (w.ok + w.failed)) * 1000) / 1000 : null }));
 
   // tools Julian calls
-  // call_tool's routing record is not a call outcome (the routed tool records its own); it is excluded here
-  const tl = await q<{ tool: string; calls: number; failed: number }>(`SELECT after->>'tool' AS tool, count(*)::int AS calls, count(*) FILTER (WHERE after->>'outcome' IS DISTINCT FROM 'ok')::int AS failed
-      FROM event WHERE action = 'tool_called' AND occurred_at BETWEEN $1 AND $2 AND after->>'routedTo' IS NULL AND after->>'outcome' IS DISTINCT FROM 'routed' GROUP BY 1 ORDER BY 3 DESC, 2 DESC`);
+  // A call is its ok/error record. call_tool's routing record is not a call outcome (the routed tool records its own),
+  // and neither is a tool's legacy second record of its domain result (resolve_reference "none", "mac_offline" — live
+  // 2026-10-13: resolve_reference showed 3/6 failing with zero errors). Only "error" is a failure.
+  const tl = await q<{ tool: string; calls: number; failed: number }>(`SELECT after->>'tool' AS tool, count(*)::int AS calls, count(*) FILTER (WHERE after->>'outcome' = 'error')::int AS failed
+      FROM event WHERE action = 'tool_called' AND occurred_at BETWEEN $1 AND $2 AND after->>'routedTo' IS NULL AND after->>'outcome' IN ('ok','error') GROUP BY 1 ORDER BY 3 DESC, 2 DESC`);
   const calls = tl.reduce((n, t) => n + t.calls, 0), toolFailed = tl.reduce((n, t) => n + t.failed, 0);
   const tools = { calls, failed: toolFailed, failureRate: calls ? Math.round((toolFailed / calls) * 1000) / 1000 : null, failing: tl.filter((t) => t.failed).map((t) => `${t.tool}: ${t.failed}/${t.calls}`) };
 
@@ -89,6 +92,13 @@ export async function reliabilityReport(db: Db, opts: { days?: number; now?: Dat
   const canary = { runs: cr.length, failed: cr.filter((r) => r.after.ok === false).length,
     failedSteps: [...new Set(cr.filter((r) => r.after.ok === false).flatMap((r) => (r.after.steps ?? []).filter((s) => !s.ok).map((s) => s.step)))] };
 
+  // failure mining (increment 3): what keeps failing, by class — the report lists the top classes; a class of Finagai's
+  // own machinery recurring on the running Core is a reason the platform is degraded
+  const mined = await mineFailures(db, { from, now, startedAt: opts.startedAt ?? PROCESS_STARTED_AT });
+  const failures = { recorded: mined.failures, classes: mined.classes.length,
+    top: mined.classes.slice(0, 8).map((c) => ({ key: c.key, where: `${c.source}:${c.subject}`, count: c.count, last24h: c.last24h, status: c.status, example: c.example.slice(0, 120), ownedBy: c.ownedBy })) };
+  const recurring = mined.classes.filter((c) => c.system && !NOT_A_DEFECT(c) && c.last24h >= RECURRING.minIn24h && c.sinceStart >= 1 && !c.ownedBy?.match(/^(workflow|watcher|reliability|canary|delivery):/));
+
   // the stream itself
   const unpublished = Number((await db.query(`SELECT count(*)::int AS n FROM event e WHERE NOT EXISTS (SELECT 1 FROM live_event l WHERE l.event_id = e.id) AND e.occurred_at < $1::timestamptz - interval '1 minute'`, [now])).rows[0].n);
 
@@ -102,8 +112,9 @@ export async function reliabilityReport(db: Db, opts: { days?: number; now?: Dat
   if (exceptions.flapping.length) why.push(`flapping exceptions: ${exceptions.flapping.join(", ")}`);
   if (selfCheck.failingRuns) why.push(`self-check failed in ${selfCheck.failingRuns} of ${selfCheck.runs} runs (${selfCheck.failures.join(", ")})`);
   if (unpublished) why.push(`${unpublished} event(s) not yet on the live stream`);
+  for (const c of recurring) why.push(`recurring failure: ${c.source.replace("_", " ")} ${c.subject} ${c.last24h}× in 24 h ("${c.signature.slice(0, 80)}")`);
   if (canary.failed) why.push(`internal canary failed in ${canary.failed} of ${canary.runs} runs (${canary.failedSteps.join(", ")})`);
 
   return { window: { from: from.toISOString(), to: now.toISOString(), days: opts.since ? Math.round(((now.getTime() - from.getTime()) / 86_400_000) * 100) / 100 : days }, verdict: why.length ? "degraded" : "healthy", why,
-    budget: RELIABILITY_BUDGET, loop, workflows, tools, jobs, notifications, exceptions, selfCheck, canary, stream: { unpublished } };
+    budget: RELIABILITY_BUDGET, loop, workflows, tools, jobs, notifications, exceptions, selfCheck, canary, failures, stream: { unpublished } };
 }

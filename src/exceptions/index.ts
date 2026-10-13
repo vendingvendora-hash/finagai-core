@@ -107,7 +107,7 @@ export async function runExceptions(pool: pg.Pool, now: Date, dryRun: boolean, d
 }
 
 const detectorName = (fn: string) => ({ watcherFailing: "watcher_failing", workflowFailing: "workflow_failing", deadLetters: "dead_letter", budget: "budget", deliveryFailing: "delivery_failing",
-  areaBreach: "area_breach", macOffline: "mac_offline", stuckTasks: "stuck_task", reviewBacklog: "review_backlog", selfCheck: "self_check", canaryFailing: "canary" } as Record<string, string>)[fn] ?? fn;
+  areaBreach: "area_breach", macOffline: "mac_offline", stuckTasks: "stuck_task", reviewBacklog: "review_backlog", selfCheck: "self_check", canaryFailing: "canary", failureRecurring: "failure_recurring" } as Record<string, string>)[fn] ?? fn;
 
 /** Read-only: what is wrong right now, who owns it, what Finagai is doing about it. */
 export async function exceptionsStatus(db: Pick<pg.Pool, "query">, now = new Date()) {

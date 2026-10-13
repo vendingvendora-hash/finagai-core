@@ -204,9 +204,18 @@ describe.skipIf(!url)("MCP tool layer end to end", () => {
     const client = await connect(await token());
     await client.callTool({ name: "get_charter", arguments: {} });
     await client.callTool({ name: "list_open_conflicts", arguments: {} });
+    // Phase 8 failure mining: exactly ONE record per call, its domain result on it (resolve_reference / mac_status
+    // used to write a second record, which the report and the learner counted as a failed call)
+    await client.callTool({ name: "resolve_reference", arguments: { phrase: "this file" } });
+    await client.callTool({ name: "mac_status", arguments: {} });
+    await client.callTool({ name: "get_project", arguments: { project: "no such project" } }).catch(() => undefined);
     await client.close();
     const after = (await pool!.query(`SELECT count(*)::int AS n FROM event WHERE action = 'tool_called'`)).rows[0].n;
-    expect(after - before).toBe(2);
+    expect(after - before).toBe(5);
+    const recs = (await pool!.query(`SELECT after FROM event WHERE action = 'tool_called' ORDER BY id DESC LIMIT 3`)).rows.map((r) => r.after).reverse();
+    expect(recs[0]).toEqual(expect.objectContaining({ tool: "resolve_reference", outcome: "ok", result: expect.stringMatching(/^(resolved|ambiguous|none)$/) }));
+    expect(recs[1]).toEqual(expect.objectContaining({ tool: "mac_status", outcome: "ok" }));
+    expect(recs[2]).toEqual(expect.objectContaining({ tool: "get_project", outcome: "error", error: expect.stringMatching(/No active project/) }));
   });
 
   it("execution_metrics returns real interaction rows and daily aggregates (Phase 1D)", async () => {

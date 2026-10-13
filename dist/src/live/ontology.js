@@ -67,8 +67,13 @@ const RULES = {
     // tools / sources
     // call_tool's own record is a ROUTING note (the routed tool records its own outcome) — never a failure (Phase 8 live:
     // every call_tool counted as tool.failed because the routing record had no outcome; read-time, so history is fixed too)
+    // Phase 8 (failure mining, live 2026-10-13): only outcome "error" is a failed call. Before hotfix 41 some tools wrote a
+    // second record carrying their domain result (resolve_reference "none"/"ambiguous", "mac_offline", "stalled"); those
+    // are answers about the world, not failures — they classify as tool.answered.
     tool_called: (r) => r.after?.routedTo || r.after?.outcome === "routed" ? F("tool", "routed", { verified: null, lowValue: true })
-        : F("tool", r.after?.outcome === "ok" ? "succeeded" : "failed", { verified: null, lowValue: r.after?.outcome === "ok" }),
+        : r.after?.outcome === "ok" ? F("tool", "succeeded", { verified: null, lowValue: true })
+            : r.after?.outcome === "error" || r.after?.outcome == null ? F("tool", "failed", { verified: null, lowValue: false })
+                : F("tool", "answered", { verified: null, lowValue: true }),
     mcp_initialize: () => F("source", "connected", { lowValue: true }),
     mcp_tools_listed: () => F("source", "observed", { lowValue: true }),
     mcp_client_observed: () => F("source", "connected"),

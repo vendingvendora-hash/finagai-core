@@ -10,7 +10,7 @@ import { getRuntime, macOnline, deriveLifecycle, macStatus } from "../mac/runtim
 import { openInteraction, linkTask, undelivered, markDelivered } from "../concierge/interactions.js";
 import { sweepHumanWaits } from "../concierge/human-wait.js";
 import { registerCosTools } from "./cosTools.js";
-import { observed, reportLifecycleError, recentLifecycleErrors } from "../ops/lifecycle-errors.js";
+import { observed, reportLifecycleError, recentLifecycleErrors, sanitizeError } from "../ops/lifecycle-errors.js";
 import { getContext, resolveFromMac } from "../mac/context.js";
 import { route } from "../mac/router.js";
 import { listCapabilities, refreshRegistry } from "../resources/registry.js";
@@ -54,7 +54,9 @@ export interface ToolDeps {
 }
 
 export interface ToolHelpers {
-  ok: (tool: string, data: unknown) => Promise<CallToolResult>;
+  /** `result`: the tool's own domain outcome (e.g. resolve_reference "ambiguous", "mac_offline") — recorded on the one
+   *  tool_called event of the call, never as a second record (Phase 8: second records were counted as failed calls) */
+  ok: (tool: string, data: unknown, result?: string) => Promise<CallToolResult>;
   fail: (tool: string, message: string) => Promise<CallToolResult>;
 }
 
@@ -91,12 +93,14 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     return register(name, config, traced);
   };
 
-  const audit = (tool: string, outcome: string) => appendEvent(deps.pool, {
-    actor: "system", action: "tool_called", entityType: "tool", reason: tool, after: { tool, outcome }, client: deps.client });
+  // Phase 8 (failure mining): one tool_called per call — outcome "ok" | "error" (the call itself), plus the tool's
+  // domain result and, on error, the message (failures are mined by what went wrong, not just counted).
+  const audit = (tool: string, outcome: string, extra: { result?: string; error?: string } = {}) => appendEvent(deps.pool, {
+    actor: "system", action: "tool_called", entityType: "tool", reason: tool, after: { tool, outcome, ...(extra.result ? { result: extra.result } : {}), ...(extra.error ? { error: sanitizeError(extra.error).slice(0, 300) } : {}) }, client: deps.client });
 
   const helpers: ToolHelpers = {
-    ok: async (tool, data) => {
-      await audit(tool, "ok");
+    ok: async (tool, data, result) => {
+      await audit(tool, "ok", result ? { result } : {});
       let payload: unknown = data;
       // WO2 async return: on ANY tool call, surface finished work whose result never reached the chat, so
       // Julian is never the polling mechanism. Marked delivered once surfaced.
@@ -121,7 +125,7 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
       return { content: [{ type: "text", text }] };
     },
     fail: async (tool, message) => {
-      await audit(tool, "error");
+      await audit(tool, "error", { error: message });
       return { isError: true, content: [{ type: "text", text: message }] };
     },
   };
@@ -370,11 +374,10 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     // HEALTH GATE (ADR-066): don't queue a Mac task for a Mac that isn't connected.
     const rt0 = await getRuntime(deps.pool);
     if (!macOnline(rt0)) {
-      await audit("control_mac", "mac_offline");
       return ok("control_mac", { macOffline: true, lifecycle: "waiting_for_mac",
         lastHeartbeatSecondsAgo: rt0 ? Math.round((Date.now() - rt0.lastHeartbeatAt.getTime()) / 1000) : null,
         tellJulian: "Finagai's Mac runtime isn't connected right now. On the Mac run `launchctl kickstart -k gui/$(id -u)/com.finagai.imessage` and I'll pick this up immediately.",
-        doNot: "Do not create a task, do not poll, do not ask Julian to upload anything." });
+        doNot: "Do not create a task, do not poll, do not ask Julian to upload anything." }, "mac_offline");
     }
     const ix = await openInteraction(deps.pool, { conversation: "chat", message: request });
     if (ix.reused && ix.interaction.taskIds.length) {
@@ -403,11 +406,10 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     // HEALTH GATE (ADR-066): never queue work for a Mac that isn't connected. Fail fast with the truth.
     const rt0 = await getRuntime(deps.pool);
     if (!macOnline(rt0)) {
-      await audit("make_mac_chart", "mac_offline");
       return ok("make_mac_chart", { macOffline: true, lifecycle: "waiting_for_mac",
         lastHeartbeatSecondsAgo: rt0 ? Math.round((Date.now() - rt0.lastHeartbeatAt.getTime()) / 1000) : null,
         tellJulian: "Finagai's Mac runtime isn't connected right now, so I can't reach the file. This is the one thing to check: on the Mac run `launchctl kickstart -k gui/$(id -u)/com.finagai.imessage`. I'll do the chart the moment it reconnects.",
-        doNot: "Do not create a task, do not poll, do not ask Julian to upload the file." });
+        doNot: "Do not create a task, do not poll, do not ask Julian to upload the file." }, "mac_offline");
     }
     // INTERACTION COORDINATOR (ADR-065): one logical interaction per chart request.
     // Reuse an equivalent recent task so an impatient "retry" never spawns a duplicate (#9 vs #32).
@@ -547,7 +549,6 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
   }, async () => {
     const { ctx, ageSeconds } = await getContext(deps.pool);
     const rt = await getRuntime(deps.pool);
-    await audit("mac_get_context", "ok");
     return ok("mac_get_context", { macOnline: macOnline(rt), snapshotAgeSeconds: ageSeconds, ...ctx });
   });
 
@@ -556,15 +557,13 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
     inputSchema: z.object({ phrase: z.string().min(1).max(300) }),
   }, async ({ phrase }) => {
     const r = await resolveFromMac(deps.pool, phrase);
-    await audit("resolve_reference", r.resolved ? "resolved" : r.ambiguous ? "ambiguous" : "none");
-    return ok("resolve_reference", r);
+    return ok("resolve_reference", r, r.resolved ? "resolved" : r.ambiguous ? "ambiguous" : "none");
   });
 
   server.registerTool("mac_status", {
     description: "The truthful status of Finagai's Mac runtime: connected?, last heartbeat, capability matrix (screen capture, accessibility, filesystem, browser, clipboard, active window), current app/window, and the current task's real lifecycle (queued/waiting_for_mac/executing/stalled). Use when a Mac task isn't progressing or Julian asks whether Finagai can see/use his Mac. Real probes, no guesses.",
     inputSchema: z.object({}),
   }, async () => {
-    await audit("mac_status", "ok");
     return ok("mac_status", await macStatus(deps.pool));
   });
 
@@ -596,15 +595,13 @@ export function buildMcpServer(deps: ToolDeps): McpServer {
       `SELECT status, claimed_at, last_progress_at, progress_note FROM control_task WHERE code = $1`, [r.code]);
     const lc = lcRow.rows[0] ? deriveLifecycle(lcRow.rows[0], rtNow) : null;
     if (lc && lc.lifecycle === "waiting_for_mac") {
-      await audit("control_result", "mac_offline");
       return ok("control_result", { found: true, status: r.status, lifecycle: "waiting_for_mac", evidence: lc.evidence, done: false,
         tellJulian: "Finagai's Mac runtime isn't connected, so this task can't run yet. On the Mac: `launchctl kickstart -k gui/$(id -u)/com.finagai.imessage`. It will resume automatically.",
-        doNot: "Do not keep polling. Do not ask Julian to upload the file." });
+        doNot: "Do not keep polling. Do not ask Julian to upload the file." }, "mac_offline");
     }
     if (lc && lc.lifecycle === "stalled") {
-      await audit("control_result", "stalled");
       return ok("control_result", { found: true, status: r.status, lifecycle: "stalled", evidence: lc.evidence, done: false,
-        tellJulian: "The Mac worker stopped mid-task (no progress). Finagai will reclaim it; if it doesn't resume within a minute, restart the runtime: `launchctl kickstart -k gui/$(id -u)/com.finagai.imessage`." });
+        tellJulian: "The Mac worker stopped mid-task (no progress). Finagai will reclaim it; if it doesn't resume within a minute, restart the runtime: `launchctl kickstart -k gui/$(id -u)/com.finagai.imessage`." }, "stalled");
     }
     const note = r.status === "done" && r.verification === "needs_review" ? "Task finished but its outcome was NOT independently verified and something was changed — tell Julian plainly it needs his review; do not present it as done-and-verified."
       : r.status === "done" && r.verification === "unverified" ? "Task finished; the result was NOT independently verified — say so when you report it."

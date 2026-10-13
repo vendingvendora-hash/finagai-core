@@ -39,6 +39,11 @@ describe("ontology", () => {
     expect(classify(row({ tool: "call_tool", routedTo: "tell_me_when", outcome: "routed" })).class).toBe("tool.routed");
     expect(classify(row({ tool: "waiting_on", outcome: "ok" })).class).toBe("tool.succeeded");
     expect(classify(row({ tool: "waiting_on", outcome: "error" })).class).toBe("tool.failed");
+    // Phase 8 failure mining (live 2026-10-13): a tool's legacy second record of its domain result is an answer, not a failure
+    expect(classify(row({ tool: "resolve_reference", outcome: "none" }))).toEqual(expect.objectContaining({ class: "tool.answered", lowValue: true }));
+    expect(classify(row({ tool: "control_mac", outcome: "mac_offline" })).class).toBe("tool.answered");
+    expect(classify(row({ tool: "resolve_reference", outcome: "ok", result: "none" })).class).toBe("tool.succeeded");
+    expect(classify({ action: "project_archived", entity_type: "project", after: { archived_at: "x" }, before: { archived_at: null }, approval_id: null }).class).toBe("entity.archived");
     // the self-check verdict and job runs are classified
     expect(classify({ action: "reliability_checked", entity_type: null, after: { allPass: false, failing: ["ordering"] }, before: null, approval_id: null }).class).toBe("system.check_failed");
     expect(classify({ action: "reliability_checked", entity_type: null, after: { allPass: false, failing: [], pending: ["emailToStateChain"] }, before: null, approval_id: null })).toEqual(expect.objectContaining({ class: "system.checked", lowValue: true }));

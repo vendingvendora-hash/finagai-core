@@ -11,6 +11,7 @@ import { listRules } from "../exceptions/rules.js";
 import { causalChain, publish, readAfter, streamBounds } from "../live/stream.js";
 import { liveAcceptance } from "../live/acceptance.js";
 import { reliabilityReport } from "../live/reliability.js";
+import { mineFailures, PROCESS_STARTED_AT } from "../live/failures.js";
 export function parseFinagaiJob(request) {
     const m = /^\s*finagai-job:\s*(.*)$/is.exec(request);
     if (!m)
@@ -73,6 +74,8 @@ export function parseFinagaiJob(request) {
         return { kind: "live-acceptance" };
     if (c === "reliability")
         return rest[0] === "since" && rest[1] ? { kind: "reliability", days: 1, since: rest[1] } : { kind: "reliability", days: Math.min(int(rest[0], 1), 30) };
+    if (c === "failures")
+        return { kind: "failures", days: Math.min(int(rest[0], 7), 30) };
     if (c === "live")
         return { kind: "live", limit: Math.min(int(rest[0], 20), 100) };
     return { kind: "unknown", text: t.slice(0, 100) };
@@ -129,6 +132,7 @@ export async function runFinagaiJob(pool, google, job) {
         }
         case "live-acceptance": return liveAcceptance(pool, { version: process.env.RENDER_GIT_COMMIT?.slice(0, 12) ?? "dev" });
         case "reliability": return reliabilityReport(pool, { days: job.days, ...(job.since ? { since: new Date(job.since) } : {}) });
+        case "failures": return mineFailures(pool, { days: job.days, startedAt: PROCESS_STARTED_AT });
         case "exceptions": return { ...(await exceptionsStatus(pool)), rules: await listRules(pool) };
         case "tick-preview": return runTick(pool, { google, now: new Date(), dryRun: true }, { modules: AREA_MODULES }, "preview");
         case "mcp-manifest": {
@@ -139,7 +143,7 @@ export async function runFinagaiJob(pool, google, job) {
             const lastList = traffic.find((t) => t.action === "mcp_tools_listed");
             return { live: m, inProcess: TRAFFIC, lastToolsListServed: lastList ? { at: lastList.occurred_at, digest: lastList.after?.served, count: lastList.after?.count } : null, recentTraffic: traffic };
         }
-        case "unknown": return { error: `Unknown finagai-job "${job.text}". Allowed: stability [runs] [org,org], result <code>, trace <proposal> <org>, replay <proposal> [runs], jobs <proposal> <employer>, proposal <code>, reinterpret <code>, career-state, propose, acquisitions [n], pipeline [area], find <text>, sync-preview, lifecycle-preview, brief, area-status [area], waiting, mcp-manifest, events [n], tick-preview, lessons [n], learning-preview, exceptions, live [n], live-acceptance, reliability [days | since <ISO time>].` };
+        case "unknown": return { error: `Unknown finagai-job "${job.text}". Allowed: stability [runs] [org,org], result <code>, trace <proposal> <org>, replay <proposal> [runs], jobs <proposal> <employer>, proposal <code>, reinterpret <code>, career-state, propose, acquisitions [n], pipeline [area], find <text>, sync-preview, lifecycle-preview, brief, area-status [area], waiting, mcp-manifest, events [n], tick-preview, lessons [n], learning-preview, exceptions, live [n], live-acceptance, reliability [days | since <ISO time>], failures [days].` };
     }
 }
 //# sourceMappingURL=finagai-job.js.map
