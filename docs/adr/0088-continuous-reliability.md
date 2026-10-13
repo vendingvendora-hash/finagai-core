@@ -225,3 +225,18 @@ quiet hours (03:20 ET). Its tick is now pinned to daytime.
     evidence citation, fails them.
   - `test/unit/phase8.test.ts`.
   - Full suites: 525 unit, 285 integration, all passing. No migration; the MCP tool surface is unchanged.
+
+## Increment 1: PASS (2026-10-13 16:33Z, hotfix 38, Core `fcf2d75a1f83`, started 16:03:31Z)
+| Criterion | Live evidence |
+|---|---|
+| Hourly self-check passes, verdict readable | `reliability_checked` 2176 (seq 2145) at 16:33:36Z. Shows `passed: 10`, `allPass: false` (the two email chains are pending; that is not a failure) and `failing: []`. Version `fcf2d75a1f83`. Cites tick 2175. |
+| stateEventQuality | PASS in the post-deploy window (live-acceptance at 16:05:57Z, 0 violations) |
+| Mac step events carry their unit of work | Read-only canary task 136, run through the normal path. `control_step_proposed` 2164 cites 2162 (`work_invoked mac:/control/next`). `control_step_ran` 2166 cites 2165. `control_task_done` 2168 cites 2167. |
+| The exception and escalation resolve themselves after the passing check | 2177 `exception_resolved` reliability:stateEventQuality ("condition cleared"). 2178 `escalation_resolved` exception:reliability:stateEventQuality:1 ("no longer needed", before {status open}). Both in the same tick. |
+| Nothing waiting on Julian | needs-Julian is empty, and exceptions are 0 open |
+| No idle-Mac exception | No mac_offline exception since the deploy. The Mac was online throughout, so a natural sleep has not occurred yet. Covered by the integration test, and by deploying the change (the detector no longer emits it). |
+| Mac offline with work waiting | That path is unchanged and is covered by the integration test. It cannot be exercised live without making Julian's Mac unavailable while a task waits. |
+| Scheduled-job visibility | `job_finished` 2099: daily_maintenance at 07:00Z, succeeded, correlation = its run id |
+| `call_tool` exclusion | 0 failures in 53 calls in the report window |
+
+Increment 2 is released as hotfix 39.
