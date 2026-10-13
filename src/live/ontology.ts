@@ -42,6 +42,7 @@ const RULES: Record<string, Rule> = {
   objective_set: () => F("objective", "created"),
   project_placed: () => F("relationship", "created"),
   project_completed: () => F("project", "state_changed"),
+  project_archived: () => F("entity", "archived"),
   project_reopened: () => F("project", "state_changed"),
   bootstrap_applied: () => F("workflow", "completed", { verified: true }),
   // waits / follow-ups

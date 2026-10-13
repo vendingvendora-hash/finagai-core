@@ -12,11 +12,13 @@ import { join } from "node:path";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { materialize } from "../../eval/runner/j3cases.js";
+import { createArea } from "../../src/cos/areas.js";
 import { ensureArea, executiveBriefV2 } from "../../src/cos/operating.js";
 import { appendEvent, withCause } from "../../src/db/index.js";
 import { runTick } from "../../src/events/index.js";
 import { WORKFLOW_ESCALATION_TTL_DAYS } from "../../src/events/engine.js";
 import { runStateCanary } from "../../src/live/canary.js";
+import { runExceptions } from "../../src/exceptions/index.js";
 import { reliabilityReport } from "../../src/live/reliability.js";
 import { publish } from "../../src/live/stream.js";
 import type { AreaModule, EngineCtx } from "../../src/events/types.js";
@@ -44,6 +46,9 @@ describe.skipIf(!admin || !migT || !appT)("Phase 8 increment 2 (ADR-088)", () =>
     const job = (await q(`SELECT o.status, o.archived_at, a.name AS area, o.source FROM opportunity o JOIN area a ON a.id = o.area_id WHERE o.id = $1`, [r.jobId]))[0];
     expect(job).toEqual(expect.objectContaining({ status: "withdrawn", area: "Finagai Test", source: "canary" }));
     expect(job.archived_at).toBeTruthy();                                                        // archived, never deleted
+    // the project's archival is its own event (live 16:56Z: it was a second "project_completed")
+    expect((await q(`SELECT action FROM event WHERE entity_type = 'project' AND entity_id = (SELECT project_id FROM opportunity WHERE id = $1) ORDER BY id`, [r.jobId])).map((x) => x.action))
+      .toEqual(["create", "project_completed", "project_archived"]);
     expect((await q(`SELECT state FROM followup WHERE opportunity_id = $1`, [r.jobId])).map((f) => f.state)).toEqual(["done"]);
     // attributed to Finagai itself, never to Julian
     expect((await q(`SELECT DISTINCT actor FROM event WHERE entity_id = $1 AND entity_type = 'opportunity'`, [r.jobId])).map((x) => x.actor).sort()).toEqual(["cos", "system"]);
@@ -52,6 +57,9 @@ describe.skipIf(!admin || !migT || !appT)("Phase 8 increment 2 (ADR-088)", () =>
     const brief = await executiveBriefV2(pool);
     expect(JSON.stringify(brief.changes)).not.toMatch(/FINAGAI-CANARY|State Path Canary/);
     expect(brief.decisions).toEqual([]);
+    // live 2026-10-13: the test Area itself still reached the brief ("Finagai Test is yellow: no open objective",
+    // "area created: Finagai Test") — Finagai's own testing is never news, risk or noise for Julian
+    expect(JSON.stringify(brief)).not.toMatch(/Finagai Test/);
   }, 60_000);
 
   it("the engine runs it once a day, records the verdict, and two failed runs are a Finagai-owned exception citing them", async () => {
@@ -124,4 +132,37 @@ describe.skipIf(!admin || !migT || !appT)("Phase 8 increment 2 (ADR-088)", () =>
     expect(brief.risks.filter((x) => /Finagai reliability/.test(x))).toEqual([expect.stringMatching(/^Finagai reliability \(last 24 h\) is degraded: .*internal canary failed in 2 of \d+ runs/)]);
     expect(brief.decisions).toEqual([]);                                                          // a risk, never a task for Julian
   });
+
+  it("every detector-opened exception cites what tripped it — events where they exist, the tick ledger or meter where not (live 2026-10-13)", async () => {
+    const now = new Date();
+    const opened = async (key: string) => (await q(`SELECT cause_ids, after FROM event WHERE action = 'exception_opened' AND after->>'key' = $1 ORDER BY id DESC LIMIT 1`, [key]))[0];
+    // a watcher failing three polls in a row: the failing ticks are named
+    for (let i = 0; i < 3; i++) await q(`INSERT INTO event_tick (trigger, status, started_at, finished_at, stats) VALUES ('interval', 'done', now() + ($1 || ' seconds')::interval, now(), $2::jsonb)`,
+      [String(i + 1), JSON.stringify({ watchers: [{ name: "testwatch", polled: true, problems: ["ECONNRESET talking to the source"] }] })]);
+    // a sleeping Mac with a Mac task waiting: the waiting task is the evidence
+    await q(`INSERT INTO mac_runtime (id, last_heartbeat_at) VALUES ('primary', now() - interval '40 minutes') ON CONFLICT (id) DO UPDATE SET last_heartbeat_at = EXCLUDED.last_heartbeat_at`);
+    const task = (await q(`INSERT INTO control_task (request, status, created_at) VALUES ('export the chart', 'active', now() - interval '40 minutes') RETURNING id`))[0];
+    const taskEv = await appendEvent(pool, { actor: "julian", action: "control_task_created", entityType: "control_task", entityId: task.id, after: { request: "export the chart" } });
+    // an event that gave up after 5 attempts: its last event on the stream
+    const dl = (await q(`INSERT INTO inbound_event (occurred_at, source, kind, external_id, summary, payload, status, attempts, routes, reason, received_at)
+        VALUES (now() - interval '3 hours', 'test', 'mail.received', 'dl-p8', 'stuck mail', '{}'::jsonb, 'failed', 5, '[]'::jsonb, 'boom', now() - interval '3 hours') RETURNING id`))[0];
+    const dlEv = await appendEvent(pool, { actor: "system", action: "evidence_routed", entityType: "inbound_event", entityId: dl.id, after: { reason: "boom" } });
+    // an Area red because a project has no next step: the project's last event
+    const area = await createArea(pool, { name: `Breach ${Date.now()}`, policy: { max_projects_without_next_action: 0 } });
+    const proj = (await q(`INSERT INTO project (name, status, area_id) VALUES ('stale project', 'active', $1) RETURNING id`, [area.id]))[0];
+    const projEv = await appendEvent(pool, { actor: "julian", action: "create", entityType: "project", entityId: proj.id, areaId: area.id, after: { name: "stale project" } });
+    await runExceptions(pool, new Date(now.getTime() + 10_000), false, { budget: async () => ({ monthToDateUsd: 30, targetUsd: 30, ceilingUsd: 36 }) });
+
+    const w = await opened("watcher:testwatch");
+    expect(w.after.evidenceRefs).toEqual(expect.objectContaining({ problem: "ECONNRESET talking to the source" }));
+    expect(w.after.evidenceRefs.failingTicks).toHaveLength(3);
+    const mac = await opened("mac:offline:work");
+    expect(mac.cause_ids.map(Number)).toEqual([taskEv]);
+    expect(mac.after.evidence).toEqual([taskEv]);
+    expect((await opened("events:dead_letter")).cause_ids.map(Number)).toEqual([dlEv]);
+    expect((await opened("budget:near")).after.evidenceRefs.meter).toEqual(expect.objectContaining({ monthToDateUsd: 30, ceilingUsd: 36 }));
+    expect((await opened(`area:${area.id}`)).cause_ids.map(Number)).toContain(projEv);
+    await q(`UPDATE control_task SET status = 'cancelled' WHERE id = $1`, [task.id]);
+    await q(`UPDATE mac_runtime SET last_heartbeat_at = now() WHERE id = 'primary'`);
+  }, 60_000);
 });

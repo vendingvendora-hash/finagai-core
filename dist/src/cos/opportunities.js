@@ -434,7 +434,8 @@ export async function archiveTestJob(db, jobId) {
     if (pid) {
         const before = await rowState(db, "project", pid);
         await db.query(`UPDATE project SET status = 'completed', archived_at = now(), updated_at = now() WHERE id = $1`, [pid]);
-        await recordTransition(db, { actor: "cos", action: "project_completed", table: "project", id: pid, before, context: { reason: "test fixture job removed" } });
+        // Phase 8 live (canary 2026-10-13 16:56Z, event 2200): this is an archival, not a second completion
+        await recordTransition(db, { actor: "cos", action: "project_archived", table: "project", id: pid, before, context: { reason: "test fixture job removed" } });
     }
     const beforeJob = await rowState(db, "opportunity", jobId);
     await db.query(`UPDATE opportunity SET archived_at = now(), updated_at = now() WHERE id = $1`, [jobId]);

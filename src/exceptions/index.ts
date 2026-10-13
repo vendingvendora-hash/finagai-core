@@ -66,7 +66,8 @@ export async function runExceptions(pool: pg.Pool, now: Date, dryRun: boolean, d
         existing.set(d.key, row);
         await recordTransition(pool, { actor: "cos", action: "exception_opened", table: "operating_exception", id: String(row.id), before, areaId: d.areaId ?? null,
           ...(d.evidence?.length ? { causeIds: d.evidence } : {}),
-          context: { key: d.key, owner: d.owner, severity: d.severity, summary: d.summary, detector: d.detector, occurrence: Number(row.occurrences ?? 1) } });
+          context: { key: d.key, owner: d.owner, severity: d.severity, summary: d.summary, detector: d.detector, occurrence: Number(row.occurrences ?? 1),
+            ...(d.evidence?.length ? { evidence: d.evidence } : {}), ...(d.evidenceRefs ? { evidenceRefs: d.evidenceRefs } : {}) } });
       } else existing.set(d.key, { key: d.key, first_seen_at: now, remediation_attempts: 0, last_remediation_at: null, status: "open" });
     } else if (!dryRun) {
       const before = await rowState(pool, "operating_exception", String(r.id));

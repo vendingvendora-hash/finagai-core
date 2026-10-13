@@ -162,7 +162,7 @@ export const EVENT_SEMANTICS = {
     career_synced: "occurrence", bootstrap_applied: "occurrence", governance_approval_refused: "occurrence", lesson_proposed: "occurrence",
     learning_ran: "occurrence", lifecycle_error: "occurrence",
     // transitions (before/after required)
-    update: "transition", set_project: "transition", project_placed: "transition", project_completed: "transition", project_reopened: "transition",
+    update: "transition", set_project: "transition", project_placed: "transition", project_completed: "transition", project_archived: "transition", project_reopened: "transition",
     opportunity_status: "transition", opportunity_updated: "transition", opportunity_archived: "transition", employer_updated: "transition",
     followup_updated: "transition", followup_linked: "transition", followup_waiting: "transition", followup_done: "transition",
     followup_cancelled: "transition", followup_overdue: "transition",

@@ -93,7 +93,7 @@ export async function runStateCanary(pool: pg.Pool, now = new Date()): Promise<C
     try {
       const a = await unit("cleanup", () => archiveTestJob(pool, jobId!));
       const testArea = String((await pool.query(`SELECT area_id FROM opportunity WHERE id = $1`, [jobId])).rows[0]?.area_id ?? "");
-      add("cleanup", await verify(pool, a.correlationId, testArea, [{ action: "opportunity_archived", entity: "opportunity" }]));
+      add("cleanup", await verify(pool, a.correlationId, testArea, [{ action: "opportunity_archived", entity: "opportunity" }, { action: "project_archived", entity: "project" }]));
     } catch (e) { fail("cleanup", e); }
   }
   return { ok: steps.length > 0 && steps.every((s) => s.ok), jobId, label, steps };

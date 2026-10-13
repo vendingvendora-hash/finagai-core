@@ -210,6 +210,11 @@ export async function areaStatus(pool: pg.Pool, areaName?: string | null, now = 
  */
 export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
   await sweepOverdue(pool, now);
+  // Finagai's own acceptance tests and daily canary live in the "Finagai Test" Area — never news, risk or noise for
+  // Julian (Phase 8 live 2026-10-13: "Finagai Test is yellow: no open objective" and "area created: Finagai Test" still
+  // reached the brief). A decision Finagai genuinely needs from him about test data still reaches him as a decision.
+  // (a placeholder id when there is no test Area: "x IS DISTINCT FROM NULL" would drop every row whose Area is null)
+  const testArea = ((await pool.query(`SELECT id FROM area WHERE name = 'Finagai Test'`)).rows[0]?.id as string | undefined) ?? "00000000-0000-0000-0000-000000000000";
   const day = 86_400_000;
   const decisions: string[] = [];
   for (const t of (await pool.query(`SELECT code, awaiting_kind, awaiting_reason, expires_at FROM control_task WHERE status IN ('waiting_approval','paused') ORDER BY awaiting_since NULLS LAST LIMIT 10`)).rows)
@@ -225,7 +230,8 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
   for (const d of (sync?.decisions ?? []).slice(0, 5)) decisions.push(`Career: ${d}`);
 
   const blocked: string[] = [];
-  for (const f of (await pool.query(`SELECT counterparty, summary, due_at FROM followup WHERE state = 'overdue' ORDER BY due_at LIMIT 10`)).rows)
+  for (const f of (await pool.query(`SELECT f.counterparty, f.summary, f.due_at FROM followup f LEFT JOIN project p ON p.id = f.project_id
+      WHERE f.state = 'overdue' AND COALESCE(f.area_id, p.area_id) IS DISTINCT FROM $1::uuid ORDER BY f.due_at LIMIT 10`, [testArea])).rows)
     blocked.push(`Overdue: ${f.summary} (due ${new Date(f.due_at).toISOString().slice(0, 10)})`);
   // Needs-review results are blocked work; expired waits are a CHANGE (compressed), not a decision — live: five
   // days-old test tasks crowded the brief as "5 things need you".
@@ -235,7 +241,7 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
       AND EXISTS (SELECT 1 FROM control_step s WHERE s.task_id = t.id AND s.status = 'done' AND s.kind = ANY($1::text[])) LIMIT 5`, [STATE_CHANGING_KINDS])).rows)
     blocked.push(`Task ${t.code} needs your review: ${String(t.result_summary ?? "").slice(0, 140)}`);
   const exp = (await pool.query(`SELECT array_agg(code ORDER BY code) AS codes FROM control_task WHERE status = 'expired' AND updated_at > now() - interval '3 days'`)).rows[0]?.codes as string[] | null;
-  const areas = (await pool.query(`SELECT name FROM area WHERE archived_at IS NULL AND status = 'active' ORDER BY name`)).rows;
+  const areas = (await pool.query(`SELECT name FROM area WHERE archived_at IS NULL AND status = 'active' AND id IS DISTINCT FROM $1::uuid ORDER BY name`, [testArea])).rows;
   const health = [];
   for (const a of areas) { const s = await areaStatus(pool, a.name as string, now); if (!("error" in s)) health.push(s); }
   // Phase 7: a red Area is Finagai's to reconcile (management by exception) — a risk, not Julian's blocked work; the
@@ -243,11 +249,9 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
   const redAreas = health.filter((s) => s.color === "red").map((s) => `${s.area} is RED: ${s.breaches.join("; ")} — Finagai is reconciling it`);
 
   const changes: string[] = [];
-  // Finagai's own acceptance tests and daily canary live in the "Finagai Test" Area — never news for Julian.
-  const testArea = ((await pool.query(`SELECT id FROM area WHERE name = 'Finagai Test'`)).rows[0]?.id as string | undefined) ?? null;
   if (exp?.length) changes.push(`${exp.length} stale Mac task(s) expired unanswered (${exp.join(", ")}) — say "resume <code>" only if still wanted`);
   for (const e of (await pool.query(`SELECT action, after FROM event WHERE action IN ('followup_done','area_created','objective_set','project_placed') AND occurred_at > now() - interval '48 hours'
-      AND area_id IS DISTINCT FROM $1::uuid ORDER BY occurred_at DESC LIMIT 8`, [testArea])).rows)
+      AND area_id IS DISTINCT FROM $1::uuid AND NOT (action = 'area_created' AND entity_id IS NOT DISTINCT FROM $1::uuid) ORDER BY occurred_at DESC LIMIT 8`, [testArea])).rows)
     changes.push(`${String(e.action).replace(/_/g, " ")}${e.after?.outcome ? `: ${e.after.outcome}` : e.after?.name ? `: ${e.after.name}` : ""}`);
   // Job pipeline movement (evidence or Julian): status changes per job, and projects the lifecycle closed.
   for (const e of (await pool.query(`SELECT ev.before, ev.after, o.org, o.title, o.requisition_id FROM event ev JOIN opportunity o ON o.id = ev.entity_id
@@ -264,7 +268,8 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
   if (closedProjects) changes.push(`${closedProjects} job project(s) closed by the lifecycle (rejected, withdrawn, or no response and nobody to nudge — they stay in the pipeline)`);
 
   const risks: string[] = [];
-  for (const f of (await pool.query(`SELECT counterparty, summary, due_at FROM followup WHERE state IN ('open','waiting') AND due_at < now() + interval '3 days' ORDER BY due_at LIMIT 8`)).rows)
+  for (const f of (await pool.query(`SELECT f.counterparty, f.summary, f.due_at FROM followup f LEFT JOIN project p ON p.id = f.project_id
+      WHERE f.state IN ('open','waiting') AND f.due_at < now() + interval '3 days' AND COALESCE(f.area_id, p.area_id) IS DISTINCT FROM $1::uuid ORDER BY f.due_at LIMIT 8`, [testArea])).rows)
     risks.push(`${f.summary} due ${new Date(f.due_at).toISOString().slice(0, 10)}`);
   // Phase 5: a silent event loop means nothing is being noticed — that is itself a risk to surface.
   const lastTick = (await pool.query(`SELECT max(started_at) AS at FROM event_tick WHERE status IN ('done','running')`)).rows[0]?.at as Date | null;
@@ -274,7 +279,7 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
   // Phase 7 (ADR-086): exceptions Finagai is handling itself are risks/changes, never decisions; what only Julian can
   // clear arrives as an escalation above. Recently cleared problems are compressed into one line.
   risks.push(...redAreas);
-  const exs = await pool.query(`SELECT owner, severity, summary, detector FROM operating_exception WHERE status = 'open' ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END LIMIT 8`).catch(() => ({ rows: [] as Array<{ owner: string; severity: string; summary: string; detector: string }> }));
+  const exs = await pool.query(`SELECT owner, severity, summary, detector FROM operating_exception WHERE status = 'open' AND area_id IS DISTINCT FROM $1::uuid ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END LIMIT 8`, [testArea]).catch(() => ({ rows: [] as Array<{ owner: string; severity: string; summary: string; detector: string }> }));
   for (const x of exs.rows) if (x.owner === "finagai" && x.severity !== "info" && x.detector !== "area_breach") risks.push(`${x.summary}`);
   // Phase 8 (ADR-088): Finagai's own reliability, from the Live State Stream — one line, only when it is NOT healthy.
   // It is a risk (Finagai's to fix), never a decision: a healthy platform adds nothing, a degraded one adds no task.
@@ -285,7 +290,8 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
   const completed = (await pool.query(`SELECT origin_message, verification_status FROM interaction WHERE state = 'completed' AND completed_at > now() - interval '24 hours' ORDER BY completed_at DESC LIMIT 6`)).rows
     .map((r) => `${String(r.origin_message ?? "").slice(0, 80)}${r.verification_status && r.verification_status !== "verified" ? ` (${r.verification_status})` : ""}`);
 
-  const rest = { areas: health.map((s) => `${s.area}: ${s.color}`), waitingOpen: Number((await pool.query(`SELECT count(*)::int AS n FROM followup WHERE state IN ('open','waiting')`)).rows[0].n) };
+  const rest = { areas: health.map((s) => `${s.area}: ${s.color}`), waitingOpen: Number((await pool.query(`SELECT count(*)::int AS n FROM followup f LEFT JOIN project p ON p.id = f.project_id
+    WHERE f.state IN ('open','waiting') AND COALESCE(f.area_id, p.area_id) IS DISTINCT FROM $1::uuid`, [testArea])).rows[0].n) };
   const handling = exs.rows.filter((x) => x.owner === "finagai" && x.severity !== "info").length;
   const headline = decisions.length + blocked.length === 0
     ? (handling ? `Nothing needs you right now — Finagai is handling ${handling} exception(s) itself.` : "Nothing needs you right now — all normal.")

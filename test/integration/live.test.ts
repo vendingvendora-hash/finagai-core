@@ -151,7 +151,7 @@ describe.skipIf(!admin || !migT || !appT)("Live State Stream (ADR-087)", () => {
   });
 
   it("consistent with authoritative state: replaying escalation events reproduces the snapshot's open set", async () => {
-    await pool.query(`INSERT INTO followup (area_id, summary, counterparty, state, due_at, origin) VALUES ($1, 'Waiting on Dana', 'Dana Lee', 'waiting', now() - interval '1 day', 'julian')`, [careerId]);
+    await pool.query(`INSERT INTO followup (area_id, summary, counterparty, state, due_at, origin) VALUES ($1, 'Waiting on Dana', 'Dana Lee', 'waiting', '2026-10-11T17:00:00Z', 'julian')`, [careerId]);   // due a day before the tick's clock (was now()-1d: a time bomb once real time passed 10-13 17:00Z)
     await runTick(pool, { now: new Date("2026-10-12T17:00:00Z"), dryRun: false }, { modules: [], exceptions: { budget: async () => ({ monthToDateUsd: 1, targetUsd: 30, ceilingUsd: 36 }) } }, "manual");
     const snap = await snapshot(pool);
     const stream = await all();

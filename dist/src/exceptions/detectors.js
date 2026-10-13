@@ -13,13 +13,13 @@ const ago = (now, d) => Math.round((now.getTime() - new Date(d).getTime()) / MIN
 const hhmm = (m) => (m >= 1440 ? `${Math.round(m / 1440)} d` : m >= 120 ? `${Math.round(m / 60)} h` : `${m} min`);
 /** A source Finagai watches keeps failing. Auth problems are Julian's (only he can re-authorize); others are Finagai's. */
 export const watcherFailing = async (db) => {
-    const ticks = (await db.query(`SELECT started_at, stats FROM event_tick WHERE status IN ('done','failed') ORDER BY started_at DESC LIMIT 12`)).rows;
+    const ticks = (await db.query(`SELECT id, started_at, stats FROM event_tick WHERE status IN ('done','failed') ORDER BY started_at DESC LIMIT 12`)).rows;
     const byWatcher = new Map();
     for (const t of ticks)
         for (const w of (t.stats?.watchers ?? [])) {
             if (!w.polled)
                 continue;
-            byWatcher.set(w.name, [...(byWatcher.get(w.name) ?? []), { at: t.started_at, problems: (w.problems ?? []).filter((p) => !BENIGN.test(p)) }]);
+            byWatcher.set(w.name, [...(byWatcher.get(w.name) ?? []), { tick: String(t.id), at: t.started_at, problems: (w.problems ?? []).filter((p) => !BENIGN.test(p)) }]);
         }
     const out = [];
     for (const [name, polls] of byWatcher) {
@@ -34,12 +34,16 @@ export const watcherFailing = async (db) => {
             continue;
         const problem = polls[0].problems[0];
         const since = polls[streak - 1].at;
+        // the failing polls are rows of the event loop's tick ledger; any stream events those ticks wrote are cited too
+        const failing = polls.slice(0, streak).map((p) => p.tick);
+        const evidence = ids((await db.query(`SELECT id FROM event WHERE correlation_id::text = ANY($1::text[]) AND action = 'work_invoked' ORDER BY id DESC LIMIT 5`, [failing])).rows);
+        const evidenceRefs = { failingTicks: failing.slice(0, 5), problem: problem.slice(0, 200) };
         if (AUTH.test(problem))
             out.push({ key: `watcher:${name}:auth`, detector: "watcher_failing", owner: "julian", severity: "critical", needs: "principal_reserved",
-                summary: `Finagai can't read ${name} — the account needs to be re-authorized (only you can do that)`, detail: `${streak} failed polls since ${new Date(since).toISOString()}: ${problem.slice(0, 200)}` });
+                summary: `Finagai can't read ${name} — the account needs to be re-authorized (only you can do that)`, detail: `${streak} failed polls since ${new Date(since).toISOString()}: ${problem.slice(0, 200)}`, evidence, evidenceRefs });
         else
             out.push({ key: `watcher:${name}`, detector: "watcher_failing", owner: "finagai", severity: "warning", escalateAfterMin: 24 * 60,
-                summary: `${name} watcher failing (${streak} polls in a row) — Finagai keeps retrying`, detail: problem.slice(0, 300) });
+                summary: `${name} watcher failing (${streak} polls in a row) — Finagai keeps retrying`, detail: problem.slice(0, 300), evidence, evidenceRefs });
     }
     return out;
 };
@@ -63,7 +67,10 @@ export const deadLetters = async (db) => {
     const r = (await db.query(`SELECT count(*)::int AS n, min(received_at) AS oldest, (array_agg(DISTINCT left(reason, 160)))[1:3] AS reasons FROM inbound_event WHERE status = 'failed' AND attempts >= 5`)).rows[0];
     if (!r?.n)
         return [];
-    return [{ key: "events:dead_letter", detector: "dead_letter", owner: "finagai", severity: "warning", remediation: "requeue_dead_events", escalateAfterMin: 24 * 60,
+    // the dead events themselves, as they appear on the stream (their last event: the failed routing / workflow)
+    const evidence = ids((await db.query(`SELECT max(e.id) AS id FROM inbound_event i JOIN event e ON e.entity_type = 'inbound_event' AND e.entity_id = i.id
+      WHERE i.status = 'failed' AND i.attempts >= 5 GROUP BY i.id ORDER BY 1 DESC LIMIT 5`)).rows);
+    return [{ key: "events:dead_letter", evidence, detector: "dead_letter", owner: "finagai", severity: "warning", remediation: "requeue_dead_events", escalateAfterMin: 24 * 60,
             summary: `${r.n} event(s) gave up after 5 attempts (oldest ${new Date(r.oldest).toISOString().slice(0, 10)}) — Finagai requeues them once their workflow works again`, detail: (r.reasons ?? []).join(" | ") }];
 };
 /** Model spend near the hard ceiling. Only Julian can raise the ceiling (governance; never learned or automated). */
@@ -74,11 +81,12 @@ export const budget = async (_db, _now, deps) => {
     const b = await read();
     const share = b.ceilingUsd > 0 ? b.monthToDateUsd / b.ceilingUsd : 0;
     const money = `$${b.monthToDateUsd.toFixed(2)} of the $${b.ceilingUsd.toFixed(2)} monthly ceiling`;
+    const evidenceRefs = { meter: { monthToDateUsd: b.monthToDateUsd, targetUsd: b.targetUsd, ceilingUsd: b.ceilingUsd, share: Math.round(share * 1000) / 1000 } };
     if (share >= 0.95)
-        return [{ key: "budget:ceiling", detector: "budget", owner: "julian", severity: "critical", needs: "principal_reserved",
+        return [{ key: "budget:ceiling", detector: "budget", owner: "julian", severity: "critical", needs: "principal_reserved", evidenceRefs,
                 summary: `Model spend is ${money} — at the ceiling Finagai stops calling models; only you can raise it`, detail: `target $${b.targetUsd}` }];
     if (share >= 0.8)
-        return [{ key: "budget:near", detector: "budget", owner: "finagai", severity: "info",
+        return [{ key: "budget:near", detector: "budget", owner: "finagai", severity: "info", evidenceRefs,
                 summary: `Model spend is ${money} (${Math.round(100 * share)}%) — Finagai is watching it`, detail: `target $${b.targetUsd}` }];
     return [];
 };
@@ -106,7 +114,13 @@ export const areaBreach = async (db) => {
         const mine = h.breaches.filter((b) => /no next action/.test(b));
         if (!mine.length)
             continue;
-        out.push({ key: `area:${a.id}`, detector: "area_breach", areaId: a.id, owner: "finagai", severity: "warning", remediation: "reconcile_area", escalateAfterMin: 24 * 60,
+        // the Area turning red on the stream, and the latest change to each active project in it with no next step
+        const evidence = ids((await db.query(`(SELECT id FROM event WHERE action = 'area_health_changed' AND entity_id = $1::uuid ORDER BY id DESC LIMIT 1)
+        UNION (SELECT max(e.id) AS id FROM project p JOIN event e ON e.entity_type = 'project' AND e.entity_id = p.id
+          WHERE p.area_id = $1::uuid AND p.archived_at IS NULL AND p.status = 'active'
+            AND NOT EXISTS (SELECT 1 FROM work_item t WHERE t.project_id = p.id AND t.status IN ('open','in_progress','waiting'))
+            AND NOT EXISTS (SELECT 1 FROM followup f WHERE f.project_id = p.id AND f.state IN ('open','waiting','overdue')) GROUP BY p.id ORDER BY 1 DESC LIMIT 4)`, [a.id])).rows.filter((r) => r.id != null));
+        out.push({ key: `area:${a.id}`, detector: "area_breach", areaId: a.id, evidence, owner: "finagai", severity: "warning", remediation: "reconcile_area", escalateAfterMin: 24 * 60,
             summary: `${h.name} is red: ${mine.join("; ")} — Finagai is reconciling it`, detail: h.breaches.join("; ") });
     }
     return out;
@@ -129,7 +143,10 @@ export const macOffline = async (db, now) => {
     const waiting = (await db.query(`SELECT count(*)::int AS n, min(created_at) AS oldest FROM control_task WHERE status = 'active' AND created_at < $1::timestamptz - interval '15 minutes'`, [now])).rows[0];
     if (!waiting?.n)
         return [];
-    return [{ key: "mac:offline:work", detector: "mac_offline", owner: "julian", severity: "warning", needs: "principal_reserved",
+    // the waiting Mac tasks (their latest event) — what makes a sleeping Mac Julian's problem
+    const evidence = ids((await db.query(`SELECT max(e.id) AS id FROM control_task t JOIN event e ON e.entity_type = 'control_task' AND e.entity_id = t.id
+      WHERE t.status = 'active' AND t.created_at < $1::timestamptz - interval '15 minutes' GROUP BY t.id ORDER BY 1 DESC LIMIT 5`, [now])).rows);
+    return [{ key: "mac:offline:work", evidence, evidenceRefs: { lastHeartbeatAt: new Date(m.last_heartbeat_at).toISOString() }, detector: "mac_offline", owner: "julian", severity: "warning", needs: "principal_reserved",
             summary: `Your Mac has been unreachable for ${hhmm(off)} and ${waiting.n} Mac task(s) are waiting — wake it / open the Finagai helper (only you can)`,
             detail: `oldest waiting task created ${new Date(waiting.oldest).toISOString()}` }];
 };
