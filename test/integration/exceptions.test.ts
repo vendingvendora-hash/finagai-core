@@ -11,7 +11,7 @@ import { ensureArea, executiveBriefV2 } from "../../src/cos/operating.js";
 import { appendEvent, PgDeliveryStore } from "../../src/db/index.js";
 import { proactivityStatus, runTick } from "../../src/events/index.js";
 import type { AreaModule } from "../../src/events/types.js";
-import { CLEAR_AFTER_MIN, exceptionsStatus } from "../../src/exceptions/index.js";
+import { exceptionsStatus } from "../../src/exceptions/index.js";
 import { addRule, listRules, removeRule } from "../../src/exceptions/rules.js";
 import { eventLoopWatchdog } from "../../src/exceptions/watchdog.js";
 import type { EmailMessage, EmailSender } from "../../src/notify/delivery.js";
@@ -30,6 +30,9 @@ const NONE: AreaModule[] = [];
 const tick = (now: Date, opts: { preview?: boolean; modules?: AreaModule[] } = {}) =>
   runTick(pool, { now, dryRun: !!opts.preview }, { modules: opts.modules ?? NONE, exceptions: { budget }, notify: { store: new PgDeliveryStore(pool), sender, timezone: "America/New_York" } }, opts.preview ? "preview" : "manual");
 const q = async (sql: string, p: unknown[] = []) => (await pool.query(sql, p)).rows;
+/** The next instant at or after d that is 11:00–20:59 in New York (outside the digest's quiet hours). */
+const daytime = (d: Date) => { const h = Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hourCycle: "h23" }).format(d));
+  return h >= 11 && h < 21 ? d : new Date(d.getTime() + (((11 - h) + 24) % 24) * 3_600_000); };
 const exc = async (key: string) => (await q(`SELECT * FROM operating_exception WHERE key = $1`, [key]))[0];
 let seq = 0;
 /** A past event-engine tick as the live loop records it (watchers / workflows in stats). */
@@ -122,19 +125,18 @@ describe.skipIf(!admin || !migT || !appT)("management by exception (Phase 7, ADR
     spend = 5; await tick(new Date(NOW.getTime() + 31.5 * H));
   });
 
-  it("the Mac: offline with work waiting is Julian's (only he can wake it); offline and idle is only noted", async () => {
+  it("the Mac: offline with work waiting is Julian's (only he can wake it); asleep with nothing waiting is normal", async () => {
     await q(`INSERT INTO mac_runtime (id, last_heartbeat_at) VALUES ('primary', now() - interval '2 hours') ON CONFLICT (id) DO UPDATE SET last_heartbeat_at = EXCLUDED.last_heartbeat_at`);
     const t = new Date(Date.now());
     await tick(t);
-    expect(await exc("mac:offline")).toEqual(expect.objectContaining({ owner: "finagai", severity: "info", status: "open" }));
-    const st = await exceptionsStatus(pool, t);                                     // an info note does not make "all normal" false
+    // Phase 8 (ADR-088, live 2026-10-13): an idle, sleeping Mac is not an exception (it only produced open/close noise)
+    expect(await exc("mac:offline")).toBeUndefined();
+    const st = await exceptionsStatus(pool, t);
     expect(st.headline).toBe("All normal — nothing is wrong.");
-    expect(st.noted).toEqual([expect.objectContaining({ summary: expect.stringMatching(/Mac has been unreachable/) })]);
+    expect(st.noted).toEqual([]);
     await q(`INSERT INTO control_task (request, status, created_at) VALUES ('make the September chart', 'active', now() - interval '40 minutes')`);
     const r = await tick(new Date(t.getTime() + 60_000));
     expect(r.escalations.opened).toEqual([expect.stringMatching(/^\[principal_reserved\] Your Mac has been unreachable for 2 h and 1 Mac task\(s\) are waiting/)]);
-    // the idle note was superseded by the work exception (one detector, one current condition) — not held open
-    expect((await exc("mac:offline")).status).toBe("resolved");
     await q(`UPDATE control_task SET status = 'cancelled' WHERE status = 'active'`);
     await q(`UPDATE mac_runtime SET last_heartbeat_at = now()`);
     const back = await tick(new Date(t.getTime() + 120_000));
@@ -177,7 +179,9 @@ describe.skipIf(!admin || !migT || !appT)("management by exception (Phase 7, ADR
     // an interview arrives
     const o = (await q(`INSERT INTO opportunity (kind, area_id, org, title, status, source, dedupe_key) VALUES ('job', $1, 'Altarum', 'Pricing Analyst', 'interviewing', 'test', 'altarum|pa') RETURNING id`, [careerId]))[0];
     await appendEvent(pool, { actor: "cos", action: "opportunity_status", entityType: "opportunity", entityId: o.id, before: { status: "applied" }, after: { status: "interviewing" } });
-    const t = new Date(Date.now() + 60_000);
+    // the notice goes out only outside quiet hours (22:00–07:00 ET): pin the tick to daytime so the test does not
+    // depend on when it runs (it failed when the suite ran at 03:20 ET)
+    const t = daytime(new Date(Date.now() + 60_000));
     const r = await tick(t);
     expect(r.exceptions!.rulesFired).toEqual(["Tell me when a Career job reaches interviewing"]);
     expect(r.escalations.opened).toEqual([expect.stringMatching(/^\[requested\] You asked to be told: “Tell me when a Career job reaches interviewing” — Altarum — Pricing Analyst is now interviewing/)]);
@@ -200,17 +204,15 @@ describe.skipIf(!admin || !migT || !appT)("management by exception (Phase 7, ADR
   it("an edge-triggered metric rule fires once when it becomes true and re-arms only after it clears", async () => {
     sent.length = 0;
     await q(`INSERT INTO mac_runtime (id, last_heartbeat_at) VALUES ('primary', now() - interval '2 hours') ON CONFLICT (id) DO UPDATE SET last_heartbeat_at = EXCLUDED.last_heartbeat_at`);
+    await q(`INSERT INTO control_task (request, status, created_at) VALUES ('rename the Q3 deck', 'active', now() - interval '40 minutes')`);
     const t = new Date(Date.now() + 5 * 60_000);
-    const r = await tick(t);                                                        // the Mac-offline (info) exception opens → "anything goes wrong" fires
+    const r = await tick(t);                                                        // the Mac is offline WITH work waiting → "anything goes wrong" fires
     expect(r.exceptions!.rulesFired).toEqual(["Tell me if anything goes wrong"]);
     const r2 = await tick(new Date(t.getTime() + 60_000));
     expect(r2.exceptions!.rulesFired).toEqual([]);                                  // still true: no repeat
+    await q(`UPDATE control_task SET status = 'cancelled' WHERE status = 'active'`);
     await q(`UPDATE mac_runtime SET last_heartbeat_at = now()`);
-    // Phase 8 (ADR-088): an idle-Mac note clears only after the Mac has stayed reachable for the hold period
-    await tick(new Date(t.getTime() + 120_000));
-    expect((await exc("mac:offline")).status).toBe("open");
-    await q(`UPDATE operating_exception SET last_seen_at = last_seen_at - make_interval(mins => $1) WHERE key = 'mac:offline'`, [CLEAR_AFTER_MIN.mac_offline! + 1]);
-    await tick(new Date(t.getTime() + 180_000));                                    // clears → re-arms
+    await tick(new Date(t.getTime() + 120_000));                                    // clears → re-arms
     expect((await q(`SELECT armed, fired_count FROM watch_rule WHERE statement = 'Tell me if anything goes wrong'`))[0]).toEqual({ armed: true, fired_count: 1 });
   });
 

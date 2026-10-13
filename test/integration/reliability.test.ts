@@ -17,7 +17,6 @@ import { appendEvent, withCause } from "../../src/db/index.js";
 import { PgJobLedger } from "../../src/db/jobRuns.js";
 import { runTick } from "../../src/events/index.js";
 import { addRule, removeRule } from "../../src/exceptions/rules.js";
-import { CLEAR_AFTER_MIN } from "../../src/exceptions/index.js";
 import { reliabilityReport } from "../../src/live/reliability.js";
 import { publish } from "../../src/live/stream.js";
 import type { AreaModule } from "../../src/events/types.js";
@@ -81,23 +80,24 @@ describe.skipIf(!admin || !migT || !appT)("Phase 8 continuous reliability (ADR-0
     expect((await q(`SELECT count(*)::int AS n FROM event WHERE action = 'job_finished'`))[0].n).toBe(2);
   });
 
-  it("a flapping condition stays ONE exception: the Mac waking for a heartbeat does not clear and reopen mac:offline", async () => {
-    expect(CLEAR_AFTER_MIN.mac_offline).toBeGreaterThan(35);                      // longer than the 30-min re-detection after a brief wake
+  it("an idle Mac sleeping and waking is not an exception: the night's dark wakes write nothing (live 2026-10-13)", async () => {
+    const before = (await q(`SELECT count(*)::int AS n FROM event WHERE action IN ('exception_opened','exception_resolved')`))[0].n;
     await q(`INSERT INTO mac_runtime (id, last_heartbeat_at) VALUES ('primary', now() - interval '40 minutes') ON CONFLICT (id) DO UPDATE SET last_heartbeat_at = EXCLUDED.last_heartbeat_at`);
-    await tick();
-    expect((await q(`SELECT status, occurrences FROM operating_exception WHERE key = 'mac:offline'`))[0]).toEqual({ status: "open", occurrences: 1 });
-    await q(`UPDATE mac_runtime SET last_heartbeat_at = now() WHERE id = 'primary'`);            // a brief wake
-    await tick();
-    expect((await q(`SELECT status FROM operating_exception WHERE key = 'mac:offline'`))[0].status).toBe("open");
-    await q(`UPDATE mac_runtime SET last_heartbeat_at = now() - interval '35 minutes' WHERE id = 'primary'`);   // asleep again
-    await tick();
-    expect((await q(`SELECT status, occurrences FROM operating_exception WHERE key = 'mac:offline'`))[0]).toEqual({ status: "open", occurrences: 1 });
-    expect((await q(`SELECT count(*)::int AS n FROM event WHERE action IN ('exception_opened','exception_resolved') AND after->>'key' = 'mac:offline'`))[0].n).toBe(1);
-    // back for good: it clears once the condition has been absent for the hold period
+    await tick();                                                                   // asleep
     await q(`UPDATE mac_runtime SET last_heartbeat_at = now() WHERE id = 'primary'`);
-    await q(`UPDATE operating_exception SET last_seen_at = now() - make_interval(mins => $1) WHERE key = 'mac:offline'`, [CLEAR_AFTER_MIN.mac_offline! + 1]);
+    await tick();                                                                   // a dark wake
+    await q(`UPDATE mac_runtime SET last_heartbeat_at = now() - interval '35 minutes' WHERE id = 'primary'`);
+    await tick();                                                                   // asleep again
+    expect(await q(`SELECT key FROM operating_exception WHERE detector = 'mac_offline'`)).toEqual([]);
+    expect((await q(`SELECT count(*)::int AS n FROM event WHERE action IN ('exception_opened','exception_resolved')`))[0].n).toBe(before);
+    // the same sleep WITH Mac work waiting is Julian's, and clears the moment the Mac is back
+    await q(`INSERT INTO control_task (request, status, created_at) VALUES ('export the chart', 'active', now() - interval '40 minutes')`);
     await tick();
-    expect((await q(`SELECT status FROM operating_exception WHERE key = 'mac:offline'`))[0].status).toBe("resolved");
+    expect((await q(`SELECT owner, status FROM operating_exception WHERE key = 'mac:offline:work'`))[0]).toEqual({ owner: "julian", status: "open" });
+    await q(`UPDATE control_task SET status = 'cancelled' WHERE status = 'active'`);
+    await q(`UPDATE mac_runtime SET last_heartbeat_at = now() WHERE id = 'primary'`);
+    await tick();
+    expect((await q(`SELECT status FROM operating_exception WHERE key = 'mac:offline:work'`))[0].status).toBe("resolved");
   }, 60_000);
 
   it("rule events carry the rule's Area (ADR-087 residual: watch_rule_removed had none)", async () => {

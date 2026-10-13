@@ -19,15 +19,7 @@ import { REMEDIES } from "./remedies.js";
 
 export const MAX_REMEDY_ATTEMPTS = 3;
 const REMEDY_GAP_MS = 30 * 60_000;
-/**
- * Phase 8 (ADR-088) — hysteresis for NOTED conditions. A Finagai-owned, info-level condition that comes and goes faster
- * than this is one ongoing note, not a new exception each time (live: the Mac waking for a single heartbeat and sleeping
- * again cleared and reopened mac:offline about every hour — two stream events per cycle, all night). Such a note
- * resolves once its condition has been absent this long. Never applied to anything Julian owns or that Finagai is
- * actively working (warning/critical): those clear the moment their condition does. A note whose detector now reports a
- * different condition (e.g. the Mac offline WITH work waiting) is superseded and resolves at once.
- */
-export const CLEAR_AFTER_MIN: Record<string, number> = { mac_offline: 45 };
+
 
 export interface ExceptionRun { open: number; opened: string[]; resolved: string[]; remedied: string[]; detectorProblems: string[]; needs: EscalationNeed[] }
 
@@ -50,9 +42,6 @@ export async function runExceptions(pool: pg.Pool, now: Date, dryRun: boolean, d
   for (const r of existing.values()) {
     if (r.status !== "open" || want.has(r.key)) continue;
     if ([...failedDetectors].some((d) => detectorName(d) === r.detector)) continue;
-    const hold = r.owner === "finagai" && r.severity === "info" ? CLEAR_AFTER_MIN[r.detector] : undefined;
-    const superseded = detected.some((d) => d.detector === r.detector);
-    if (hold && !superseded && r.last_seen_at && now.getTime() - new Date(r.last_seen_at).getTime() < hold * 60_000) continue;
     res.resolved.push(r.summary);
     if (!dryRun) {
       const before = await rowState(pool, "operating_exception", String(r.id));

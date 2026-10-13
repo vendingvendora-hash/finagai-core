@@ -150,3 +150,43 @@ The 24-hour report stays "degraded" until the pre-fix idle-Mac flaps (all before
   `work_invoked mac:/control/next`, that a read-only tool call creates no root, and that `stateEventQuality` PASSes.
   Removing the fix fails it. Full suites: 522 unit and 282 integration, all passing.
 - Increment 2 is held; it becomes hotfix 39 once the fix is live and Increment 1 passes.
+
+## Increment 1 final acceptance at 07:10Z (2026-10-13): two criteria failed, both fixed in hotfix 38
+**Passed:**
+- **Scheduled job on the stream.** `job_finished` 2099 (seq 2068) at 07:00:34Z: daily_maintenance, attempt 1,
+  succeeded, 48 ms, correlation `96bdbd8a…` (the run's id).
+- **call_tool routing.** Excluded from failures: 0 failures in 53 tool calls in the 24-hour report.
+- **Redaction / verdict visible.** Every hourly `reliability_checked` from 21:34Z on (2019 … 2097) shows `passed: 9`
+  and `allPass: false` as real values. The redaction scan PASSes.
+
+**Failed:**
+1. **stateEventQuality failed in every hourly self-check from 21:34Z** (10 of 11 runs).
+   - Cause: the Mac step events from Julian's 21:04Z task cited no cause (see above). The fix was built by 21:45Z but
+     **was not delivered to Julian** (builder error). The violations stayed in the self-check's window until the next
+     restart.
+   - The Finagai-owned `reliability:stateEventQuality` exception opened at 22:34Z. After an hour it was escalated
+     (2047) and emailed (2048, 23:34Z) to Julian as a judgment.
+   - This is exactly the behaviour designed for a guarantee that stays broken. It reached Julian only because the fix
+     sat undelivered.
+   - On deploy, Core restarts. The next self-check passes, and the exception and escalation resolve themselves.
+2. **The idle-Mac note still opened and cleared twice in one night after the hysteresis fix:**
+   - opened 2082 at 03:34Z;
+   - cleared 2086 at 04:19Z;
+   - opened 2093 at 05:34Z;
+   - cleared 2098 at 06:34Z.
+
+   - Cause: macOS dark wakes send a heartbeat every so often, so the Mac really is reachable between the gaps. Any
+     30-minute gap reopened a note that never meant anything was wrong or that anyone had something to do.
+   - Fix: a sleeping Mac with no Mac work waiting is **no longer an exception at all**.
+   - Unchanged: the Mac offline **with work waiting** is still Julian's (principal-reserved). It clears the moment the
+     Mac is back.
+   - Julian can still ask to be told via the `mac_offline_minutes` rule metric.
+   - The hold mechanism had no other use, so it was removed.
+
+**Also fixed:** a Phase 7 integration test that sends a digest depended on the time of day and failed when run inside
+quiet hours (03:20 ET). Its tick is now pinned to daytime.
+
+**Tests:**
+- Idle sleep / dark-wake / sleep writes no exception events. The same sleep **with** work opens Julian's exception,
+  which clears when the Mac is back. Restoring the idle note fails the test.
+- Full suites: 522 unit and 282 integration, all passing, including a night-time run.

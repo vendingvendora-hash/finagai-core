@@ -120,14 +120,21 @@ export const areaBreach: Detector = async (db) => {
   return out;
 };
 
-/** The Mac is unreachable while work waits for it. Waking it is physical — only Julian. */
+/**
+ * The Mac is unreachable while work waits for it. Waking it is physical — only Julian.
+ * Phase 8 (ADR-088, live 2026-10-13): a sleeping Mac with NO work waiting is normal, not an exception. As an "info" note
+ * it opened and cleared through the night (macOS dark wakes send a heartbeat every so often; any 30-minute gap reopened
+ * it — 7 opens in 24 h before a hysteresis fix, still 2 open/close cycles between 03:34Z and 06:34Z after it). Nothing
+ * was ever wrong and no one had anything to do, so it is no longer an exception at all. Julian can still ask to be told
+ * ("tell me when the Mac has been offline more than N minutes" — the mac_offline_minutes rule metric).
+ */
 export const macOffline: Detector = async (db, now) => {
   const m = (await db.query(`SELECT last_heartbeat_at FROM mac_runtime WHERE id = 'primary'`)).rows[0];
   if (!m) return [];
   const off = ago(now, m.last_heartbeat_at);
   if (off < 30) return [];
   const waiting = (await db.query(`SELECT count(*)::int AS n, min(created_at) AS oldest FROM control_task WHERE status = 'active' AND created_at < $1::timestamptz - interval '15 minutes'`, [now])).rows[0];
-  if (!waiting?.n) return [{ key: "mac:offline", detector: "mac_offline", owner: "finagai", severity: "info", summary: `Your Mac has been unreachable for ${hhmm(off)} — no Mac work is waiting` }];
+  if (!waiting?.n) return [];
   return [{ key: "mac:offline:work", detector: "mac_offline", owner: "julian", severity: "warning", needs: "principal_reserved",
     summary: `Your Mac has been unreachable for ${hhmm(off)} and ${waiting.n} Mac task(s) are waiting — wake it / open the Finagai helper (only you can)`,
     detail: `oldest waiting task created ${new Date(waiting.oldest).toISOString()}` }];
