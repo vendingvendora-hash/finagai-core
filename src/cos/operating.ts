@@ -231,7 +231,10 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
 
   const blocked: string[] = [];
   for (const f of (await pool.query(`SELECT f.counterparty, f.summary, f.due_at FROM followup f LEFT JOIN project p ON p.id = f.project_id
-      WHERE f.state = 'overdue' AND COALESCE(f.area_id, p.area_id) IS DISTINCT FROM $1::uuid ORDER BY f.due_at LIMIT 10`, [testArea])).rows)
+      WHERE f.state = 'overdue' AND COALESCE(f.area_id, p.area_id) IS DISTINCT FROM $1::uuid
+        -- live 2026-10-14 (Beth): an overdue wait already escalated to Julian is that one decision, not also blocked work
+        AND NOT EXISTS (SELECT 1 FROM escalation e WHERE e.status = 'open' AND (e.followup_id = f.id OR e.key LIKE 'overdue:' || f.id::text || ':%'))
+      ORDER BY f.due_at LIMIT 10`, [testArea])).rows)
     blocked.push(`Overdue: ${f.summary} (due ${new Date(f.due_at).toISOString().slice(0, 10)})`);
   // Needs-review results are blocked work; expired waits are a CHANGE (compressed), not a decision — live: five
   // days-old test tasks crowded the brief as "5 things need you".
@@ -246,7 +249,10 @@ export async function executiveBriefV2(pool: pg.Pool, now = new Date()) {
   for (const a of areas) { const s = await areaStatus(pool, a.name as string, now); if (!("error" in s)) health.push(s); }
   // Phase 7: a red Area is Finagai's to reconcile (management by exception) — a risk, not Julian's blocked work; the
   // individual items that need him (overdue waits, etc.) are escalated on their own.
-  const redAreas = health.filter((s) => s.color === "red").map((s) => `${s.area} is RED: ${s.breaches.join("; ")} — Finagai is reconciling it`);
+  // Overdue follow-ups are escalated one by one to whoever owns them; repeating them as "Area is RED … Finagai is
+  // reconciling it" said the same thing a third time, and wrongly (live 2026-10-14: Beth's wait is Julian's decision).
+  const redAreas = health.filter((s) => s.color === "red").map((s) => ({ area: s.area, mine: s.breaches.filter((b) => !/follow-up\(s\) overdue/.test(b)) }))
+    .filter((x) => x.mine.length).map((x) => `${x.area} is RED: ${x.mine.join("; ")} — Finagai is reconciling it`);
 
   const changes: string[] = [];
   if (exp?.length) changes.push(`${exp.length} stale Mac task(s) expired unanswered (${exp.join(", ")}) — say "resume <code>" only if still wanted`);

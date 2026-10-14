@@ -113,6 +113,11 @@ describe.skipIf(!admin || !migT || !appT)("event-driven proactivity (Phase 5, AD
     expect(sent[0]!.text).toMatch(/Only the items below need you; everything else Finagai is handling/);
     const b = await executiveBriefV2(pool, new Date("2026-10-15T15:00:00Z"));
     expect(b.decisions.join(" ")).toMatch(/\[Career\] No answer from Beth Young/);
+    // live 2026-10-14: the same wait was also "blocked" (headline "2 thing(s) need you") and "Career is RED … Finagai is
+    // reconciling it" — one thing for Julian, said once
+    expect(b.headline).toBe("1 thing(s) need you.");
+    expect(b.blocked.join(" ")).not.toMatch(/Beth Young/);
+    expect(b.risks.join(" ")).not.toMatch(/Career is RED/);
     const again = await tick(new Date("2026-10-15T15:06:00Z"));
     expect(again.escalations.opened).toEqual([]); expect(sent).toHaveLength(1);                   // never twice
     await resolveWaiting(pool, "Beth Young", "Beth replied: decision next week");
