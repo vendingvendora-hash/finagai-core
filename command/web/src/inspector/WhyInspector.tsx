@@ -98,7 +98,8 @@ export function WhyInspector(p: Props) {
           <h2 id="why-title" ref={titleRef} tabIndex={-1} className="why__title">{heading}</h2>
           <p className="why__status">{owner.kind === "julian"
             ? <><span className="owner-mark owner-mark--julian" aria-hidden="true">◆</span> Yours now · {owner.label}{areaName ? ` · ${areaName}` : ""}</>
-            : <>Recorded {fmtDateTime(model.root.at)}{areaName ? ` · ${areaName}` : ""}</>}</p>
+            : owner.kind === "none" ? <>Recorded {fmtDateTime(model.root.at)}{areaName ? ` · ${areaName}` : ""}</>
+            : <><span className="owner-mark owner-mark--finagai" aria-hidden="true">○</span> Open now · {nowPhrase(owner)}{areaName ? ` · ${areaName}` : ""}</>}</p>
 
           <section className="why__section" aria-labelledby="why-how">
             <h3 id="why-how" ref={howRef} tabIndex={-1} className="why__h">How it got here</h3>
@@ -182,7 +183,7 @@ function Owner({ o, root }: { o: OwnerNow; root: LiveEvent }) {
     case "wait": return o.wait.owner === "julian"
       ? <p><span className="owner-mark owner-mark--julian" aria-hidden="true">◆</span> <b>You</b> — {o.wait.summary}</p>
       : <p><span className="owner-mark owner-mark--finagai" aria-hidden="true">○</span> <b>Finagai</b> is watching it — waiting on {o.wait.counterparty ?? "someone"}{o.wait.due_at ? `, due ${fmtShortDay(o.wait.due_at)}` : ""}.</p>;
-    case "task": return <p><span className="owner-mark owner-mark--finagai" aria-hidden="true">○</span> <b>Finagai</b> — Mac task {o.task.code} is {o.task.status.replace(/_/g, " ")}.</p>;
+    case "task": return <p><span className="owner-mark owner-mark--finagai" aria-hidden="true">○</span> <b>Finagai</b> — {nowPhrase(o)}.</p>;
     case "exception": return o.exception.owner === "julian"
       ? <p><span className="owner-mark owner-mark--julian" aria-hidden="true">◆</span> <b>You</b> — {o.exception.summary}</p>
       : <p><span className="owner-mark owner-mark--finagai" aria-hidden="true">○</span> <b>Finagai</b> is handling it — {o.exception.summary}</p>;
@@ -190,6 +191,16 @@ function Owner({ o, root }: { o: OwnerNow; root: LiveEvent }) {
       <p>Nothing about this is open now.</p>
       {then && <p className="muted">When this was recorded, {then}.</p>}
     </>;
+  }
+}
+
+/** The current state of unfinished work, present tense, from the snapshot (OwnerNow), for the status line. */
+function nowPhrase(o: OwnerNow): string {
+  switch (o.kind) {
+    case "task": return `Mac task ${o.task.code} is ${o.task.status === "active" ? "running" : o.task.status.replace(/_/g, " ")}`;
+    case "wait": return o.wait.owner === "julian" ? "waiting on you" : `still waiting on ${o.wait.counterparty ?? "a reply"}`;
+    case "exception": return o.exception.owner === "julian" ? "needs you" : "Finagai is fixing it";
+    default: return "";
   }
 }
 

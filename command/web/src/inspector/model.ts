@@ -97,7 +97,7 @@ export function ownerNow(root: LiveEvent, view: CommandView, snapshot: Snapshot,
   const wait = snapshot.waits.find((w) => subjects.has(`followup:${w.id}`) && (w.area_id === null || !view.internalAreaIds.has(w.area_id)));
   if (wait) return { kind: "wait", wait };
   const taskCode = taskCodeOf(root, events);
-  const task = taskCode !== null ? snapshot.tasks.find((t) => t.code === taskCode) : undefined;
+  const task = taskCode !== null ? snapshot.tasks.find((t) => Number(t.code) === taskCode) : undefined;   // pg serves bigint codes as strings
   if (task) return { kind: "task", task };
   const key = String(((root.after ?? root.before) as Record<string, unknown> | null)?.key ?? "");
   const exception = key ? snapshot.exceptions.find((x) => x.key === key && (x.area_id === null || !view.internalAreaIds.has(x.area_id))) : undefined;

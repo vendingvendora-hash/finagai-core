@@ -26,7 +26,7 @@ import { loadConfig } from "../../src/config/index.js";
 import { ensureArea } from "../../src/cos/operating.js";
 import { closeFollowup, sweepOverdue } from "../../src/cos/followups.js";
 import { enterAwaitingHuman } from "../../src/concierge/human-wait.js";
-import { decideStep } from "../../src/pipelines/j6/control.js";
+import { cancelTask, decideStep } from "../../src/pipelines/j6/control.js";
 import { appendEvent } from "../../src/db/index.js";
 import { runTick } from "../../src/events/index.js";
 import type { AreaModule } from "../../src/events/types.js";
@@ -169,9 +169,10 @@ describe.skipIf(!admin || !migT || !appT || !haveUi)("Command screen in a browse
     expect(await text(".needs .card .card__kind")).toMatch(/Only you can do this · Career/);
     expect(await text(".needs-count")).toBe("1 needs you");
     expect(await text(".areas__row")).toMatch(/◆\s*Career/);
-    // Live activity: the decision as history ("became your decision"), ◆ because Needs you lists it right now
+    // Live activity: the open decision reads in its current state (from the snapshot), ◆ because it is Julian's now
     const bethUnit = page.locator(".activity .unit", { hasText: "No answer from Beth Young" });
-    await bethUnit.locator(".unit__title", { hasText: "— became your decision" }).waitFor({ timeout: 2_000 });
+    await bethUnit.locator(".unit__title", { hasText: "— waiting for you (only you can do this)" }).waitFor({ timeout: 2_000 });
+    expect(await bethUnit.getAttribute("data-state")).toBe("open");
     expect(await bethUnit.locator(".owner-mark--julian").count()).toBe(1);
     // ownership: Julian's card above the line, Finagai's wait below it (Beth's wait is not counted twice)
     const cardY = (await page.locator(".needs .card").first().boundingBox()).y, lineY = (await page.locator(".main > .ownership-line").boundingBox()).y;
@@ -220,6 +221,7 @@ describe.skipIf(!admin || !migT || !appT || !haveUi)("Command screen in a browse
     const story = page.locator(".activity .unit", { hasText: "No answer from Beth Young" });
     expect(await story.count()).toBe(1);
     expect(await story.locator(".unit__title").innerText()).toMatch(/— resolved \(follow-up done\)$/);
+    expect(await story.getAttribute("data-state")).toBe("done");
     expect(await story.locator(".owner-mark--julian").count()).toBe(0);
     expect(await page.locator(".activity").innerText()).not.toMatch(PRESENT_INSTRUCTION);
     await shot(page, "4-desktop-resumed");
@@ -256,20 +258,28 @@ describe.skipIf(!admin || !migT || !appT || !haveUi)("Command screen in a browse
     expect(await page.locator(".calm__statement").count()).toBe(0);
     expect(await text(".needs-count")).toBe("1 needs you");
     expect(await page.locator(".main").innerText()).not.toMatch(/Nothing needs you/);
-    // the wait is also one Live activity story, past tense, with ◆ because Needs you lists it right now
-    const story = page.locator(".activity .unit", { hasText: `Mac task ${t.code}:` });
-    await story.locator(".unit__title", { hasText: `Mac task ${t.code}: asked for your approval of step ${s.code}` }).waitFor({ timeout: 2_000 });
+    // the wait is also one Live activity story, in its CURRENT state (from the snapshot), with ◆ because it is Julian's now
+    const story = page.locator(".activity .unit", { hasText: `Mac task ${t.code}` });
+    await story.locator(".unit__title", { hasText: `Mac task ${t.code} — waiting for your approval of step ${s.code}: Report the macOS version` }).waitFor({ timeout: 2_000 });
+    expect(await story.getAttribute("data-state")).toBe("open");
+    expect(await story.locator(".unit__now").innerText()).toMatch(/Open now/);
     expect(await story.locator(".owner-mark--julian").count()).toBe(1);
     // Julian approves: the escalation resolves with the step, and Command is calm again
     expect((await decideStep(pool, s.code, true)).status).toBe("approved");
     await page.locator(".calm__statement").waitFor({ timeout: 3_000 });
     expect(await page.locator(".needs .card").count()).toBe(0);
-    // ... and the same story now says what happened — one item, not "Active" / "Changed" / "no longer needs you" fragments
-    await story.locator(".unit__title", { hasText: `Mac task ${t.code}: you approved step ${s.code}` }).waitFor({ timeout: 3_000 });
-    expect(await page.locator(".activity .unit", { hasText: `Mac task ${t.code}` }).count()).toBe(1);
+    // the task is still running (Core lists it active): it reads as running — not as a finished past-tense story — and
+    // what already happened stays visible as history; no ◆ (Finagai owns the next step)
+    await story.locator(".unit__title", { hasText: `Mac task ${t.code} — running: Report the macOS version (earlier: you approved step ${s.code})` }).waitFor({ timeout: 3_000 });
+    expect(await story.getAttribute("data-state")).toBe("open");
     expect(await story.locator(".owner-mark--julian").count()).toBe(0);
+    await shot(page, "7a-desktop-activity-running");
+    // it ends (a real lifecycle transition): now, and only now, it is past-tense history
+    expect((await cancelTask(pool, t.code)).status).toBe("cancelled");
+    await story.locator(".unit__title", { hasText: `Mac task ${t.code}: you approved step ${s.code}; task was cancelled` }).waitFor({ timeout: 3_000 });
+    expect(await story.getAttribute("data-state")).toBe("done");
+    expect(await page.locator(".activity .unit", { hasText: `Mac task ${t.code}` }).count()).toBe(1);   // one item, not lifecycle fragments
     expect(await page.locator(".activity").innerText()).not.toMatch(PRESENT_INSTRUCTION);
-    await q(`UPDATE control_task SET status = 'done' WHERE id = $1`, [t.id]);
   }, 30_000);
 
   it("Why inspector (Slice 3): Review opens it on the decision; the chain on screen is exactly Core's; technical details stay hidden; nothing in Core changes", async () => {

@@ -25,7 +25,21 @@ export interface Unit {
   rootEventId: number;
   /** how many units of work (correlations) this item consolidates */
   parts: number;
+  /** still in progress per Core's snapshot: the item then reads in its current state, not as finished history */
+  current: Current | null;
 }
+
+/** What Core's snapshot says is still in progress for a story's subject (see current.ts) — never read from history. */
+export interface Current {
+  /** present tense: "running", "waiting for your approval of step 412", "still waiting on Chimes", "Finagai is fixing it" */
+  phrase: string;
+  owner: "julian" | "finagai";
+  /** a Mac task's request as Core holds it now */
+  request?: string;
+  /** what it is, as Core holds it now (a wait's or a problem's summary) */
+  about?: string;
+}
+export type CurrentOf = (subject: string, evs: LiveEvent[]) => Current | null;
 
 /** Hidden by default (Meaningful mode): server low-value, routine traffic, Finagai's own checks. */
 const HIDDEN_CLASSES = new Set(["workflow.invoked", "system.checked", "evidence.ignored", "capability.measured", "notification.suppressed"]);
@@ -36,7 +50,7 @@ export function hiddenEvent(e: LiveEvent): boolean {
 const RANK: Record<string, number> = {
   "escalation.opened": 100, "escalation.resolved": 90, "approval.requested": 88, "authority.boundary_encountered": 85, "entity.state_changed": 80,
   "exception.opened": 75, "exception.cleared": 70, "workflow.failed": 68, "task.recovered": 66, "task.failed": 65, "wait.expired": 60, "wait.resolved": 58,
-  "wait.started": 55, "wait.cancelled": 54, "task.completed": 52, "task.created": 50, "task.state_changed": 50, "area.health_changed": 45, "rule.fired": 44, "lesson.learned": 42,
+  "wait.started": 55, "wait.cancelled": 54, "task.completed": 52, "task.cancelled": 52, "task.expired": 52, "task.created": 50, "task.state_changed": 50, "task.resumed": 50, "area.health_changed": 45, "rule.fired": 44, "lesson.learned": 42,
   "lesson.approved": 42, "lesson.rejected": 42, "lesson.proposed": 42, "procedure.discovered": 42, "evidence.attached": 40, "wait.updated": 35, "entity.created": 34,
   "entity.archived": 33, "project.state_changed": 32, "system.check_failed": 30, "evidence.classified": 15, "notification.delivered": 12, "escalation.notified": 10,
   "workflow.started": 5, "evidence.observed": 3,
@@ -55,6 +69,7 @@ const VERB: Record<string, string> = {
   "escalation.opened": "Became your decision", "escalation.resolved": "Decision resolved", "escalation.notified": "You were emailed",
   "exception.opened": "Finagai found a problem", "exception.cleared": "Problem cleared", "exception.remediated": "Finagai applied a fix",
   "task.recovered": "Recovered and continued", "task.failed": "A step failed", "task.completed": "Task finished", "task.created": "Task started", "task.state_changed": "Task state changed", "task.step_proposed": "Step proposed",
+  "task.cancelled": "Task cancelled", "task.expired": "Task expired", "task.resumed": "Task resumed",
   "evidence.attached": "New evidence", "evidence.observed": "Noticed", "evidence.classified": "Routed", "lesson.updated": "Learning updated", "lesson.learned": "Learned",
   "system.check_failed": "Self-check failed", "workflow.started": "Started", "workflow.completed": "Finished", "workflow.failed": "Workflow failed",
   "area.health_changed": "Area health changed", "notification.delivered": "Notice sent", "rule.fired": "Rule fired", "approval.requested": "Approval requested",
@@ -216,10 +231,12 @@ export function internalEvent(e: LiveEvent, internalAreaIds: Set<string>, links:
 /** Mac task status → past-tense phrase. */
 const TASK_STATUS: Record<string, string> = { done: "completed", failed: "failed", cancelled: "was cancelled", expired: "expired", active: "resumed", paused: "paused",
   waiting_approval: "waited for your approval" };
+/** Task lifecycle classes → the status they record (task.state_changed carries its own `status`). */
+const TASK_END: Record<string, string> = { "task.completed": "done", "task.cancelled": "cancelled", "task.expired": "expired", "task.failed": "failed", "task.resumed": "active", "task.recovered": "active" };
 /** A resolved Mac wait, by Core's recorded resolution. */
 const RESOLUTION: Array<[RegExp, (step: string | null) => string]> = [
   [/step approved/i, (st) => `you approved ${st ? `step ${st}` : "the step"}`], [/step declined/i, (st) => `you declined ${st ? `step ${st}` : "the step"}`],
-  [/cancelled/i, () => "you cancelled it"], [/expired/i, () => "your answer was not given before it expired"], [/resumed/i, () => "you resumed it"],
+  [/cancelled/i, () => "you cancelled it"], [/expired/i, () => "expired without your answer"], [/resumed/i, () => "you resumed it"],
 ];
 /** An open (or unresolved-in-view) Mac wait, by its key. */
 function macAsk(key: string): string {
@@ -285,7 +302,7 @@ function storyObjectsOf(e: LiveEvent): string[] {
  * `open` = what is open in Needs you right now (authoritative snapshot, see openSubjects): only those items carry ◆.
  * Ownership is never inferred from the history itself.
  */
-export function buildUnits(events: LiveEvent[], internalAreaIds: Set<string>, opts: { everything?: boolean; links?: Set<string>; open?: Set<string> } = {}): Unit[] {
+export function buildUnits(events: LiveEvent[], internalAreaIds: Set<string>, opts: { everything?: boolean; links?: Set<string>; open?: Set<string>; current?: CurrentOf } = {}): Unit[] {
   const everything = !!opts.everything;
   const links = opts.links ?? internalLinks(events, internalAreaIds);
   const open = opts.open ?? new Set<string>();
@@ -293,7 +310,7 @@ export function buildUnits(events: LiveEvent[], internalAreaIds: Set<string>, op
   // 1) stories: units of work whose most significant event is about the same object
   const stories = new Map<string, Raw[]>(); const lone: Raw[] = []; const minor: Raw[] = [];
   for (const r of raws) {
-    const subject = r.top ? subjectOf(r.top) : null;
+    const subject = unitSubject(r);
     if (subject && r.rank >= SHOW_THRESHOLD) { const g = stories.get(subject); if (g) g.push(r); else stories.set(subject, [r]); }
     else if (r.rank >= SHOW_THRESHOLD || (everything && r.steps.length)) lone.push(r);
     else minor.push(r);
@@ -315,18 +332,32 @@ export function buildUnits(events: LiveEvent[], internalAreaIds: Set<string>, op
     const top = topOf(steps);
     const topUnit = rs.find((r) => r.steps.includes(top))!;
     const sig = [...steps].reverse().find((e) => rankOf(e) >= SHOW_THRESHOLD) ?? top;
-    const title = (subject && (rs.length > 1 || subject.startsWith("control_task:")) ? storyTitle(subject, evs) : null) ?? titleOf(top, topUnit.evs);
+    const past = (subject && (rs.length > 1 || subject.startsWith("control_task:")) ? storyTitle(subject, evs) : null) ?? titleOf(top, topUnit.evs);
+    // unfinished work reads in its current state (from the snapshot); the past-tense story is for finished work only
+    const current = subject && opts.current ? opts.current(subject, evs) : null;
+    const title = current ? currentTitle(subject!, evs, current, past) : past;
     items.push({
       key, events: evs, steps, firstAt: steps[0]!.at, lastAt: steps[steps.length - 1]!.at, firstId: steps[0]!.eventId, lastId: steps[steps.length - 1]!.eventId,
       at: sig.at, atId: sig.eventId, area: steps.find((e) => e.area)?.area ?? null, title,
-      yours: !!subject && (open.has(subject) || evs.some((e) => e.domain === "escalation" && !!e.entity.id && open.has(`escalation:${e.entity.id}`))),
-      outcome: finalOutcome(steps), rank: rankOf(top), rootEventId: top.eventId, parts: rs.length,
+      yours: !!subject && (open.has(subject) || current?.owner === "julian" || evs.some((e) => e.domain === "escalation" && !!e.entity.id && open.has(`escalation:${e.entity.id}`))),
+      outcome: current ? null : finalOutcome(steps), rank: rankOf(top), rootEventId: top.eventId, parts: rs.length, current,
     });
   };
   for (const [k, rs] of stories) make(k, rs, k);
   for (const r of lone) make(r.key, [r], null);
   return items.sort((a, b) => b.atId - a.atId);
 }
+/** A unit's subject: its top event's — except that a Mac step belongs to its task's story when the unit names the task
+ *  (a step needing approval is `authority.boundary_encountered` on the step, recorded with the task's wait). */
+function unitSubject(r: Raw): string | null {
+  const s = r.top ? subjectOf(r.top) : null;
+  if (s?.startsWith("control_step:")) {
+    const t = r.evs.find((e) => e.entity.type === "control_task" && e.entity.id);
+    if (t) return `control_task:${t.entity.id}`;
+  }
+  return s;
+}
+
 /** The most significant step; on a tie the later one (the story's final word). */
 const topOf = (steps: LiveEvent[]) => steps.reduce((b, e) => (rankOf(e) >= rankOf(b) ? e : b), steps[0]!);
 
@@ -353,6 +384,30 @@ function finalOutcome(steps: LiveEvent[]): Unit["outcome"] {
   return null;
 }
 
+/**
+ * The title of work that is still in progress: what it is, then its CURRENT state (from the snapshot), present tense.
+ * "Mac task 141 — waiting for your approval of step 412: Report the macOS version" · "No answer from Beth Young by
+ * 2026-10-14 — waiting for you (only you can do this)" · "Waiting on Chimes … — still waiting on Chimes".
+ */
+function currentTitle(subject: string, evs: LiveEvent[], cur: Current, past: string): string {
+  const after = (e: LiveEvent | undefined) => (e?.after ?? e?.before ?? {}) as Record<string, unknown>;
+  if (subject.startsWith("control_task:")) {
+    const id = subject.slice("control_task:".length);
+    const created = evs.find((e) => e.class === "task.created");
+    const code = evs.map((e) => new RegExp(`^mac:(\\d+):.*@control_task:${id}$`).exec(String(after(e).key ?? ""))?.[1]).find(Boolean)
+      ?? (after(created).code != null ? String(after(created).code) : null);
+    const request = cur.request ?? (created ? String(after(created).request ?? "") : "");
+    const earlier = evs.filter((e) => e.class === "escalation.resolved").map((r) => {
+      const key = String(after(r).key ?? ""); const step = /:step:(\d+)@/.exec(key)?.[1] ?? null;
+      return RESOLUTION.find(([re]) => re.test(String(after(r).resolution ?? "")))?.[1](step) ?? null;
+    }).filter((x): x is string => !!x);
+    return `Mac task${code ? ` ${code}` : ""} — ${cur.phrase}${request ? `: ${clip(request, 80)}` : ""}${earlier.length ? ` (earlier: ${earlier.slice(-2).join("; ")})` : ""}`;
+  }
+  const opened = [...evs].reverse().find((e) => e.class === "escalation.opened");
+  const about = opened ? decisionText(opened) : cur.about ?? "";
+  return `${clip(about || past, 110)} — ${cur.phrase}`;
+}
+
 /** A story's title, by its final recorded outcome, in the past tense. Null when the top event says it best. */
 function storyTitle(subject: string, evs: LiveEvent[]): string | null {
   const after = (e: LiveEvent | undefined) => (e?.after ?? e?.before ?? {}) as Record<string, unknown>;
@@ -373,10 +428,10 @@ function storyTitle(subject: string, evs: LiveEvent[]): string | null {
       return RESOLUTION.find(([re]) => re.test(String(after(resolved).resolution ?? "")))?.[1](step) ?? `${macAsk(key)} (resolved)`;
     });
     if (!decisions.length && evs.some((e) => e.class === "task.state_changed" && after(e).status === "waiting_approval")) clauses.push("waited for your approval");
-    const lastState = [...evs].reverse().find((e) => e.class === "task.completed" || (e.class === "task.state_changed" && typeof after(e).status === "string"));
-    const status = lastState?.class === "task.completed" ? "done" : String(after(lastState).status ?? "");
+    const lastState = [...evs].reverse().find((e) => TASK_END[e.class] !== undefined || (e.class === "task.state_changed" && typeof after(e).status === "string"));
+    const status = lastState ? TASK_END[lastState.class] ?? String(after(lastState).status ?? "") : "";
     const lastClause = clauses[clauses.length - 1] ?? "";
-    const redundant = (status === "waiting_approval" && /approval/.test(lastClause)) || (status === "active" && decisions.length > 0) || (status === "cancelled" && /cancelled/.test(lastClause))
+    const redundant = (status === "waiting_approval" && /approval/.test(lastClause)) || (status === "active" && decisions.length > 0) || (status === "cancelled" && /cancelled/.test(lastClause)) || (status === "expired" && /expired/.test(lastClause))
       || (status === "paused" && /paused|asked/.test(lastClause));
     if (TASK_STATUS[status] && !redundant) clauses.push(`task ${TASK_STATUS[status]}`);
     if (!clauses.length) clauses.push(created ? "started" : "changed state");

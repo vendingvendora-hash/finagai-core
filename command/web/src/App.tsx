@@ -94,7 +94,7 @@ export function App() {
       <TopBar conn={s.conn} disconnectedAt={s.disconnectedAt} health={view?.health ?? "unknown"} healthWhy={view?.healthWhy ?? []} needs={view?.needs.length ?? 0}
         asOf={s.snapshotAt} quietHeld={quietHeld} />
       <Banner conn={s.conn} disconnectedAt={s.disconnectedAt} caughtUp={s.caughtUp} now={now} signedOut={s.signedOut} loadError={s.loadError} />
-      {view ? <CommandScreen view={view} events={s.events} arrivedLive={s.arrivedLive} conn={s.conn} now={now} gaps={s.gaps}
+      {view && s.snapshot ? <CommandScreen view={view} snapshot={s.snapshot} events={s.events} arrivedLive={s.arrivedLive} conn={s.conn} now={now} gaps={s.gaps}
         everything={everything} {...(DIAG ? { setEverything } : {})} lastSeen={lastSeen} links={links} reliabilityWhy={s.reliability?.why ?? []} reliabilityVerdict={s.reliability?.verdict ?? null}
         onWhy={openWhy} />
         : !s.signedOut && !s.loadError && <p className="loading">Loading Finagai's state…</p>}

@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Conn } from "../live/store";
 import { calmSentences, canCannot, NEEDS_LABEL, type CommandView } from "../model/command";
-import type { LiveEvent, SnapshotNeed } from "../model/types";
+import type { LiveEvent, Snapshot, SnapshotNeed } from "../model/types";
+import { currentResolver } from "../model/current";
 import { buildUnits, historyText, openSubjects, transitionOf, verbOf, type Unit } from "../model/units";
 import { withWhy, type WhyTarget } from "../inspector/model";
 import { fmtAgo, fmtDay, fmtDue, fmtShortDay, fmtTime, fmtWhen } from "../format";
 
 interface Props {
-  view: CommandView; events: LiveEvent[]; arrivedLive: Record<number, number>; conn: Conn; now: number;
+  view: CommandView; snapshot: Snapshot; events: LiveEvent[]; arrivedLive: Record<number, number>; conn: Conn; now: number;
   gaps: Array<{ from: number; to: number; missed: number }>; everything: boolean; setEverything?: (v: boolean) => void;
   lastSeen: number; reliabilityWhy: string[]; reliabilityVerdict: string | null; links: Set<string>;
   /** open the read-only Why inspector (Review → the item; Why? → how it got here) */
@@ -23,8 +24,10 @@ export function CommandScreen(p: Props) {
   // the rail covers 12 hours; older events are kept only as context (linking units to internal test objects)
   // ◆ on an activity item = its subject is open in Needs you right now (the snapshot), never inferred from history
   const open = useMemo(() => openSubjects(v.needs), [v.needs]);
-  const units = useMemo(() => buildUnits(p.events, v.internalAreaIds, { everything: p.everything, links: p.links, open }).filter((u) => Date.parse(u.at) >= p.now - RAIL_MS),
-    [p.events, v.internalAreaIds, p.everything, p.links, open, Math.floor(p.now / 60_000)]);
+  // unfinished work (running / waiting / blocked / recovering) reads in its current state — from the snapshot only
+  const current = useMemo(() => currentResolver(p.snapshot, v), [p.snapshot, v]);
+  const units = useMemo(() => buildUnits(p.events, v.internalAreaIds, { everything: p.everything, links: p.links, open, current }).filter((u) => Date.parse(u.at) >= p.now - RAIL_MS),
+    [p.events, v.internalAreaIds, p.everything, p.links, open, current, Math.floor(p.now / 60_000)]);
   const since = units.filter((u) => u.atId > p.lastSeen).length;
   // a decision card may move (fade in) only when its escalation.opened event just arrived over the live stream
   const openedLive = useMemo(() => new Set(p.events.filter((e) => e.class === "escalation.opened" && e.entity.id && p.now - (p.arrivedLive[e.eventId] ?? -Infinity) < 10_000).map((e) => e.entity.id!)),
@@ -189,12 +192,12 @@ function UnitItem({ u, now, arrived, onWhy }: { u: Unit; now: number; arrived: R
   const isNew = arrivals.length > 0 && arrivals.length === u.events.length;          // the whole item arrived live
   const grew = !isNew && latest > 0 && now - latest < 6_000 ? arrivals.length : 0;
   return (
-    <li className={`unit ${isNew && now - latest < 1_000 ? "unit--new" : ""} ${u.outcome ? `unit--${u.outcome}` : ""}`} data-unit={u.key}>
+    <li className={`unit ${isNew && now - latest < 1_000 ? "unit--new" : ""} ${u.outcome ? `unit--${u.outcome}` : ""} ${u.current ? "unit--open" : ""}`} data-unit={u.key} data-state={u.current ? "open" : "done"}>
       <div className="unit__row">
         <button className="unit__head" aria-expanded={open} onClick={() => setOpen(!open)}>
           <time className="unit__time" dateTime={u.at}>{fmtWhen(u.at, now)}</time>
           <span className="unit__title">{u.yours && <span className="owner-mark owner-mark--julian" aria-label="needs you now">◆ </span>}{u.title}</span>
-          <span className="unit__meta">{u.area?.name ? `${u.area.name} · ` : ""}{u.steps.length} step{u.steps.length === 1 ? "" : "s"}{grew ? <span className="chip-new"> +{grew}</span> : null}</span>
+          <span className="unit__meta">{u.current ? <span className={`unit__now unit__now--${u.current.owner}`}>Open now · </span> : null}{u.area?.name ? `${u.area.name} · ` : ""}{u.steps.length} step{u.steps.length === 1 ? "" : "s"}{grew ? <span className="chip-new"> +{grew}</span> : null}</span>
         </button>
         <WhyLink t={{ kind: "event", id: u.rootEventId }} focus="chain" onWhy={onWhy} className="unit__why" label={`Why: ${u.title}`}>Why?</WhyLink>
       </div>

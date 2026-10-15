@@ -109,6 +109,8 @@ a { color: var(--julian); }
 .unit__title { font-size: 14px; line-height: 20px; }
 .unit__meta { font-size: 12px; color: var(--ink-muted); }
 .unit--failed .unit__title { color: var(--failed); }
+.unit__now { font-weight: 600; }
+.unit__now--julian { color: var(--julian); } .unit__now--finagai { color: var(--finagai); }
 .chip-new { color: var(--finagai); font-weight: 600; }
 .unit__title .owner-mark { width: auto; margin-right: 4px; }
 .steps { list-style: none; margin: 0 0 10px 74px; padding: 0; font-size: 13px; }

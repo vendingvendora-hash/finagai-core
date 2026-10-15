@@ -1,7 +1,11 @@
 /** Live activity = units of work (spec §3.5, §14.2): grouping, titling, hiding, internal exclusion. */
 import { describe, expect, it } from "vitest";
 import { buildUnits, decisionText, hiddenEvent, historyText, internalLinks, openSubjects, transitionOf } from "../../web/src/model/units";
-import { corr, ev } from "./fixtures";
+import { area, corr, ev, need, snapshot, wait } from "./fixtures";
+import { currentResolver } from "../../web/src/model/current";
+import { deriveCommand } from "../../web/src/model/command";
+import { chainModel } from "../../web/src/inspector/model";
+import type { Snapshot } from "../../web/src/model/types";
 
 const career = { id: "a-career", name: "Career" };
 const test = { id: "a-test", name: "Finagai Test" };
@@ -197,6 +201,28 @@ describe("Live activity is history: one story per unit of work, phrased by its f
     expect(u.map((x) => x.title)).toEqual(["Mac task 140: you declined step 410; you cancelled it"]);
   });
 
+  it("a step that needs approval (authority.boundary_encountered on the step) is part of its task's story; cancel/expire end it", () => {
+    const T = "88888888-8888-4888-8888-888888888888", S = "99999999-9999-4999-8999-999999999999", E1 = "e8000000-0000-4000-8000-000000000008";
+    const key = `mac:150:step:500@control_task:${T}`;
+    const base = [
+      ev({ class: "task.created", cause: corr("a"), entity: { type: "control_task", id: T }, after: { code: 150, request: "Fill the Acme form" } }),
+      ev({ class: "authority.boundary_encountered", action: "control_step_proposed", cause: corr("b"), entity: { type: "control_step", id: S }, nextOwner: "julian", after: { code: 500, risk: "write", needsApproval: true, summary: "Click Submit" } }),
+      ev({ class: "task.state_changed", cause: corr("b"), entity: { type: "control_task", id: T }, nextOwner: "julian", after: { status: "waiting_approval", reason: "step 500: Click Submit" } }),
+      ev({ class: "escalation.opened", cause: corr("b"), entity: { type: "escalation", id: E1 }, after: { key, summary: "Mac task 150 is waiting for your approval — step 500: Click Submit. Reply \"ok 500\"" } }),
+    ];
+    expect(buildUnits(base, new Set()).map((x) => [x.key, x.title])).toEqual([[`control_task:${T}`, "Mac task 150: asked for your approval of step 500"]]);
+    const cancelled = buildUnits([...base,
+      ev({ class: "escalation.resolved", cause: corr("c"), entity: { type: "escalation", id: E1 }, after: { key, resolution: "step declined by Julian" } }),
+      ev({ class: "task.cancelled", action: "control_task_cancelled", cause: corr("d"), entity: { type: "control_task", id: T }, after: { status: "cancelled" } }),
+    ], new Set());
+    expect(cancelled.map((x) => x.title)).toEqual(["Mac task 150: you declined step 500; task was cancelled"]);
+    const expired = buildUnits([...base,
+      ev({ class: "escalation.resolved", cause: corr("c"), entity: { type: "escalation", id: E1 }, after: { key, resolution: "expired without an answer" } }),
+      ev({ class: "task.expired", action: "control_task_expired", cause: corr("c"), entity: { type: "control_task", id: T }, after: { status: "expired" } }),
+    ], new Set());
+    expect(expired.map((x) => x.title)).toEqual(["Mac task 150: expired without your answer"]);
+  });
+
   it("a decision's story: opened, then resolved, then the outcome — instruction text never repeated", () => {
     const F = "55555555-5555-4555-8555-555555555555", E = "e3000000-0000-4000-8000-000000000003";
     const sum = "No answer from Beth Young by 2026-10-14 — approve a follow-up (Finagai drafts it; it goes out as you), give a new date, or close it";
@@ -245,5 +271,80 @@ describe("Live activity is history: one story per unit of work, phrased by its f
       ev({ class: "other.control_step_ran", action: "control_step_ran", cause: corr("m"), entity: { type: "control_step", id: "66666666-6666-4666-8666-666666666666" }, after: { result: "ok" } }),
     ], new Set());
     expect(u.map((x) => x.title)).toEqual(["Daily maintenance completed"]);
+  });
+});
+
+/** Slice 3 acceptance invariant 2: unfinished work reads in its CURRENT state, which only the snapshot decides. */
+describe("unfinished work is shown in its current state (from the snapshot), never as finished history", () => {
+  const units = (evs: ReturnType<typeof task137>, snap: Snapshot) => {
+    const v = deriveCommand(snap, null, Date.parse("2026-10-15T17:00:00Z"));
+    return buildUnits(evs, v.internalAreaIds, { open: openSubjects(v.needs), current: currentResolver(snap, v) });
+  };
+  // Core serves the code as a string (a pg bigint) — the lookup must not depend on that
+  const task = (status: string, awaiting_kind: string | null = null) => ({ code: "137" as unknown as number, status, verification_status: null, awaiting_kind, request: "Read-only check: report the macOS version", updated_at: "" });
+
+  it("a task waiting for Julian's approval: present tense, ◆, the request — not 'asked for your approval'", () => {
+    const snap = snapshot({ needsJulian: [need(ESC, null, { key: KEY, needs: "authorization", subject: { type: "control_task", id: TASK } })], tasks: [task("waiting_approval", "approval")] });
+    const u = units(task137(2685), snap);
+    expect(u.map((x) => [x.title, x.yours, x.current?.owner])).toEqual([["Mac task 137 — waiting for your approval of step 406: Read-only check: report the macOS version", true, "julian"]]);
+  });
+
+  it("a running task after Julian approved: 'running', with what already happened kept as history", () => {
+    const u = units(task137(2711), snapshot({ tasks: [task("active")] }));
+    expect(u.map((x) => [x.title, x.yours, x.outcome])).toEqual([["Mac task 137 — running: Read-only check: report the macOS version (earlier: you approved step 406)", false, null]]);
+  });
+
+  it("recovering after a stall: Core lists it active again → running (the earlier failure is not its final word)", () => {
+    const u = units(task137(2715), snapshot({ tasks: [task("active")] }));
+    expect(u[0]!.title).toMatch(/^Mac task 137 — running/);
+    expect(u[0]!.outcome).toBeNull();
+  });
+
+  it("blocked on the model budget: paused, Finagai's — not Julian's", () => {
+    const u = units(task137(2672), snapshot({ tasks: [task("paused", "budget")] }));
+    expect(u.map((x) => [x.title, x.yours])).toEqual([["Mac task 137 — paused until the model budget allows: Read-only check: report the macOS version", false]]);
+  });
+
+  it("finished (Core no longer lists it): the past-tense story", () => {
+    expect(units(task137(), snapshot())[0]!.title).toMatch(/^Mac task 137: you approved step 406; task completed — /);
+  });
+
+  it("an open decision, an open wait and a problem being fixed each read as still open", () => {
+    const career = area("a-career", "Career");
+    const F = "55555555-5555-4555-8555-555555555555", W = "66666666-6666-4666-8666-666666666666", E = "e3000000-0000-4000-8000-000000000003";
+    const sum = "No answer from Beth Young by 2026-10-14 — approve a follow-up (Finagai drafts it; it goes out as you), give a new date, or close it";
+    const evs = [
+      ev({ class: "escalation.opened", cause: corr("d"), area: { id: career.id, name: "Career" }, entity: { type: "escalation", id: E }, after: { key: `overdue:${F}:2026-10-14`, summary: sum } }),
+      ev({ class: "wait.started", cause: corr("w"), area: { id: career.id, name: "Career" }, entity: { type: "followup", id: W }, summary: "wait.started: Waiting on Chimes to respond to the Controller application", after: { summary: "Waiting on Chimes to respond to the Controller application" } }),
+      ev({ class: "exception.opened", cause: corr("x"), entity: { type: "operating_exception", id: "77777777-7777-4777-8777-777777777777" }, after: { key: "watcher:gmail", summary: "Gmail watcher failing (3 polls in a row)" } }),
+    ];
+    const snap = snapshot({ areas: [career], needsJulian: [need(E, career.id, { key: `overdue:${F}:2026-10-14`, followup_id: F, summary: sum })], waits: [wait(W, career.id, { counterparty: "Chimes", summary: "Waiting on Chimes to respond to the Controller application" })],
+      exceptions: [{ key: "watcher:gmail", detector: "watcher", area_id: null, owner: "finagai", severity: "warning", needs: null, summary: "Gmail watcher failing (3 polls in a row)", first_seen_at: "", remediation: null, remediation_attempts: 1 }] });
+    expect(units(evs, snap).map((x) => [x.title, x.yours]).sort()).toEqual([
+      ["Gmail watcher failing (3 polls in a row) — Finagai is fixing it", false],
+      ["No answer from Beth Young by 2026-10-14 — waiting for you (only you can do this)", true],
+      ["Waiting on Chimes to respond to the Controller application — still waiting", false],
+    ]);
+    // ... and once the snapshot no longer lists them, they read as history (the instruction is never repeated)
+    expect(units(evs, snapshot({ areas: [career] })).map((x) => x.title).sort()).toEqual([
+      "Finagai found a problem: Gmail watcher failing (3 polls in a row)",
+      "No answer from Beth Young by 2026-10-14 — became your decision",
+      "Started waiting: Waiting on Chimes to respond to the Controller application",
+    ]);
+  });
+});
+
+/** Slice 3 acceptance invariant 1: readability is presentation only — Core's records are never altered. */
+describe("presentation never alters Core's records", () => {
+  const freeze = <T>(o: T): T => { if (o && typeof o === "object") { Object.values(o).forEach(freeze); Object.freeze(o); } return o; };
+  it("stories, current state and the Why model run on deeply frozen events and snapshot, and the records are byte-identical afterwards", () => {
+    const evs = task137(); const snap = snapshot({ needsJulian: [need(ESC, null, { key: KEY, needs: "authorization", subject: { type: "control_task", id: TASK } })] });
+    const before = JSON.stringify([evs, snap]);
+    freeze(evs); freeze(snap);
+    const v = deriveCommand(snap, null, 0);
+    expect(() => buildUnits(evs, new Set(), { open: openSubjects(v.needs), current: currentResolver(snap, v) })).not.toThrow();
+    expect(() => chainModel(evs, 2717)).not.toThrow();
+    for (const e of evs) { historyText(e); decisionText(e); }
+    expect(JSON.stringify([evs, snap])).toBe(before);
   });
 });

@@ -220,3 +220,24 @@ No Core change: Slice 3 uses Core's existing `/live/chain/<eventId>` and `/live/
   3. **Helper enforcement.** The Mac helper runs an R0/R1 command with `execFile` (no shell) under a sandbox profile that denies file writes and network, with a timeout and an output cap. If the helper cannot enforce this, the class falls back to `HIGH_RISK`.
   4. **Shadow first.** For N days, record what the new classifier would have decided next to the current decision. Report the approvals it would have saved and every disagreement, then switch only on Julian's explicit approval.
   5. **Tests:** a table of allowed and refused commands, including adversarial ones: `sw_vers && rm -rf ~`, `$(…)`, `~/.finagai`, `/etc/passwd`, `../`, `cat ~/Library/Keychains/…`.
+
+### Slice 3 production acceptance finding on hotfix 46 — fixed in hotfix 47
+
+- **Invariant 2 (Julian): unfinished work must read in its actual current state.** On 46, every story was phrased as past-tense history. A running task, a waiting task, a blocked task (budget pause), a recovering task or an open decision could read like finished work: "Mac task 141: asked for your approval of step 412", or "Started waiting: …" for a wait that is still open.
+  - Root cause: the story title was derived from history alone. The present state lives only in the snapshot.
+  - Fix (presentation, Command only), `model/current.ts`. When the snapshot still lists a story's subject, the item reads in that current state, in the present tense, and is marked "Open now". Sources:
+    - an open decision in `needsJulian` ("— waiting for your approval of step 412", "— waiting for you (only you can do this)");
+    - a Mac task in `tasks`: running; waiting for approval; paused, waiting for you; paused until the model budget allows;
+    - an open problem in `exceptions` ("Finagai is fixing it");
+    - an open wait ("still waiting").
+
+    What already happened stays as history inside the title ("(earlier: you approved step 406)"). Only when the snapshot no longer lists the subject does the item become the past-tense story. The inspector's status line likewise reads "Open now · Mac task N is running".
+  - Found with it:
+    - Core serves a task's number as a string (a pg bigint), so the lookup normalises it.
+    - `task.cancelled`, `task.expired` and `task.resumed` were unranked, so a cancelled task's story did not say how it ended.
+    - A step needing approval (`authority.boundary_encountered` on the step) formed its own story instead of joining its task's story.
+  - Proof:
+    - Unit tests cover waiting, running after approval, recovering after a stall, the budget pause, finished, an open decision, an open wait, a problem being fixed, and cancel/expire endings.
+    - The browser end-to-end test checks a real approval wait reading "waiting for your approval of step N" with ◆. After Julian approves it reads "running … (earlier: you approved step N)" without ◆. After a real cancel it becomes "Mac task N: you approved step N; task was cancelled".
+- **Invariant 1 (presentation only)** holds on 46 in production. All 311 events in the page's store were byte-identical to Core's `/live/history` records after every presentation pass, and 20 of 20 sampled chains equalled `/live/chain`. A unit test runs the story, current-state and Why models on deeply frozen events and snapshot and finds them byte-identical afterwards.
+- **Known item (B, not built):** `snapshot.tasks` carries a task's number but not its id. Command maps a task story to its current state through an open decision's key or the task's creation event in the 24-hour window. A task created more than 24 hours earlier, with no open decision, keeps its past-tense story. In practice tasks stall within minutes and approvals expire within 24 hours.
