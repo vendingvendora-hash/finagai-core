@@ -146,3 +146,11 @@ implementation decisions and deviations.
     - The browser end-to-end test enters a real approval wait and checks for a Needs-you card within 2 s and no "Nothing needs you"; approving restores calm.
     - A Command unit test checks that an open Mac-approval escalation means not calm.
 - **Latency.** State-bearing events other than decisions and problems now refresh the snapshot after 300 ms instead of 1 s. In production a Mac task's handling row took 2.1 s while the tab was in the background.
+
+## Status: Command Live CLOSED (2026-10-15 17:39Z, on `cb98826`)
+
+- All 15 Command Live criteria pass in production, along with Julian's additional checks: the 4-minute disconnect, renewal logging, callback protection, cookie flags, and Mac waits as escalations.
+- Mac task 137 opened exactly one escalation at the first event-loop check. Julian's `ok 406` resolved it in the same transaction. No email was sent.
+- The self-check at 17:38Z on `cb98826` passed. Reliability since the deploy is Healthy.
+- The 24-hour window shows Degraded until 2026-10-16 15:35Z; that is history, and the root cause is fixed.
+- The full handoff, including the matrix, deviations, limitations and the Slice 3 recommendation, is the project doc `FINAGAI_COMMAND_LIVE_HANDOFF_2026-10-15.md`. Slice 3 has not been started.
