@@ -26,7 +26,7 @@ export function hiddenEvent(e: LiveEvent): boolean {
 const RANK: Record<string, number> = {
   "escalation.opened": 100, "escalation.resolved": 90, "approval.requested": 88, "authority.boundary_encountered": 85, "entity.state_changed": 80,
   "exception.opened": 75, "exception.cleared": 70, "workflow.failed": 68, "task.recovered": 66, "task.failed": 65, "wait.expired": 60, "wait.resolved": 58,
-  "wait.started": 55, "wait.cancelled": 54, "task.completed": 52, "task.created": 50, "area.health_changed": 45, "rule.fired": 44, "lesson.learned": 42,
+  "wait.started": 55, "wait.cancelled": 54, "task.completed": 52, "task.created": 50, "task.state_changed": 50, "area.health_changed": 45, "rule.fired": 44, "lesson.learned": 42,
   "lesson.approved": 42, "lesson.rejected": 42, "lesson.proposed": 42, "procedure.discovered": 42, "evidence.attached": 40, "wait.updated": 35, "entity.created": 34,
   "entity.archived": 33, "project.state_changed": 32, "system.check_failed": 30, "evidence.classified": 15, "notification.delivered": 12, "escalation.notified": 10,
   "workflow.started": 5, "evidence.observed": 3,
@@ -60,6 +60,7 @@ export function textOf(e: LiveEvent): string {
 }
 const firstClause = (s: string) => s.split(" — ")[0]!.trim();
 const cleanChange = (s: string) => s.replace(/\s*\[[^\]]*\]\s*$/, "").replace(/^status:\s*/, "").replace(/^event:\s*/, "").trim();
+const clip = (s: string, n = 90) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
 const pretty = (s: string) => s.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 /** Before → after for a transition, changed keys only (e.g. "status: applied → offer"). */
@@ -86,6 +87,10 @@ function titleOf(top: LiveEvent, events: LiveEvent[]): string {
     case "exception.cleared": return `Problem cleared: ${String(a.summary ?? textOf(top))}`;
     case "workflow.failed": return `${pretty(String(a.workflow ?? a.job ?? "A workflow"))} failed`;
     case "task.recovered": return `Recovered and continued — ${textOf(top)}`;
+    case "task.created": return `Mac task${a.code ? ` ${String(a.code)}` : ""} started: ${clip(String(a.request ?? textOf(top)))}`;
+    case "task.state_changed":
+      if (a.status === "waiting_approval" || top.nextOwner === "julian") return `Mac task is waiting for your approval — ${clip(String(a.reason ?? textOf(top)).replace(/^step \d+:\s*/, ""))}`;
+      return `Mac task ${pretty(String(a.status ?? "changed"))}${a.reason ? ` — ${clip(String(a.reason))}` : ""}`;
     case "area.health_changed": return `${top.area?.name ?? "Area"} health: ${String((top.before as Record<string, unknown> | null)?.color ?? "?")} → ${String(a.color ?? "?")}`;
     case "workflow.completed":
       if (top.action === "job_finished") return `${pretty(String(a.job ?? "Scheduled job"))} ${a.status === "failed" ? "failed" : "completed"}`;
@@ -169,7 +174,9 @@ export function buildUnits(events: LiveEvent[], internalAreaIds: Set<string>, op
       key, events: evs, steps, firstAt: steps[0]!.at, lastAt: steps[steps.length - 1]!.at, firstId: steps[0]!.eventId, lastId: steps[steps.length - 1]!.eventId,
       area: steps.find((e) => e.area)?.area ?? null,
       title: titleOf(top, evs),
-      yours: steps.some((e) => e.nextOwner === "julian" && (e.class === "escalation.opened" || e.class === "approval.requested" || e.class === "authority.boundary_encountered")),
+      // ◆ when the unit opened a decision for Julian, or ended waiting on him (spec §3.5: "ended with nextOwner = julian")
+      yours: steps.some((e) => e.nextOwner === "julian" && (e.class === "escalation.opened" || e.class === "approval.requested" || e.class === "authority.boundary_encountered"))
+        || steps[steps.length - 1]!.nextOwner === "julian",
       outcome: steps.some((e) => e.class === "task.recovered") ? "recovered" : steps.some((e) => e.class === "workflow.failed" || e.class === "task.failed" || e.class === "system.check_failed") ? "failed" : null,
       rank,
     });

@@ -116,3 +116,20 @@ describe("internal test work never reaches Live activity (production finding 202
     expect(buildUnits(evs, internalAreas, { everything: true }).map((x) => x.key).sort()).toEqual(["later", "run"]);
   });
 });
+
+describe("Mac tasks in Live activity (production finding 2026-10-15: a step waiting on Julian was invisible)", () => {
+  it("a task's start and its wait for Julian's approval are shown, titled from Core's fields, with ◆ when it waits on him", () => {
+    const u = buildUnits([
+      ev({ class: "workflow.invoked", cause: corr("t1"), action: "work_invoked", after: { what: "tool:control_mac" } }),
+      ev({ class: "task.created", cause: corr("t1"), entity: { type: "control_task", id: "33333333-3333-3333-3333-333333333333" }, summary: "task.created", after: { code: 137, request: "Report the macOS version" } }),
+      ev({ class: "workflow.invoked", cause: corr("t2"), action: "work_invoked", after: { what: "mac:/control/next" } }),
+      ev({ class: "task.step_proposed", cause: corr("t2"), summary: "task.step_proposed: Run sw_vers", after: { code: 406, summary: "Run sw_vers" } }),
+      ev({ class: "task.state_changed", cause: corr("t2"), nextOwner: "julian", entity: { type: "control_task", id: "33333333-3333-3333-3333-333333333333" }, summary: "task.state_changed: waiting_approval",
+        after: { status: "waiting_approval", reason: "step 406: Run the read-only command `sw_vers -productVersion`", waitingFor: "julian" } }),
+    ], new Set());
+    expect(u.map((x) => [x.title, x.yours])).toEqual([
+      ["Mac task is waiting for your approval — Run the read-only command `sw_vers -productVersion`", true],
+      ["Mac task 137 started: Report the macOS version", false],
+    ]);
+  });
+});

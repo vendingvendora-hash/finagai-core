@@ -24,7 +24,36 @@ function writtenActions(): Set<string> {
   return out;
 }
 
+/** Actions written by some appendEvent call that names no object (no entityId) — those can never be state changes. */
+function objectlessActions(): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const f of files(SRC)) {
+    const t = readFileSync(f, "utf8");
+    for (let i = t.indexOf("appendEvent("); i >= 0; i = t.indexOf("appendEvent(", i + 1)) {
+      const open = t.indexOf("{", i); let depth = 0, j = open;
+      for (; j < t.length; j++) { if (t[j] === "{") depth++; else if (t[j] === "}" && --depth === 0) break; }
+      const lit = t.slice(open, j + 1);
+      if (/entityId\b/.test(lit)) continue;
+      for (const m of lit.matchAll(/action:\s*(?:[^"\n,]*\?\s*)?"([a-z_]+)"(?:\s*:\s*"([a-z_]+)")?/g)) for (const a of [m[1], m[2]]) if (a) out.set(a, f.replace(SRC + "/", ""));
+    }
+  }
+  return out;
+}
+// the domains the ADR-087 stateEventQuality self-check treats as state changes (src/live/acceptance.ts)
+const STATE_DOMAINS = ["entity", "relationship", "project", "objective", "task", "wait", "inference", "lesson", "exception", "approval", "evidence"];
+
 describe("ontology", () => {
+  it("an event that names no object is never classified as a state change (live 2026-10-15: concierge_no_draft failed the self-check)", () => {
+    const objectless = objectlessActions();
+    expect(objectless.has("concierge_no_draft")).toBe(true);                    // the scan finds the real offender
+    const wrong = [...objectless].filter(([a]) => STATE_DOMAINS.includes(classify({ action: a, entity_type: null, after: null, before: null, approval_id: null }).domain)
+      && !["evidence_observed", "evidence_routed"].includes(a)).map(([a, f]) => `${a} (${f})`);
+    expect(wrong).toEqual([]);
+    expect(classify({ action: "concierge_no_draft", entity_type: "concierge_contact", after: { contact: "x" }, before: null, approval_id: null })).toEqual(expect.objectContaining({ class: "workflow.skipped", lowValue: true }));
+    expect(classify({ action: "concierge_budget_blocked", entity_type: "concierge_contact", after: { contact: "x" }, before: null, approval_id: null })).toEqual(expect.objectContaining({ class: "workflow.skipped", nextOwner: "finagai" }));
+    // concierge actions about a draft (with an object) stay task state changes
+    expect(classify({ action: "concierge_draft_created", entity_type: "concierge_draft", after: { status: "pending" }, before: null, approval_id: null }).domain).toBe("task");
+  });
   it("every action Finagai writes is classified into a real domain (nothing falls through to other.*)", () => {
     const missing = [...writtenActions()].filter((a) => classify({ action: a, entity_type: null, after: null, before: null, approval_id: null }).domain === "other");
     expect(missing).toEqual([]);

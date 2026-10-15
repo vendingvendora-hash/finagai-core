@@ -221,6 +221,19 @@ describe.skipIf(!admin || !migT || !appT || !haveUi)("Command screen in a browse
     await q(`UPDATE event_tick SET status = 'skipped' WHERE started_at > now() + interval '1 minute'`);
   }, 90_000);
 
+  it("a Mac task waiting on Julian's approval appears in Live activity within 2 s, marked ◆ (production finding 2026-10-15)", async () => {
+    const id = "44444444-4444-4444-4444-444444444444";
+    await appendEvent(pool, { actor: "julian", action: "control_task_created", entityType: "control_task", entityId: id, after: { code: 901, request: "Report the macOS version", requester: "julian" } });
+    const t0 = Date.now();
+    await appendEvent(pool, { actor: "j6", action: "control_task_state", entityType: "control_task", entityId: id, before: { status: "active" },
+      after: { status: "waiting_approval", reason: "step 1: Run the read-only command sw_vers", waitingFor: "julian", awaiting_kind: "approval" } });
+    const unit = page.locator(".activity .unit", { hasText: "Mac task is waiting for your approval — Run the read-only command sw_vers" });
+    await unit.waitFor({ timeout: 2_000 });
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    expect(await unit.locator(".owner-mark--julian").count()).toBe(1);
+    expect(await page.locator(".activity .unit", { hasText: "Mac task 901 started: Report the macOS version" }).count()).toBe(1);
+  }, 30_000);
+
   it("renders the mobile layout at 390×844: Needs you / ownership line / handling / recent changes / Areas, no horizontal scroll", async () => {
     const m = await signedInPage({ width: 390, height: 844 });
     await m.locator(".calm__statement").waitFor({ timeout: 10_000 });

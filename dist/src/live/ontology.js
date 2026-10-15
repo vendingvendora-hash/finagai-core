@@ -129,8 +129,17 @@ const RULES = {
     route: () => F("evidence", "classified"),
     ignore: () => F("evidence", "ignored", { lowValue: true }),
 };
+/**
+ * The concierge's "looked at a message and did nothing" outcomes change no state: they are about a contact, carry no
+ * object id and no cause. Classified as task.* they read as state changes without an object, which the ADR-087
+ * stateEventQuality self-check rightly rejects (live 2026-10-15 15:35Z: concierge_no_draft → self-check failed).
+ */
+const CONCIERGE_NO_STATE = {
+    concierge_no_draft: () => F("workflow", "skipped", { lowValue: true }),
+    concierge_budget_blocked: () => F("workflow", "skipped", { nextOwner: "finagai" }),
+};
 export function classify(r) {
-    const rule = RULES[r.action] ?? (r.action.startsWith("concierge_") ? () => F("task", r.action.slice("concierge_".length)) : undefined);
+    const rule = RULES[r.action] ?? CONCIERGE_NO_STATE[r.action] ?? (r.action.startsWith("concierge_") ? () => F("task", r.action.slice("concierge_".length)) : undefined);
     const base = rule ? rule(r) : F("other", r.action);
     return { class: `${base.domain}.${base.verb}`, domain: base.domain, verb: base.verb, nextOwner: base.nextOwner ?? null, verified: base.verified ?? null,
         confidence: base.confidence ?? null, lowValue: base.lowValue ?? false };

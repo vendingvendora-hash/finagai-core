@@ -115,3 +115,17 @@ implementation decisions and deviations.
   - "Stopped" is claimed only from a snapshot read in the last 2 minutes.
 - **Token renewal is now observable.** The BFF logs `access renewed` with timings and whether the refresh token rotated, and `renewal failed; session ended` with the reason. No token is ever logged.
 - **Core-side gap (classified B, not built).** Decision rows created before hotfix 41 have no Area, so their events carry none. The envelope could derive an Area from the decision's subject. The client linkage covers this, and new rows are correct.
+
+## Production acceptance findings on hotfix 44 (2026-10-15) — fixed in hotfix 45
+
+- **Existing production check not green (acceptance point 14).** The hourly self-check failed once, at 15:35Z, on `stateEventQuality`, and the 24 h reliability verdict became Degraded.
+  - Root cause: the ontology mapped every `concierge_*` action to `task.*`. The J5 concierge's `concierge_no_draft` (and `concierge_budget_blocked`) records a decision to do nothing about a contact: it names no object and has no cause. Classified as a task state change, it failed the check.
+  - Fix (Core, read path only):
+    - Both actions now classify as `workflow.skipped`; nothing is written differently.
+    - A structural test scans every `appendEvent` call that names no object and requires that none of them classifies as a state change.
+  - Known latent item, not changed: `concierge_draft_rejected` carries no after-state. Rejecting a draft would trip the same check.
+- **A Mac step waiting for Julian was invisible on Command (ownership).** Found while timing a real state change: Mac task 137 waited for his approval, but `task.state_changed` ranked below the display threshold, and Needs you shows only escalations.
+  - Fix (spec §14.1: Mac task transitions belong in the activity rail): Mac task units are shown, titled from Core's fields ("Mac task is waiting for your approval — …", "Mac task 137 started: …").
+  - A unit that ends waiting on Julian carries ◆ (spec §3.5).
+  - Still not in Needs you, because Core opens no escalation for Mac step approvals. That would be a Core change (B).
+- **Latency.** State-bearing events other than decisions and problems now refresh the snapshot after 300 ms instead of 1 s. In production a Mac task's handling row took 2.1 s while the tab was in the background.

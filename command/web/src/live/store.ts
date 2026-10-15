@@ -167,8 +167,9 @@ export class LiveController {
     // during the catch-up window Core replays what was missed; count the meaningful ones (what Live activity would show)
     if (this.reopenedAt !== null && !hiddenEvent(e)) this.caught++;
     useLive.setState({ lastSeq: e.seq, lastAliveAt: t, events: mergeEvents(s.events, [e]), arrivedLive: { ...pruneArrived(s.arrivedLive, t), [e.eventId]: t } });
-    // what Julian must see within 2 s (spec §18): his decisions and problems; other state changes coalesce for 1 s
-    if (STATE_DOMAINS.has(e.domain)) this.scheduleRefresh(URGENT_DOMAINS.has(e.domain) ? 150 : 1_000);
+    // every state change reaches the screen within the 2 s target (live 2026-10-15: a Mac task row took 2.1 s with 1 s
+    // coalescing); decisions and problems first
+    if (STATE_DOMAINS.has(e.domain)) this.scheduleRefresh(URGENT_DOMAINS.has(e.domain) ? 150 : 300);
     if (e.domain === "system" || e.domain === "exception" || e.class === "workflow.failed") this.scheduleReliability();
   }
 
