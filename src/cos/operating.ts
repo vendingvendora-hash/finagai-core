@@ -182,7 +182,13 @@ export async function areaStatus(pool: pg.Pool, areaName?: string | null, now = 
   const a = await resolveArea(pool, areaName);
   if ("error" in a) return a;
   await sweepOverdue(pool, now);
-  const h = (await areaHealth(pool, a.id))!;
+  return areaStatusRead(pool, a, now);
+}
+
+/** The same verdict without the overdue sweep: a pure read (Command Center snapshot, ADR-089 slice 0). The engine
+ *  sweeps every 5 min, so between ticks the read can lag a just-passed due date by at most one tick. */
+export async function areaStatusRead(pool: Pick<pg.Pool, "query">, a: { id: string; name: string }, now = new Date()) {
+  const h = (await areaHealth(pool as pg.Pool, a.id))!;
   const day = 86_400_000;
   const warnings: string[] = [];
   const objectives = (await pool.query(`SELECT o.name, o.target_date,

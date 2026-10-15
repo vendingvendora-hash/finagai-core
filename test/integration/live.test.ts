@@ -198,7 +198,7 @@ describe.skipIf(!admin || !migT || !appT)("Live State Stream (ADR-087)", () => {
     expect([...resumed.matchAll(/^id: (\d+)$/gm)].map((m) => Number(m[1])).every((i) => i > last)).toBe(true);
     expect(await counts()).toEqual(c0);                                               // observing wrote no operational state
     const contract = await (await fetch(`${base}/live/contract`, { headers: auth })).json() as { v: number; safety: string };
-    expect(contract.v).toBe(1); expect(contract.safety).toMatch(/read-only/);
+    expect(contract.v).toBe(2); expect(contract.safety).toMatch(/read-only/);
   });
 
   it("a preview tick (dry run) leaves no trace in the stream", async () => {

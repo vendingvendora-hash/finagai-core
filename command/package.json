@@ -1,0 +1,35 @@
+{
+  "name": "finagai-command",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Finagai Command Center (ADR-089): read-only web app + BFF over Core's Live State Stream.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc -p tsconfig.server.json && vite build",
+    "start": "node dist/server/index.js",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "test": "vitest run test",
+    "e2e": "playwright test"
+  },
+  "dependencies": {
+    "jose": "^6.2.12"
+  },
+  "devDependencies": {
+    "@fontsource/atkinson-hyperlegible-mono": "5.2.5",
+    "@fontsource/atkinson-hyperlegible-next": "5.2.5",
+    "@playwright/test": "1.56.1",
+    "@tanstack/react-query": "5.59.20",
+    "@types/node": "^22.10.0",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "4.3.4",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router-dom": "6.28.0",
+    "typescript": "^5.6.3",
+    "vite": "5.4.11",
+    "vitest": "^2.1.8",
+    "zustand": "4.5.5"
+  }
+}

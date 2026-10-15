@@ -1,5 +1,6 @@
 import { KNOWN_ACTIONS } from "./ontology.js";
 import { CONTRACT_VERSION, RETENTION_DAYS, causalChain, coalesce, history, publish, readAfter, snapshot } from "./stream.js";
+import { reliabilityReport } from "./reliability.js";
 const HEADERS = { "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "cache-control": "no-store" };
 const json = (res, status, body) => { res.writeHead(status, { "content-type": "application/json", ...HEADERS }); res.end(JSON.stringify(body)); };
 function filterOf(u) {
@@ -28,8 +29,18 @@ export function liveHandler(pool, opts = {}) {
                 const r = await readAfter(pool, intParam(url.searchParams.get("after"), 0), filterOf(url), Math.min(intParam(url.searchParams.get("limit"), 500), 2000));
                 return json(res, r.reset ? 409 : 200, r.reset ? r : { ...r, events: coalesce(r.events) });
             }
-            if (path === "/live/history")
-                return json(res, 200, { events: await history(pool, { ...filterOf(url), from: url.searchParams.get("from") ?? undefined, to: url.searchParams.get("to") ?? undefined, limit: intParam(url.searchParams.get("limit"), 500) }) });
+            if (path === "/live/history") {
+                const p = url.searchParams;
+                return json(res, 200, { events: await history(pool, { ...filterOf(url), from: p.get("from") ?? undefined, to: p.get("to") ?? undefined, limit: intParam(p.get("limit"), 500),
+                        order: p.get("order") === "desc" ? "desc" : "asc", ...(p.get("before") ? { before: intParam(p.get("before"), 0) } : {}), ...(p.get("after") ? { after: intParam(p.get("after"), 0) } : {}) }) });
+            }
+            if (path === "/live/summary/reliability") {
+                // The same report as `finagai-job: reliability` — computed from the stream, read-only (SELECTs only).
+                const since = url.searchParams.get("since");
+                const days = intParam(url.searchParams.get("days"), 1);
+                const d = since ? new Date(since) : null;
+                return json(res, 200, await reliabilityReport(pool, d && !Number.isNaN(d.getTime()) ? { since: d } : { days }));
+            }
             const chain = /^\/live\/chain\/(\d+)$/.exec(path);
             if (chain)
                 return json(res, 200, { chain: await causalChain(pool, Number(chain[1])) });
@@ -93,7 +104,8 @@ export const CONTRACT = {
         lowValue: "high-frequency, low-value; may be coalesced",
     },
     ontology: { domains: ["entity", "relationship", "area", "objective", "project", "task", "wait", "workflow", "tool", "evidence", "inference", "lesson", "procedure", "capability", "exception", "escalation", "approval", "authority", "notification", "rule", "source", "other"], classifiedActions: KNOWN_ACTIONS.length },
-    delivery: { snapshot: "/live/snapshot returns state + cursor from one repeatable-read snapshot", stream: "/live/stream (SSE) or /live/events (pages)", resume: "events after the cursor; a cursor older than retention gets a `reset` (409) — take a new snapshot", retentionDays: RETENTION_DAYS, history: "/live/history covers all stored events", coalescing: "runs of ≥3 low-value events of one class are sent once with a count (seq = last)", ordering: "strictly increasing seq; apply idempotently by seq" },
+    delivery: { snapshot: "/live/snapshot returns state + cursor from one repeatable-read snapshot", stream: "/live/stream (SSE) or /live/events (pages)", resume: "events after the cursor; a cursor older than retention gets a `reset` (409) — take a new snapshot", retentionDays: RETENTION_DAYS, history: "/live/history covers all stored events; filters (area, class, entityType, entityId) apply before the limit; order=desc with before=<eventId> pages newest-first",
+        summaries: { reliability: "/live/summary/reliability?days=N | ?since=<ISO> — the Phase 8 report (read-only)" }, coalescing: "runs of ≥3 low-value events of one class are sent once with a count (seq = last)", ordering: "strictly increasing seq; apply idempotently by seq" },
     safety: "read-only (GET); bearer auth as /mcp; payload keys/values that look like secrets are redacted; the authenticated principal is never exposed",
 };
 //# sourceMappingURL=http.js.map

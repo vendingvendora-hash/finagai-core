@@ -230,7 +230,9 @@ describe.skipIf(!admin || !migT || !appT)("management by exception (Phase 7, ADR
     const w2 = await eventLoopWatchdog(pool, new Date(day.getTime() + 15 * 60_000), notify);
     expect(w2.notified).toBe("already_sent"); expect(sent).toHaveLength(1);
     const night = new Date(day); night.setUTCHours(6, 0, 0, 0);                    // 02:00 ET
-    if (night > new Date(last)) expect((await eventLoopWatchdog(pool, night, notify)).notified).toBe("held for quiet hours");
+    // only meaningful when the loop is already stalled at 02:00 ET (live 2026-10-15 05:5xZ: a run within 45 min before
+    // 06:00Z made "night" fall inside the healthy window, and the watchdog correctly reported no stall)
+    if (night.getTime() > new Date(last).getTime() + 45 * 60_000) expect((await eventLoopWatchdog(pool, night, notify)).notified).toBe("held for quiet hours");
     await tick(new Date(day.getTime() + 20 * 60_000));
     expect((await exc("loop:stalled")).status).toBe("resolved");
   });

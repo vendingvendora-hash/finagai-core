@@ -9,9 +9,14 @@
  */
 import type pg from "pg";
 import { classify, type Classified } from "./ontology.js";
+import { areaStatusRead } from "../cos/operating.js";
+import { TEST_AREA } from "../cos/opportunities.js";
+import { RULE_NEEDS } from "../cos/lifecycle.js";
 
 type Db = Pick<pg.Pool, "query">;
-export const CONTRACT_VERSION = 1;
+/** v2 (ADR-089 slice 0, additive): snapshot areas[].internal/health, waits[].owner/project_id/escalated,
+ *  needsJulian[].followup_id/subject; history filters before its limit and pages newest-first. */
+export const CONTRACT_VERSION = 2;
 export const RETENTION_DAYS = 30;
 /** Ids allocated by a transaction that commits later than others still surface: published as soon as visible. */
 const LATE_COMMIT_WINDOW = 20_000;
@@ -174,13 +179,33 @@ export function coalesce(events: LiveEvent[], minRun = 3): Array<LiveEvent & { c
   return out;
 }
 
-/** Semantic history over ALL stored events (not limited to the stream's retention). */
-export async function history(db: Db, opts: { from?: string; to?: string; limit?: number } & Filter = {}) {
-  const rows = (await db.query(`SELECT l.seq, ${EVENT_COLS} FROM event e LEFT JOIN live_event l ON l.event_id = e.id
-      WHERE ($1::timestamptz IS NULL OR e.occurred_at >= $1) AND ($2::timestamptz IS NULL OR e.occurred_at <= $2) ORDER BY e.id LIMIT $3`,
-    [opts.from ?? null, opts.to ?? null, Math.min(opts.limit ?? 500, 2000)])).rows;
+/** Semantic history over ALL stored events (not limited to the stream's retention).
+ *  ADR-089 slice 0: filters (area, class, entity) apply BEFORE the limit — the stored rows are scanned in pages until
+ *  `limit` matching events are found (bounded scan) — and history can page newest-first (`order: "desc"`, `before`/
+ *  `after` = event id). Before this, the limit was applied first, so a filtered read returned only the matches among the
+ *  first 500 rows of all history. */
+export async function history(db: Db, opts: { from?: string; to?: string; limit?: number; order?: "asc" | "desc"; before?: number; after?: number; maxScan?: number } & Filter = {}) {
+  const limit = Math.min(Math.max(opts.limit ?? 500, 1), 2000);
+  const desc = opts.order === "desc";
   const areaId = await resolveArea(db, opts.area);
-  return (await toEnvelopes(db, rows)).filter((e) => keep(e, opts, areaId));
+  const maxScan = opts.maxScan ?? 50_000;
+  const out: LiveEvent[] = [];
+  let lo = opts.after ?? null, hi = opts.before ?? null, scanned = 0;
+  while (out.length < limit && scanned < maxScan) {
+    const rows = (await db.query(`SELECT l.seq, ${EVENT_COLS} FROM event e LEFT JOIN live_event l ON l.event_id = e.id
+        WHERE ($1::timestamptz IS NULL OR e.occurred_at >= $1) AND ($2::timestamptz IS NULL OR e.occurred_at <= $2)
+          AND ($3::bigint IS NULL OR e.id > $3) AND ($4::bigint IS NULL OR e.id < $4)
+          AND ($5::text IS NULL OR e.entity_type = $5) AND ($6::text IS NULL OR e.entity_id::text = $6)
+        ORDER BY e.id ${desc ? "DESC" : "ASC"} LIMIT 500`,
+      [opts.from ?? null, opts.to ?? null, lo, hi, opts.entityType ?? null, opts.entityId ?? null])).rows;
+    if (!rows.length) break;
+    scanned += rows.length;
+    for (const e of (await toEnvelopes(db, rows)).filter((x) => keep(x, opts, areaId))) { if (out.length < limit) out.push(e); }
+    const edge = Number(rows[rows.length - 1].id);
+    if (desc) hi = edge; else lo = edge;
+    if (rows.length < 500) break;
+  }
+  return out;
 }
 
 /** The causal chain behind one event: its causes, recursively (bounded). */
@@ -205,13 +230,27 @@ export async function snapshot(pool: pg.Pool, f: Pick<Filter, "area"> = {}) {
     const A = areaId === undefined ? null : areaId;
     const q = async (sql: string, p: unknown[] = []) => (await c.query(sql, p)).rows;
     const cursor = Number((await q(`SELECT COALESCE(max(seq), 0) AS s FROM live_event`))[0].s);
-    const areas = await q(`SELECT a.id, a.name, a.status, (SELECT count(*)::int FROM project p WHERE p.area_id = a.id AND p.status = 'active' AND p.archived_at IS NULL) AS active_projects
+    const areaRows = await q(`SELECT a.id, a.name, a.status, (SELECT count(*)::int FROM project p WHERE p.area_id = a.id AND p.status = 'active' AND p.archived_at IS NULL) AS active_projects
         FROM area a WHERE a.archived_at IS NULL AND ($1::uuid IS NULL OR a.id = $1) ORDER BY a.name`, [A]);
+    // ADR-089 slice 0: the Area's verdict as Finagai computes it (same function as area_status, without its sweep), and
+    // whether it is Finagai's own internal test Area (never shown as a normal Area).
+    const areas = [];
+    for (const a of areaRows) {
+      const st = await areaStatusRead(c, { id: String(a.id), name: String(a.name) });
+      areas.push({ ...a, internal: a.name === TEST_AREA, health: { color: st.color, breaches: st.breaches, warnings: st.warnings } });
+    }
     const objectives = await q(`SELECT id, area_id, name, status, target_date FROM objective WHERE status = 'open' AND ($1::uuid IS NULL OR area_id = $1)`, [A]);
     const projects = await q(`SELECT id, area_id, name, status FROM project WHERE archived_at IS NULL AND status = 'active' AND ($1::uuid IS NULL OR area_id = $1) ORDER BY name LIMIT 200`, [A]);
-    const waits = await q(`SELECT f.id, COALESCE(f.area_id, p.area_id) AS area_id, f.summary, f.counterparty, f.state, f.due_at, f.origin, f.rule, f.opportunity_id
-        FROM followup f LEFT JOIN project p ON p.id = f.project_id WHERE f.state IN ('open','waiting','overdue') AND ($1::uuid IS NULL OR COALESCE(f.area_id, p.area_id) = $1) ORDER BY f.due_at NULLS LAST`, [A]);
-    const needsJulian = await q(`SELECT id, key, area_id, needs, summary, due_at, notified_at FROM escalation WHERE status = 'open' AND needs <> 'requested' AND ($1::uuid IS NULL OR area_id = $1)`, [A]);
+    const waits = (await q(`SELECT f.id, COALESCE(f.area_id, p.area_id) AS area_id, f.summary, f.counterparty, f.state, f.due_at, f.origin, f.rule, f.opportunity_id,
+        f.project_id,
+        EXISTS (SELECT 1 FROM escalation x WHERE x.status = 'open' AND x.needs <> 'requested' AND (x.followup_id = f.id OR x.key LIKE 'overdue:' || f.id::text || ':%')) AS escalated,
+        (f.origin = 'lifecycle' AND f.rule = ANY($2::text[])) AS julian_rule
+        FROM followup f LEFT JOIN project p ON p.id = f.project_id WHERE f.state IN ('open','waiting','overdue') AND ($1::uuid IS NULL OR COALESCE(f.area_id, p.area_id) = $1) ORDER BY f.due_at NULLS LAST`, [A, Object.keys(RULE_NEEDS)]))
+      // ADR-089 slice 0: who owns the next step, by the engine's own rule — a lifecycle step that needs Julian (RULE_NEEDS)
+      // or any wait with an open escalation is Julian's; every other wait is Finagai watching it.
+      .map(({ julian_rule, ...w }) => ({ ...w, owner: julian_rule || w.escalated ? "julian" : "finagai" }));
+    const needsJulian = (await q(`SELECT id, key, area_id, needs, summary, due_at, notified_at, created_at, followup_id FROM escalation WHERE status = 'open' AND needs <> 'requested' AND ($1::uuid IS NULL OR area_id = $1)`, [A]))
+      .map((e) => { const m = /@([a-z_]+):([0-9a-f-]{36})$/.exec(String(e.key)); return { ...e, subject: m ? { type: m[1], id: m[2] } : e.followup_id ? { type: "followup", id: e.followup_id } : null }; });
     const exceptions = await q(`SELECT key, detector, area_id, owner, severity, needs, summary, first_seen_at, remediation, remediation_attempts FROM operating_exception WHERE status = 'open' AND ($1::uuid IS NULL OR area_id = $1)`, [A]);
     const tasks = await q(`SELECT code, status, verification_status, awaiting_kind, left(request, 200) AS request, updated_at FROM control_task WHERE status IN ('active','waiting_approval','paused') ORDER BY code`);
     const lessons = await q(`SELECT key, kind, basis, status, area_id, left(statement, 300) AS statement, confidence, support, last_evidence_at, effect->>'type' AS effect FROM lesson

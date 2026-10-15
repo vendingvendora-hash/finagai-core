@@ -201,6 +201,11 @@ export async function areaStatus(pool, areaName, now = new Date()) {
     if ("error" in a)
         return a;
     await sweepOverdue(pool, now);
+    return areaStatusRead(pool, a, now);
+}
+/** The same verdict without the overdue sweep: a pure read (Command Center snapshot, ADR-089 slice 0). The engine
+ *  sweeps every 5 min, so between ticks the read can lag a just-passed due date by at most one tick. */
+export async function areaStatusRead(pool, a, now = new Date()) {
     const h = (await areaHealth(pool, a.id));
     const day = 86_400_000;
     const warnings = [];
