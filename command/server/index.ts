@@ -7,6 +7,7 @@
  *   POST /auth/logout             end the session (same-origin only)
  *   GET  /api/session             { signedIn } — never a token, never the principal id
  *   GET  /api/live/<allowed>      proxy to Core /live/<allowed> with the session's Core token; SSE streamed unbuffered
+ *                                 (contract, snapshot, events, history, stream, summary/reliability, chain/<eventId>)
  *   GET  /*                       the SPA (signed-in only; otherwise → /auth/login)
  *
  * Read-only toward Core: only GET, only the allow-listed /live paths. Tokens are added server-side and never echoed.
@@ -18,7 +19,8 @@ import { loadConfig, type CcConfig } from "./config.js";
 import { Oidc, SignInError } from "./oidc.js";
 import { Sessions } from "./session.js";
 
-const LIVE_PATHS = /^\/api\/live\/(contract|snapshot|events|history|stream|summary\/reliability)$/;
+// Slice 3: chain/<eventId> (the Why inspector's causal chain; a SELECT in Core). Still GET-only, still allow-listed.
+const LIVE_PATHS = /^\/api\/live\/(contract|snapshot|events|history|stream|summary\/reliability|chain\/\d{1,15})$/;
 const TYPES: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
   ".woff2": "font/woff2", ".woff": "font/woff", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".json": "application/json", ".txt": "text/plain; charset=utf-8" };
 const BASE_HEADERS = { "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "x-frame-options": "DENY", "cross-origin-opener-policy": "same-origin" };
@@ -31,6 +33,7 @@ export function createBff(cfg: CcConfig, deps: { fetchFn?: typeof fetch; log?: (
   const sessions = new Sessions(oidc, cfg.sessionIdleMs, undefined, log);
   const SESSION = cfg.secureCookies ? "__Host-fcc" : "fcc";
   const STATE = cfg.secureCookies ? "__Host-fcc-signin" : "fcc-signin";
+  const RETURN = cfg.secureCookies ? "__Host-fcc-return" : "fcc-return";
   // SameSite=Lax (not Strict): the sign-in callback is a top-level navigation coming back from the identity provider;
   // a Strict cookie would not be sent on that redirect chain and sign-in would loop. The app exposes no state-changing
   // GET, and the only POST (logout) checks Origin, so Lax gives the same protection here.
@@ -92,7 +95,12 @@ export function createBff(cfg: CcConfig, deps: { fetchFn?: typeof fetch; log?: (
     const signedIn = sessions.has(sid(req));
     const rel = normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, "");
     const isAsset = rel.startsWith("/assets/") || rel === "/notice.css" || rel === "/favicon.svg";
-    if (!signedIn && !isAsset) { res.writeHead(302, { location: "/auth/login", "cache-control": "no-store", ...BASE_HEADERS }); return res.end(); }
+    if (!signedIn && !isAsset) {
+      // Slice 3: a deep link (e.g. /?why=escalation:<id>) survives sign-in — only a same-origin "/?<query>" is ever kept
+      const back = returnPath(`${url.pathname}${url.search}`);
+      res.writeHead(302, { location: back && back !== "/" ? `/auth/login?return=${encodeURIComponent(back)}` : "/auth/login", "cache-control": "no-store", ...BASE_HEADERS });
+      return res.end();
+    }
     let file = join(cfg.staticDir, rel);
     if (!file.startsWith(cfg.staticDir)) return send(res, 404, { error: "not_found" });
     const exists = await stat(file).then((s) => s.isFile()).catch(() => false);
@@ -112,7 +120,8 @@ export function createBff(cfg: CcConfig, deps: { fetchFn?: typeof fetch; log?: (
         if (url.pathname === "/healthz") return send(res, 200, { ok: true, version: cfg.version });
         if (url.pathname === "/auth/login" && req.method === "GET") {
           const { redirect, stateCookie } = await oidc.begin();
-          res.writeHead(302, { location: redirect, "set-cookie": cookie(STATE, stateCookie, 600), "cache-control": "no-store", ...BASE_HEADERS });
+          const back = returnPath(url.searchParams.get("return") ?? "");
+          res.writeHead(302, { location: redirect, "set-cookie": [cookie(STATE, stateCookie, 600), ...(back ? [cookie(RETURN, encodeURIComponent(back), 600)] : [cookie(RETURN, "", 0)])], "cache-control": "no-store", ...BASE_HEADERS });
           return res.end();
         }
         if (url.pathname === "/auth/callback" && req.method === "GET") {
@@ -122,7 +131,8 @@ export function createBff(cfg: CcConfig, deps: { fetchFn?: typeof fetch; log?: (
             const tokens = await oidc.complete(url.searchParams.get("code") ?? "", url.searchParams.get("state") ?? "", readCookie(req.headers.cookie, STATE));
             const id = sessions.create(tokens);
             log("signed in", { sessions: sessions.size });
-            res.writeHead(302, { location: "/", "set-cookie": [cookie(SESSION, id, Math.floor(cfg.sessionIdleMs / 1000)), cookie(STATE, "", 0)], "cache-control": "no-store", ...BASE_HEADERS });
+            const back = returnPath(safeDecode(readCookie(req.headers.cookie, RETURN) ?? "")) ?? "/";
+            res.writeHead(302, { location: back, "set-cookie": [cookie(SESSION, id, Math.floor(cfg.sessionIdleMs / 1000)), cookie(STATE, "", 0), cookie(RETURN, "", 0)], "cache-control": "no-store", ...BASE_HEADERS });
             return res.end();
           } catch (e) {
             const why = e instanceof SignInError ? e.message : "sign-in failed";
@@ -166,3 +176,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   server.keepAliveTimeout = 65_000; server.headersTimeout = 66_000; server.requestTimeout = 0;   // SSE connections are long-lived
   server.listen(cfg.port, () => console.log(JSON.stringify({ level: "info", msg: "command center listening", port: cfg.port, version: cfg.version })));
 }
+
+/**
+ * Where to land after sign-in: only the app's own root with a plain query ("/?why=escalation:<id>&diag"), never another
+ * path, origin or scheme — so it can never become an open redirect. Anything else → null (land on "/").
+ */
+export function returnPath(v: string): string | null {
+  return /^\/(\?[A-Za-z0-9_=&:.%-]{1,300})?$/.test(v) ? v : null;
+}
+function safeDecode(v: string) { try { return decodeURIComponent(v); } catch { return ""; } }

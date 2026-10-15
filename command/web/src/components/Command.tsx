@@ -2,14 +2,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Conn } from "../live/store";
 import { calmSentences, canCannot, NEEDS_LABEL, type CommandView } from "../model/command";
 import type { LiveEvent, SnapshotNeed } from "../model/types";
-import { buildUnits, transitionOf, verbOf, textOf, type Unit } from "../model/units";
+import { buildUnits, historyText, openSubjects, transitionOf, verbOf, type Unit } from "../model/units";
+import { withWhy, type WhyTarget } from "../inspector/model";
 import { fmtAgo, fmtDay, fmtDue, fmtShortDay, fmtTime, fmtWhen } from "../format";
 
 interface Props {
   view: CommandView; events: LiveEvent[]; arrivedLive: Record<number, number>; conn: Conn; now: number;
   gaps: Array<{ from: number; to: number; missed: number }>; everything: boolean; setEverything?: (v: boolean) => void;
   lastSeen: number; reliabilityWhy: string[]; reliabilityVerdict: string | null; links: Set<string>;
+  /** open the read-only Why inspector (Review → the item; Why? → how it got here) */
+  onWhy: (t: WhyTarget, focus: "review" | "chain") => void;
 }
+type OnWhy = Props["onWhy"];
 const RAIL_MS = 12 * 3_600_000;
 
 export function CommandScreen(p: Props) {
@@ -17,9 +21,11 @@ export function CommandScreen(p: Props) {
   const live = p.conn === "live";
   // units touching Finagai's internal test Area are dropped (spec §2.1); "Everything" (diagnostic) shows them
   // the rail covers 12 hours; older events are kept only as context (linking units to internal test objects)
-  const units = useMemo(() => buildUnits(p.events, v.internalAreaIds, { everything: p.everything, links: p.links }).filter((u) => Date.parse(u.firstAt) >= p.now - RAIL_MS),
-    [p.events, v.internalAreaIds, p.everything, p.links, Math.floor(p.now / 60_000)]);
-  const since = units.filter((u) => u.firstId > p.lastSeen).length;
+  // ◆ on an activity item = its subject is open in Needs you right now (the snapshot), never inferred from history
+  const open = useMemo(() => openSubjects(v.needs), [v.needs]);
+  const units = useMemo(() => buildUnits(p.events, v.internalAreaIds, { everything: p.everything, links: p.links, open }).filter((u) => Date.parse(u.at) >= p.now - RAIL_MS),
+    [p.events, v.internalAreaIds, p.everything, p.links, open, Math.floor(p.now / 60_000)]);
+  const since = units.filter((u) => u.atId > p.lastSeen).length;
   // a decision card may move (fade in) only when its escalation.opened event just arrived over the live stream
   const openedLive = useMemo(() => new Set(p.events.filter((e) => e.class === "escalation.opened" && e.entity.id && p.now - (p.arrivedLive[e.eventId] ?? -Infinity) < 10_000).map((e) => e.entity.id!)),
     [p.events, p.arrivedLive, p.now]);
@@ -28,13 +34,13 @@ export function CommandScreen(p: Props) {
       <AreasRail view={v} />
       <main className="main" aria-label="Command">
         {v.calm ? <Calm view={v} /> : <>
-          <NeedsYou needs={v.needs} now={p.now} live={live} areaName={v.areaName} openedLive={openedLive} />
+          <NeedsYou needs={v.needs} now={p.now} live={live} areaName={v.areaName} openedLive={openedLive} onWhy={p.onWhy} />
           <OwnershipLine />
           <Handling view={v} now={p.now} live={live} />
         </>}
         <section className="mobile-recent" aria-label="Recent changes">
           <h2 className="section-title">Recent changes</h2>
-          <UnitList units={units.slice(0, 5)} now={p.now} arrived={p.arrivedLive} gaps={p.gaps} />
+          <UnitList units={units.slice(0, 5)} now={p.now} arrived={p.arrivedLive} gaps={p.gaps} onWhy={p.onWhy} />
         </section>
         <nav className="mobile-areas" aria-label="Areas">{v.areas.map((a) => <span key={a.area.id} className={`chip chip--${a.area.health.color}`}>{a.needs ? "◆ " : ""}{a.area.name}</span>)}</nav>
       </main>
@@ -43,9 +49,9 @@ export function CommandScreen(p: Props) {
           <h2 className="section-title">Live activity</h2>
           {p.setEverything && <label className="activity__mode"><input type="checkbox" checked={p.everything} onChange={(e) => p.setEverything!(e.target.checked)} /> Everything</label>}
         </div>
-        <UnitList units={units.slice(0, 40)} now={p.now} arrived={p.arrivedLive} gaps={p.gaps} empty="Nothing in the last 12 hours." />
+        <UnitList units={units.slice(0, 40)} now={p.now} arrived={p.arrivedLive} gaps={p.gaps} onWhy={p.onWhy} empty="Nothing in the last 12 hours." />
       </aside>
-      <ContextStrip view={v} since={since} units={units} now={p.now} why={p.reliabilityWhy} verdict={p.reliabilityVerdict} />
+      <ContextStrip view={v} since={since} units={units} now={p.now} why={p.reliabilityWhy} verdict={p.reliabilityVerdict} onWhy={p.onWhy} />
     </div>
   );
 }
@@ -69,7 +75,7 @@ function AreasRail({ view }: { view: CommandView }) {
   );
 }
 
-function NeedsYou({ needs, now, live, areaName, openedLive }: { needs: SnapshotNeed[]; now: number; live: boolean; areaName: (id: string | null) => string | null; openedLive: Set<string> }) {
+function NeedsYou({ needs, now, live, areaName, openedLive, onWhy }: { needs: SnapshotNeed[]; now: number; live: boolean; areaName: (id: string | null) => string | null; openedLive: Set<string>; onWhy: OnWhy }) {
   // a decision that disappears while live is shown as resolved for 6 s (a real escalation.resolved event caused it)
   const prev = useRef<SnapshotNeed[]>(needs);
   const [resolved, setResolved] = useState<Array<{ n: SnapshotNeed; at: number }>>([]);
@@ -99,11 +105,16 @@ function NeedsYou({ needs, now, live, areaName, openedLive }: { needs: SnapshotN
             </header>
             <p className="card__body">{n.summary}</p>
             {cc && <dl className="card__cc"><dt>Finagai can</dt><dd>{cc.can}</dd><dt>Only you can</dt><dd>{cc.only}</dd></dl>}
+            <div className="card__actions">
+              <WhyLink t={{ kind: "object", type: "escalation", id: n.id }} focus="review" onWhy={onWhy} className="btn">Review</WhyLink>
+              <WhyLink t={{ kind: "object", type: "escalation", id: n.id }} focus="chain" onWhy={onWhy} className="btn btn--quiet">Why?</WhyLink>
+            </div>
           </article>
         );
       })}
       {more.length > 0 && <details className="more"><summary>{more.length} more decision{more.length === 1 ? "" : "s"}</summary>
-        <ul>{more.map((n) => <li key={n.id}><span className="owner-mark owner-mark--julian" aria-hidden="true">◆</span> {n.summary} <span className="muted">{n.due_at ? fmtDue(n.due_at, now) : ""}</span></li>)}</ul></details>}
+        <ul>{more.map((n) => <li key={n.id}><span className="owner-mark owner-mark--julian" aria-hidden="true">◆</span> {n.summary} <span className="muted">{n.due_at ? fmtDue(n.due_at, now) : ""}</span>{" "}
+          <WhyLink t={{ kind: "object", type: "escalation", id: n.id }} focus="review" onWhy={onWhy} className="linkish">Review</WhyLink></li>)}</ul></details>}
       {resolved.map(({ n }) => <p key={`r${n.id}`} className="resolved">No longer needs you — {n.summary.split(" — ")[0]}</p>)}
       {shown.length === 0 && resolved.length === 0 && <p className="muted">Nothing needs you.</p>}
     </section>
@@ -148,54 +159,64 @@ function Calm({ view }: { view: CommandView }) {
   );
 }
 
-function UnitList({ units, now, arrived, gaps, empty }: { units: Unit[]; now: number; arrived: Record<number, number>; gaps: Array<{ from: number; to: number; missed: number }>; empty?: string }) {
+/** A real link (deep-linkable, opens in a new tab) that opens the inspector in place on a plain click. */
+function WhyLink({ t, focus, onWhy, className, children, label }: { t: WhyTarget; focus: "review" | "chain"; onWhy: OnWhy; className?: string; children: React.ReactNode; label?: string }) {
+  return <a href={withWhy(location.search, t)} className={className} aria-label={label}
+    onClick={(e) => { if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return; e.preventDefault(); onWhy(t, focus); }}>{children}</a>;
+}
+
+function UnitList({ units, now, arrived, gaps, empty, onWhy }: { units: Unit[]; now: number; arrived: Record<number, number>; gaps: Array<{ from: number; to: number; missed: number }>; empty?: string; onWhy: OnWhy }) {
   if (!units.length) return <p className="muted">{empty ?? "Nothing yet."}</p>;
   const items: Array<{ kind: "unit"; u: Unit } | { kind: "gap"; g: { from: number; to: number; missed: number } }> = [];
   const gs = [...gaps].sort((a, b) => b.to - a.to); let gi = 0;
   for (const u of units) {
-    while (gi < gs.length && Date.parse(u.firstAt) < gs[gi]!.from) { items.push({ kind: "gap", g: gs[gi]! }); gi++; }
+    while (gi < gs.length && Date.parse(u.at) < gs[gi]!.from) { items.push({ kind: "gap", g: gs[gi]! }); gi++; }
     items.push({ kind: "unit", u });
   }
   return (
     <ol className="units">
       {items.map((it) => it.kind === "gap"
         ? <li key={`g${it.g.from}`} className="gap">Disconnected {fmtTime(it.g.from)}–{fmtTime(it.g.to)} · {it.g.missed} change{it.g.missed === 1 ? "" : "s"} caught up</li>
-        : <UnitItem key={it.u.key} u={it.u} now={now} arrived={arrived} />)}
+        : <UnitItem key={it.u.key} u={it.u} now={now} arrived={arrived} onWhy={onWhy} />)}
     </ol>
   );
 }
 
-function UnitItem({ u, now, arrived }: { u: Unit; now: number; arrived: Record<number, number> }) {
+function UnitItem({ u, now, arrived, onWhy }: { u: Unit; now: number; arrived: Record<number, number>; onWhy: OnWhy }) {
   const [open, setOpen] = useState(false);
   const arrivals = u.events.map((e) => arrived[e.eventId]).filter((x): x is number => typeof x === "number");
   const latest = arrivals.length ? Math.max(...arrivals) : 0;
-  const isNew = arrivals.length > 0 && arrivals.length === u.events.length;          // the whole unit arrived live
+  const isNew = arrivals.length > 0 && arrivals.length === u.events.length;          // the whole item arrived live
   const grew = !isNew && latest > 0 && now - latest < 6_000 ? arrivals.length : 0;
   return (
-    <li className={`unit ${isNew && now - latest < 1_000 ? "unit--new" : ""} ${u.outcome ? `unit--${u.outcome}` : ""}`}>
-      <button className="unit__head" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <time className="unit__time" dateTime={u.firstAt}>{fmtWhen(u.firstAt, now)}</time>
-        <span className="unit__title">{u.yours && <span className="owner-mark owner-mark--julian" aria-label="yours">◆ </span>}{u.title}</span>
-        <span className="unit__meta">{u.area?.name ? `${u.area.name} · ` : ""}{u.steps.length} step{u.steps.length === 1 ? "" : "s"}{grew ? <span className="chip-new"> +{grew}</span> : null}</span>
-      </button>
+    <li className={`unit ${isNew && now - latest < 1_000 ? "unit--new" : ""} ${u.outcome ? `unit--${u.outcome}` : ""}`} data-unit={u.key}>
+      <div className="unit__row">
+        <button className="unit__head" aria-expanded={open} onClick={() => setOpen(!open)}>
+          <time className="unit__time" dateTime={u.at}>{fmtWhen(u.at, now)}</time>
+          <span className="unit__title">{u.yours && <span className="owner-mark owner-mark--julian" aria-label="needs you now">◆ </span>}{u.title}</span>
+          <span className="unit__meta">{u.area?.name ? `${u.area.name} · ` : ""}{u.steps.length} step{u.steps.length === 1 ? "" : "s"}{grew ? <span className="chip-new"> +{grew}</span> : null}</span>
+        </button>
+        <WhyLink t={{ kind: "event", id: u.rootEventId }} focus="chain" onWhy={onWhy} className="unit__why" label={`Why: ${u.title}`}>Why?</WhyLink>
+      </div>
       {open && <ol className="steps">{u.steps.map((e) => (
         <li key={e.eventId} className="step">
           <time dateTime={e.at}>{fmtTime(e.at)}</time>
           <span className="step__verb">{verbOf(e.class)}</span>
-          <span className="step__text">{textOf(e) || ""}{transitionOf(e) ? <span className="step__tr"> ({transitionOf(e)})</span> : null}</span>
+          <span className="step__text">{historyText(e)}{transitionOf(e) ? <span className="step__tr"> ({transitionOf(e)})</span> : null}{" "}
+            <WhyLink t={{ kind: "event", id: e.eventId }} focus="chain" onWhy={onWhy} className="step__why" label={`Why: ${verbOf(e.class)}`}>Why?</WhyLink></span>
         </li>))}</ol>}
     </li>
   );
 }
 
-function ContextStrip({ view: v, since, units, now, why, verdict }: { view: CommandView; since: number; units: Unit[]; now: number; why: string[]; verdict: string | null }) {
+function ContextStrip({ view: v, since, units, now, why, verdict, onWhy }: { view: CommandView; since: number; units: Unit[]; now: number; why: string[]; verdict: string | null; onWhy: OnWhy }) {
   const [tab, setTab] = useState<null | "since" | "upcoming" | "waiting" | "reliability">(null);
   const toggle = (t: typeof tab) => setTab(tab === t ? null : t);
   const people = v.waitingOn.length;
   return (
     <footer className="strip" aria-label="Context">
       {tab && <div className="strip__drawer" role="region" aria-label={tab}>
-        {tab === "since" && (since ? <UnitList units={units.slice(0, since)} now={now} arrived={{}} gaps={[]} /> : <p className="muted">No changes since you last looked.</p>)}
+        {tab === "since" && (since ? <UnitList units={units.slice(0, since)} now={now} arrived={{}} gaps={[]} onWhy={onWhy} /> : <p className="muted">No changes since you last looked.</p>)}
         {tab === "upcoming" && (v.upcoming.length ? <ul className="list">{v.upcoming.map((x) => <li key={x.at + x.text}><span className="list__date">{fmtShortDay(x.at)}</span>{x.yours ? <span className="owner-mark owner-mark--julian">◆ </span> : null}{x.text}</li>)}</ul> : <p className="muted">Nothing due in the next 7 days.</p>)}
         {tab === "waiting" && (people ? <ul className="list">{v.waitingOn.map((w) => <li key={w.who}><b>{w.who}</b> — {w.items.map((i) => `${i.summary}${i.due_at ? ` (due ${fmtShortDay(i.due_at)})` : ""}`).join("; ")}</li>)}</ul> : <p className="muted">Finagai isn't waiting on anyone.</p>)}
         {tab === "reliability" && <div><p><b>{verdict === "healthy" ? "Healthy" : verdict === "degraded" ? "Degraded — Finagai is handling it" : "Checking…"}</b> (last 24 h)</p>{why.length ? <ul className="list">{why.map((w) => <li key={w}>{w}</li>)}</ul> : null}</div>}

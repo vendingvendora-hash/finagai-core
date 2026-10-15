@@ -6,15 +6,25 @@
 import type { LiveEvent } from "./types";
 
 export interface Unit {
+  /** the story's subject ("control_task:<id>") or, for a lone unit of work, its correlation id */
   key: string;
   events: LiveEvent[];
   steps: LiveEvent[];
   firstAt: string; lastAt: string; firstId: number; lastId: number;
+  /** when the item's latest significant step happened — the moment its title speaks of (shown, sorted and windowed by it;
+   *  a later routine re-check attached to the story does not make an old decision look new) */
+  at: string; atId: number;
   area: { id: string; name: string | null } | null;
+  /** past tense, phrased by the final recorded outcome — never an instruction (current state is Needs you's job) */
   title: string;
+  /** ◆: the subject is open in Julian's Needs you right now (authoritative snapshot) — never inferred from history */
   yours: boolean;
   outcome: "failed" | "recovered" | null;
   rank: number;
+  /** the event the Why inspector roots at for this item (its most significant step) */
+  rootEventId: number;
+  /** how many units of work (correlations) this item consolidates */
+  parts: number;
 }
 
 /** Hidden by default (Meaningful mode): server low-value, routine traffic, Finagai's own checks. */
@@ -42,13 +52,14 @@ const hasChanges = (e: LiveEvent) => Array.isArray((e.after as { changes?: unkno
 const VERB: Record<string, string> = {
   "entity.state_changed": "Changed status", "entity.created": "Created", "entity.archived": "Archived", "entity.updated": "Updated",
   "wait.started": "Started waiting", "wait.resolved": "Wait closed", "wait.expired": "Passed its due date", "wait.cancelled": "Wait replaced", "wait.updated": "Wait updated",
-  "escalation.opened": "Became your decision", "escalation.resolved": "No longer needs you", "escalation.notified": "You were emailed",
+  "escalation.opened": "Became your decision", "escalation.resolved": "Decision resolved", "escalation.notified": "You were emailed",
   "exception.opened": "Finagai found a problem", "exception.cleared": "Problem cleared", "exception.remediated": "Finagai applied a fix",
-  "task.recovered": "Recovered and continued", "task.failed": "A step failed", "task.completed": "Task finished", "task.created": "Task started",
+  "task.recovered": "Recovered and continued", "task.failed": "A step failed", "task.completed": "Task finished", "task.created": "Task started", "task.state_changed": "Task state changed", "task.step_proposed": "Step proposed",
   "evidence.attached": "New evidence", "evidence.observed": "Noticed", "evidence.classified": "Routed", "lesson.updated": "Learning updated", "lesson.learned": "Learned",
   "system.check_failed": "Self-check failed", "workflow.started": "Started", "workflow.completed": "Finished", "workflow.failed": "Workflow failed",
   "area.health_changed": "Area health changed", "notification.delivered": "Notice sent", "rule.fired": "Rule fired", "approval.requested": "Approval requested",
-  "project.state_changed": "Project changed", "relationship.changed": "Linked", "authority.boundary_encountered": "Needs your authority",
+  "project.state_changed": "Project changed", "relationship.changed": "Linked", "authority.boundary_encountered": "Reached your authority",
+  "workflow.invoked": "Trigger", "workflow.skipped": "Skipped", "other.control_step_approved": "Step approved", "other.control_step_ran": "Step ran",
 };
 export const verbOf = (cls: string) => VERB[cls] ?? cls.split(".").pop()!.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 
@@ -58,9 +69,13 @@ export function textOf(e: LiveEvent): string {
   const a = (e.after ?? {}) as Record<string, unknown>;
   return (s || String(a.summary ?? a.outcome ?? a.statement ?? "")).trim();
 }
-const firstClause = (s: string) => s.split(" — ")[0]!.trim();
 const cleanChange = (s: string) => s.replace(/\s*\[[^\]]*\]\s*$/, "").replace(/^status:\s*/, "").replace(/^event:\s*/, "").trim();
-const clip = (s: string, n = 90) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
+/** Shorten to n characters at a word boundary when one is near. */
+const clip = (s: string, n = 90) => {
+  if (s.length <= n) return s;
+  const cut = s.slice(0, n - 1); const sp = cut.lastIndexOf(" ");
+  return `${(sp > n - 25 ? cut.slice(0, sp) : cut).trimEnd()}…`;
+};
 const pretty = (s: string) => s.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 /** Before → after for a transition, changed keys only (e.g. "status: applied → offer"). */
@@ -76,12 +91,63 @@ export function transitionOf(e: LiveEvent): string | null {
 }
 const fmtVal = (v: unknown) => (v === null || v === undefined ? "none" : typeof v === "string" && /^\d{4}-\d{2}-\d{2}T/.test(v) ? v.slice(0, 10) : String(v));
 
+/**
+ * What a decision was about, as recorded, without the instruction Core attached for the moment it was open
+ * ("— approve a follow-up …, give a new date, or close it", "Reply "ok 406" …"). An open decision's instruction is shown
+ * by Needs you, from the snapshot; history never repeats it as if it were current. Mac waits read in the past tense.
+ */
+export function decisionText(e: LiveEvent): string {
+  const a = (e.after ?? e.before ?? {}) as Record<string, unknown>;
+  let s = String(a.summary ?? textOf(e));
+  if (/^mac:/.test(String(a.key ?? "")) || /^Mac task \d+ (is waiting|paused and is waiting)/.test(s)) {
+    s = s.replace(/\.?\s*Reply\b[\s\S]*$/, "")
+      .replace(/ is waiting for your approval/, " asked for your approval").replace(/ is waiting for your answer/, " asked you a question")
+      .replace(/ is waiting for your direction/, " asked for your direction").replace(/ paused and is waiting for you/, " paused and asked for you");
+    return s.trim();
+  }
+  s = s.replace(/ — approve applying it\? /, ": ");
+  const parts = s.split(" — ");
+  const kept = [parts[0]!, ...parts.slice(1).filter((p) => !INSTRUCTION.test(p.trim()) && !/only you can/i.test(p))];
+  return kept.join(" — ").trim();
+}
+const INSTRUCTION = /^(approve|decide|reply|give|close|choose|confirm|answer|review|raise|re-?authori[sz]e|wake|respond|accept|tell|open|resume|stop)\b/i;
+
+/** A recorded event in plain words, in the past tense, never phrased as a current instruction (history and Why). */
+export function historyText(e: LiveEvent): string {
+  if (e.domain === "escalation") return decisionText(e);
+  if (e.class === "workflow.invoked") return invokedText(e);
+  const t = textOf(e);
+  const r = (e.after as Record<string, unknown> | null)?.result;
+  return t || (typeof r === "string" && r.trim() ? `result: ${clip(r.trim(), 120)}` : "");
+}
+
+/** What started a unit of work (Core records it once as `work_invoked {what}`), in plain words. */
+export function invokedText(e: LiveEvent): string {
+  const a = (e.after ?? {}) as Record<string, unknown>;
+  const what = String(a.what ?? "");
+  const [kind, ...rest] = what.split(":"); const arg = rest.join(":");
+  switch (kind) {
+    case "engine": if (arg === "tick") return a.trigger === "interval" ? "Finagai's regular 5-minute check ran" : "Finagai's check ran (on request)"; break;
+    case "tool": return `A request through Claude used Finagai's ${arg.replace(/_/g, " ")} tool`;
+    case "mac": return MAC_PATH[arg] ?? `The Mac helper contacted Finagai (${arg})`;
+    case "job": return `Scheduled job ran: ${pretty(arg)}`;
+    case "scheduler": return arg === "dead-man-check" ? "Finagai's watchdog checked that its checks are running" : `Finagai's scheduler ran ${arg}`;
+    case "http": return /\/approval/.test(arg) ? "You opened an approval link" : "A request reached Finagai";
+    case "canary": return "Finagai ran an internal test";
+  }
+  return what ? `Started: ${what}` : "Work started";
+}
+const MAC_PATH: Record<string, string> = {
+  "/control/next": "The Mac helper asked Finagai for its next step", "/control/decision": "The Mac helper passed on your reply",
+  "/control/ran": "The Mac helper reported a step's result", "/mac/heartbeat": "The Mac helper checked in", "/artifact/register": "The Mac helper saved a file",
+};
+
 function titleOf(top: LiveEvent, events: LiveEvent[]): string {
   const a = (top.after ?? {}) as Record<string, unknown>;
   const changes = events.flatMap((e) => (hasChanges(e) ? ((e.after as { changes: string[] }).changes) : []));
   switch (top.class) {
-    case "escalation.opened": return `${firstClause(String(a.summary ?? textOf(top)))} — now your decision`;
-    case "escalation.resolved": return `${firstClause(String(a.summary ?? textOf(top)))} — no longer needs you`;
+    case "escalation.opened": return `${clip(decisionText(top), 110)} — became your decision`;
+    case "escalation.resolved": return `${clip(decisionText(top), 110)} — resolved${a.resolution ? ` (${String(a.resolution)})` : ""}`;
     case "wait.expired": return `${String(a.summary ?? textOf(top))} — passed its due date`;
     case "exception.opened": return `Finagai found a problem: ${String(a.summary ?? textOf(top))}`;
     case "exception.cleared": return `Problem cleared: ${String(a.summary ?? textOf(top))}`;
@@ -89,8 +155,8 @@ function titleOf(top: LiveEvent, events: LiveEvent[]): string {
     case "task.recovered": return `Recovered and continued — ${textOf(top)}`;
     case "task.created": return `Mac task${a.code ? ` ${String(a.code)}` : ""} started: ${clip(String(a.request ?? textOf(top)))}`;
     case "task.state_changed":
-      if (a.status === "waiting_approval" || top.nextOwner === "julian") return `Mac task is waiting for your approval — ${clip(String(a.reason ?? textOf(top)).replace(/^step \d+:\s*/, ""))}`;
-      return `Mac task ${pretty(String(a.status ?? "changed"))}${a.reason ? ` — ${clip(String(a.reason))}` : ""}`;
+      if (a.status === "waiting_approval" || top.nextOwner === "julian") return `Mac task asked for your approval — ${clip(String(a.reason ?? textOf(top)).replace(/^step \d+:\s*/, ""))}`;
+      return `Mac task ${TASK_STATUS[String(a.status)] ?? "changed state"}${a.reason ? ` — ${clip(String(a.reason))}` : ""}`;
     case "area.health_changed": return `${top.area?.name ?? "Area"} health: ${String((top.before as Record<string, unknown> | null)?.color ?? "?")} → ${String(a.color ?? "?")}`;
     case "workflow.completed":
       if (top.action === "job_finished") return `${pretty(String(a.job ?? "Scheduled job"))} ${a.status === "failed" ? "failed" : "completed"}`;
@@ -147,39 +213,183 @@ export function internalEvent(e: LiveEvent, internalAreaIds: Set<string>, links:
   return (!!e.area && internalAreaIds.has(e.area.id)) || isCanaryRun(e) || objectsOf(e).some((id) => links.has(id));
 }
 
-/**
- * Group events into units of work. Internal events (test Area, linked objects, canary runs) and hidden routine events
- * are not steps; a unit with no remaining steps is not shown — so a run that touched both a real job and the canary
- * still shows the real job, and nothing of the canary.
- */
-export function buildUnits(events: LiveEvent[], internalAreaIds: Set<string>, opts: { everything?: boolean; links?: Set<string> } = {}): Unit[] {
-  const links = opts.links ?? internalLinks(events, internalAreaIds);
+/** Mac task status → past-tense phrase. */
+const TASK_STATUS: Record<string, string> = { done: "completed", failed: "failed", cancelled: "was cancelled", expired: "expired", active: "resumed", paused: "paused",
+  waiting_approval: "waited for your approval" };
+/** A resolved Mac wait, by Core's recorded resolution. */
+const RESOLUTION: Array<[RegExp, (step: string | null) => string]> = [
+  [/step approved/i, (st) => `you approved ${st ? `step ${st}` : "the step"}`], [/step declined/i, (st) => `you declined ${st ? `step ${st}` : "the step"}`],
+  [/cancelled/i, () => "you cancelled it"], [/expired/i, () => "your answer was not given before it expired"], [/resumed/i, () => "you resumed it"],
+];
+/** An open (or unresolved-in-view) Mac wait, by its key. */
+function macAsk(key: string): string {
+  const step = /:step:(\d+)@/.exec(key)?.[1];
+  if (step) return `asked for your approval of step ${step}`;
+  if (/:question:/.test(key)) return "asked you a question";
+  if (/:rejected:/.test(key)) return "asked for your direction after a declined step";
+  return "paused and asked for you";
+}
+
+/** Group events into units of work (one correlation). Internal events never become steps (see internalEvent). */
+interface Raw { key: string; all: LiveEvent[]; evs: LiveEvent[]; steps: LiveEvent[]; top: LiveEvent | null; rank: number }
+function rawUnits(events: LiveEvent[], internalAreaIds: Set<string>, links: Set<string>, everything: boolean): Raw[] {
   const groups = new Map<string, LiveEvent[]>();
   for (const e of events) { const k = e.cause.correlationId ?? `e${e.eventId}`; const g = groups.get(k); if (g) g.push(e); else groups.set(k, [e]); }
-  const units: Unit[] = [];
+  const out: Raw[] = [];
   for (const [key, all] of groups) {
     all.sort((a, b) => a.eventId - b.eventId);
     // a canary run is internal from start to finish; any other run loses only its internal events
-    if (!opts.everything && all.some(isCanaryRun)) continue;
-    let evs = opts.everything ? all : all.filter((e) => !internalEvent(e, internalAreaIds, links));
+    if (!everything && all.some(isCanaryRun)) continue;
+    let evs = everything ? all : all.filter((e) => !internalEvent(e, internalAreaIds, links));
     // A run that also did internal work: its run-wide summaries (change lists) and its intake of evidence describe the
     // internal part too, so only the outcomes on real objects are kept.
     if (evs.length < all.length) evs = evs.filter((e) => !RUN_WIDE.has(e.class));
-    const steps = opts.everything ? evs : evs.filter((e) => !hiddenEvent(e));
-    if (!steps.length) continue;
-    const top = steps.reduce((b, e) => (rankOf(e) > rankOf(b) ? e : b), steps[0]!);
-    const rank = rankOf(top);
-    if (rank < SHOW_THRESHOLD && !opts.everything) continue;
-    units.push({
-      key, events: evs, steps, firstAt: steps[0]!.at, lastAt: steps[steps.length - 1]!.at, firstId: steps[0]!.eventId, lastId: steps[steps.length - 1]!.eventId,
-      area: steps.find((e) => e.area)?.area ?? null,
-      title: titleOf(top, evs),
-      // ◆ when the unit opened a decision for Julian, or ended waiting on him (spec §3.5: "ended with nextOwner = julian")
-      yours: steps.some((e) => e.nextOwner === "julian" && (e.class === "escalation.opened" || e.class === "approval.requested" || e.class === "authority.boundary_encountered"))
-        || steps[steps.length - 1]!.nextOwner === "julian",
-      outcome: steps.some((e) => e.class === "task.recovered") ? "recovered" : steps.some((e) => e.class === "workflow.failed" || e.class === "task.failed" || e.class === "system.check_failed") ? "failed" : null,
-      rank,
-    });
+    if (!evs.length) continue;
+    const steps = everything ? evs : evs.filter((e) => !hiddenEvent(e));
+    const top = steps.length ? topOf(steps) : null;
+    out.push({ key, all, evs, steps, top, rank: top ? rankOf(top) : 0 });
   }
-  return units.sort((a, b) => b.firstId - a.firstId);
+  return out;
+}
+
+/** What a decision is about: the subject in its key (`…@type:uuid`), or the follow-up its key names. */
+const KEY_SUBJECT = /^(?:followup|overdue):([0-9a-f-]{36})/;
+export function subjectOf(e: LiveEvent): string | null {
+  if (e.domain === "escalation") {
+    const key = String(((e.after ?? e.before) as Record<string, unknown> | null)?.key ?? "");
+    const at = SUBJECT.exec(key); if (at) return `${at[1]}:${at[2]}`;
+    const f = KEY_SUBJECT.exec(key); if (f) return `followup:${f[1]}`;
+    return e.entity.id ? `escalation:${e.entity.id}` : null;
+  }
+  return e.entity.id && e.entity.type && STORY_TYPES.has(e.entity.type) ? `${e.entity.type}:${e.entity.id}` : null;
+}
+const STORY_TYPES = new Set(["control_task", "control_step", "opportunity", "followup", "project", "lesson", "operating_exception", "escalation"]);
+/**
+ * The business objects an event is about (for attaching minor fragments such as "the step ran" to their story). Only
+ * story objects count — never an Area, a tick, an inbound item or a tool, which many unrelated units share (production
+ * 2026-10-15: no-change career syncs on the Career Area must not join Beth Young's decision).
+ */
+function storyObjectsOf(e: LiveEvent): string[] {
+  const out = new Set<string>();
+  const s = subjectOf(e); if (s) out.add(s);
+  if (e.entity.id && e.entity.type && STORY_TYPES.has(e.entity.type)) out.add(`${e.entity.type}:${e.entity.id}`);
+  for (const side of [e.after, e.before] as Array<Record<string, unknown> | null>) if (side) for (const k of ["opportunity_id", "project_id", "followup_id"]) if (typeof side[k] === "string") out.add(`${k.replace("_id", "")}:${side[k] as string}`);
+  return [...out];
+}
+
+/**
+ * Live Activity items. The units of work about one subject are consolidated into one story, titled by its final recorded
+ * outcome in the past tense ("Mac task 137: you approved step 406; task completed — …") instead of adjacent lifecycle
+ * fragments ("Active", "Changed", "now your decision", "no longer needs you"). Every step stays in the story: history is
+ * consolidated, never hidden. A unit about no business object stays on its own.
+ * `open` = what is open in Needs you right now (authoritative snapshot, see openSubjects): only those items carry ◆.
+ * Ownership is never inferred from the history itself.
+ */
+export function buildUnits(events: LiveEvent[], internalAreaIds: Set<string>, opts: { everything?: boolean; links?: Set<string>; open?: Set<string> } = {}): Unit[] {
+  const everything = !!opts.everything;
+  const links = opts.links ?? internalLinks(events, internalAreaIds);
+  const open = opts.open ?? new Set<string>();
+  const raws = rawUnits(events, internalAreaIds, links, everything);
+  // 1) stories: units of work whose most significant event is about the same object
+  const stories = new Map<string, Raw[]>(); const lone: Raw[] = []; const minor: Raw[] = [];
+  for (const r of raws) {
+    const subject = r.top ? subjectOf(r.top) : null;
+    if (subject && r.rank >= SHOW_THRESHOLD) { const g = stories.get(subject); if (g) g.push(r); else stories.set(subject, [r]); }
+    else if (r.rank >= SHOW_THRESHOLD || (everything && r.steps.length)) lone.push(r);
+    else minor.push(r);
+  }
+  // 2) minor fragments of a story (e.g. "the step ran", unclassified in Core) join the story whose objects they mention
+  const objectsOfStory = new Map<string, Set<string>>();
+  for (const [k, rs] of stories) objectsOfStory.set(k, new Set(rs.flatMap((r) => r.evs.flatMap(storyObjectsOf))));
+  for (const m of minor) {
+    if (!m.steps.length) continue;
+    const objs = m.evs.flatMap(storyObjectsOf);
+    for (const [k, set] of objectsOfStory) if (objs.some((o) => set.has(o))) { stories.get(k)!.push(m); break; }
+  }
+  const items: Unit[] = [];
+  const make = (key: string, rs: Raw[], subject: string | null) => {
+    rs.sort((a, b) => a.evs[0]!.eventId - b.evs[0]!.eventId);
+    const evs = rs.flatMap((r) => r.evs).sort((a, b) => a.eventId - b.eventId);
+    const steps = rs.flatMap((r) => r.steps).sort((a, b) => a.eventId - b.eventId);
+    if (!steps.length) return;
+    const top = topOf(steps);
+    const topUnit = rs.find((r) => r.steps.includes(top))!;
+    const sig = [...steps].reverse().find((e) => rankOf(e) >= SHOW_THRESHOLD) ?? top;
+    const title = (subject && (rs.length > 1 || subject.startsWith("control_task:")) ? storyTitle(subject, evs) : null) ?? titleOf(top, topUnit.evs);
+    items.push({
+      key, events: evs, steps, firstAt: steps[0]!.at, lastAt: steps[steps.length - 1]!.at, firstId: steps[0]!.eventId, lastId: steps[steps.length - 1]!.eventId,
+      at: sig.at, atId: sig.eventId, area: steps.find((e) => e.area)?.area ?? null, title,
+      yours: !!subject && (open.has(subject) || evs.some((e) => e.domain === "escalation" && !!e.entity.id && open.has(`escalation:${e.entity.id}`))),
+      outcome: finalOutcome(steps), rank: rankOf(top), rootEventId: top.eventId, parts: rs.length,
+    });
+  };
+  for (const [k, rs] of stories) make(k, rs, k);
+  for (const r of lone) make(r.key, [r], null);
+  return items.sort((a, b) => b.atId - a.atId);
+}
+/** The most significant step; on a tie the later one (the story's final word). */
+const topOf = (steps: LiveEvent[]) => steps.reduce((b, e) => (rankOf(e) >= rankOf(b) ? e : b), steps[0]!);
+
+/** What Needs you holds right now (authoritative snapshot), as the subjects buildUnits and the inspector match against. */
+export function openSubjects(needs: Array<{ id: string; key: string; followup_id: string | null; subject: { type: string; id: string } | null }>): Set<string> {
+  const out = new Set<string>();
+  for (const n of needs) {
+    out.add(`escalation:${n.id}`);
+    if (n.subject) out.add(`${n.subject.type}:${n.subject.id}`);
+    if (n.followup_id) out.add(`followup:${n.followup_id}`);
+    const f = KEY_SUBJECT.exec(n.key); if (f) out.add(`followup:${f[1]}`);
+  }
+  return out;
+}
+
+/** failed / recovered only when that is how the story ENDED (a later success supersedes an earlier failure). */
+function finalOutcome(steps: LiveEvent[]): Unit["outcome"] {
+  const last = [...steps].reverse().find((e) => /^(task\.(completed|failed|recovered)|workflow\.(failed|completed)|system\.check_failed)$/.test(e.class)
+    || (e.class === "task.state_changed" && !!(e.after as Record<string, unknown> | null)?.status));
+  if (!last) return null;
+  if (last.class === "task.recovered") return "recovered";
+  if (last.class === "workflow.failed" || last.class === "task.failed" || last.class === "system.check_failed") return "failed";
+  if (last.class === "task.state_changed" && (last.after as Record<string, unknown>).status === "failed") return "failed";
+  return null;
+}
+
+/** A story's title, by its final recorded outcome, in the past tense. Null when the top event says it best. */
+function storyTitle(subject: string, evs: LiveEvent[]): string | null {
+  const after = (e: LiveEvent | undefined) => (e?.after ?? e?.before ?? {}) as Record<string, unknown>;
+  // each decision in the story, in order: opened → resolved (by escalation id)
+  const decisions: Array<{ opened: LiveEvent; resolved: LiveEvent | undefined }> = [];
+  for (const e of evs) if (e.class === "escalation.opened") decisions.push({ opened: e, resolved: evs.find((r) => r.class === "escalation.resolved" && r.entity.id === e.entity.id && r.eventId > e.eventId) });
+  // a resolution whose opening is older than the window still tells how the story went
+  for (const r of evs) if (r.class === "escalation.resolved" && !decisions.some((d) => d.opened.entity.id === r.entity.id)) decisions.push({ opened: r, resolved: r });
+  decisions.sort((a, b) => a.opened.eventId - b.opened.eventId);
+  if (subject.startsWith("control_task:")) {
+    const created = evs.find((e) => e.class === "task.created");
+    const key0 = String(after(decisions[0]?.opened).key ?? "");
+    const code = /^mac:(\d+):/.exec(key0)?.[1] ?? (after(created).code != null ? String(after(created).code) : null);
+    const clauses = decisions.map(({ opened, resolved }) => {
+      const key = String(after(opened).key ?? "");
+      if (!resolved) return macAsk(key);
+      const step = /:step:(\d+)@/.exec(key)?.[1] ?? null;
+      return RESOLUTION.find(([re]) => re.test(String(after(resolved).resolution ?? "")))?.[1](step) ?? `${macAsk(key)} (resolved)`;
+    });
+    if (!decisions.length && evs.some((e) => e.class === "task.state_changed" && after(e).status === "waiting_approval")) clauses.push("waited for your approval");
+    const lastState = [...evs].reverse().find((e) => e.class === "task.completed" || (e.class === "task.state_changed" && typeof after(e).status === "string"));
+    const status = lastState?.class === "task.completed" ? "done" : String(after(lastState).status ?? "");
+    const lastClause = clauses[clauses.length - 1] ?? "";
+    const redundant = (status === "waiting_approval" && /approval/.test(lastClause)) || (status === "active" && decisions.length > 0) || (status === "cancelled" && /cancelled/.test(lastClause))
+      || (status === "paused" && /paused|asked/.test(lastClause));
+    if (TASK_STATUS[status] && !redundant) clauses.push(`task ${TASK_STATUS[status]}`);
+    if (!clauses.length) clauses.push(created ? "started" : "changed state");
+    const result = lastState?.class === "task.completed" ? String(after(lastState).summary ?? "") : created && !decisions.length ? String(after(created).request ?? "") : "";
+    return `Mac task${code ? ` ${code}` : ""}: ${clauses.slice(-3).join("; ")}${result ? ` — ${clip(result, 80)}` : ""}`;
+  }
+  const last = decisions[decisions.length - 1];
+  if (!last) return null;
+  const what = clip(decisionText(last.opened), 110);
+  if (!last.resolved) return `${what} — became your decision`;
+  const how = String(after(last.resolved).resolution ?? "");
+  // a state change recorded after the decision closed is how the story ended
+  const later = [...evs].reverse().find((e) => e.eventId > last.resolved!.eventId && e.class === "entity.state_changed");
+  const then = later ? cleanChange(((later.after as { changes?: string[] } | null)?.changes ?? [])[0] ?? transitionOf(later) ?? "") : "";
+  return `${what} — resolved${how ? ` (${how})` : ""}${then ? `; then ${then}` : ""}`;
 }

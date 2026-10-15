@@ -1,6 +1,6 @@
 /** Live activity = units of work (spec §3.5, §14.2): grouping, titling, hiding, internal exclusion. */
 import { describe, expect, it } from "vitest";
-import { buildUnits, hiddenEvent, internalLinks, transitionOf } from "../../web/src/model/units";
+import { buildUnits, decisionText, hiddenEvent, historyText, internalLinks, openSubjects, transitionOf } from "../../web/src/model/units";
 import { corr, ev } from "./fixtures";
 
 const career = { id: "a-career", name: "Career" };
@@ -27,8 +27,8 @@ describe("buildUnits", () => {
       ev({ class: "workflow.completed", cause: corr("t1"), area: career }),
     ], new Set());
     expect(u).toHaveLength(1);
-    expect(u[0]!.title).toBe("No answer from Beth Young — now your decision");
-    expect(u[0]!.yours).toBe(true);
+    expect(u[0]!.title).toBe("No answer from Beth Young — became your decision");
+    expect(u[0]!.yours).toBe(false);                 // ◆ comes only from the snapshot (nothing open was passed)
     expect(u[0]!.area?.name).toBe("Career");
     expect(u[0]!.steps.map((e) => e.class)).toEqual(["workflow.started", "wait.expired", "escalation.opened", "workflow.completed"]);
   });
@@ -106,30 +106,144 @@ describe("internal test work never reaches Live activity (production finding 202
 
   it("a mixed run shows only the real job's outcome; the canary's decision and resolution do not appear at all", () => {
     const u = buildUnits(evs, internalAreas);
-    expect(u.map((x) => x.key)).toEqual(["run"]);
+    expect(u.map((x) => x.key)).toEqual([`opportunity:${realOpp}`]);
     expect(u[0]!.title).toBe("Sky Solutions — applied → interviewing");
     const text = JSON.stringify(u.map((x) => [x.title, x.steps.map((e) => [e.summary, e.after])]));
     expect(text).not.toMatch(/CANARY|Canary/);
   });
 
   it("Everything (diagnostic) still shows all of it", () => {
-    expect(buildUnits(evs, internalAreas, { everything: true }).map((x) => x.key).sort()).toEqual(["later", "run"]);
+    const u = buildUnits(evs, internalAreas, { everything: true });
+    expect(u.flatMap((x) => x.events.map((e) => e.eventId)).sort()).toEqual(evs.map((e) => e.eventId).sort());
   });
 });
 
-describe("Mac tasks in Live activity (production finding 2026-10-15: a step waiting on Julian was invisible)", () => {
-  it("a task's start and its wait for Julian's approval are shown, titled from Core's fields, with ◆ when it waits on him", () => {
+/** Production event sequence of Mac task 137 (2026-10-15, events 2671–2717), trimmed to the fields Command reads. */
+const TASK = "88ebe32b-385c-444e-b443-9d9e9caa63d9", STEP = "0e32e995-0000-4000-8000-000000000406", ESC = "6c51aaaa-0000-4000-8000-000000000001";
+const KEY = `mac:137:step:406@control_task:${TASK}`;
+const SUMMARY = "Mac task 137 is waiting for your approval — step 406: Run the read-only command `sw_vers -productVersion` to get the macOS version. Reply \"ok 406\" or \"no 406\" in Messages, or \"stop 137\".";
+const task = { type: "control_task", id: TASK }, step = { type: "control_step", id: STEP }, esc = { type: "escalation", id: ESC };
+function task137(upTo = 2717) {
+  return [
+    ev({ eventId: 2671, class: "workflow.invoked", action: "work_invoked", actor: "julian", cause: corr("8e1e"), after: { what: "tool:control_mac" } }),
+    ev({ eventId: 2672, class: "task.created", cause: corr("8e1e"), entity: task, nextOwner: "finagai", summary: "task.created", after: { code: 137, request: "Read-only check, change nothing: run `sw_vers -productVersion`" } }),
+    ev({ eventId: 2674, class: "workflow.invoked", action: "work_invoked", actor: "j6", cause: corr("3676"), after: { what: "mac:/control/next" } }),
+    ev({ eventId: 2676, class: "task.step_proposed", cause: corr("3676"), entity: step, summary: "task.step_proposed: Run the read-only command `sw_vers -productVersion`", after: { code: 406, kind: "run", summary: "Run the read-only command" } }),
+    ev({ eventId: 2677, class: "task.state_changed", cause: corr("3676"), entity: task, nextOwner: "julian", summary: "task.state_changed: waiting_approval", before: { status: "active" }, after: { status: "waiting_approval", kind: "approval", reason: "step 406: Run the read-only command `sw_vers -productVersion` to get the macOS version" } }),
+    ev({ eventId: 2684, class: "workflow.invoked", action: "work_invoked", cause: corr("6c51"), after: { what: "engine:tick", trigger: "interval" } }),
+    ev({ eventId: 2685, class: "escalation.opened", cause: corr("6c51"), entity: esc, nextOwner: "julian", summary: `escalation.opened: ${SUMMARY}`, after: { key: KEY, needs: "authorization", summary: SUMMARY } }),
+    ev({ eventId: 2707, class: "workflow.invoked", action: "work_invoked", actor: "j6", cause: corr("def4"), after: { what: "mac:/control/decision" } }),
+    ev({ eventId: 2708, class: "task.state_changed", cause: corr("def4"), entity: task, summary: "task.state_changed: active", before: { status: "waiting_approval" }, after: { status: "active", decision: "step approved" } }),
+    ev({ eventId: 2709, class: "task.state_changed", cause: corr("def4"), entity: task, summary: "task.state_changed", before: { awaiting_kind: "approval" }, after: { waitEnded: true, awaiting_kind: null } }),
+    ev({ eventId: 2710, class: "escalation.resolved", cause: corr("def4"), entity: esc, summary: `escalation.resolved: ${SUMMARY}`, before: { status: "open" }, after: { key: KEY, needs: "authorization", status: "resolved", summary: SUMMARY, resolution: "step approved by Julian" } }),
+    ev({ eventId: 2711, class: "other.control_step_approved", action: "control_step_approved", cause: corr("def4"), entity: step, summary: "other.control_step_approved" }),
+    ev({ eventId: 2712, class: "workflow.invoked", action: "work_invoked", actor: "j6", cause: corr("d675"), after: { what: "mac:/control/ran" } }),
+    ev({ eventId: 2713, class: "other.control_step_ran", action: "control_step_ran", cause: corr("d675"), entity: step, summary: "other.control_step_ran", after: { result: "15.3.1\n" } }),
+    ev({ eventId: 2714, class: "workflow.invoked", action: "work_invoked", actor: "j6", cause: corr("86a8"), after: { what: "mac:/mac/heartbeat" } }),
+    ev({ eventId: 2715, class: "task.state_changed", cause: corr("86a8"), entity: task, summary: "task.state_changed: failed", before: { status: "active" }, after: { status: "failed", why: "stalled: no progress for 10 min after the lease expired", failure_class: "stalled" } }),
+    ev({ eventId: 2716, class: "workflow.invoked", action: "work_invoked", actor: "j6", cause: corr("f87a"), after: { what: "mac:/control/next" } }),
+    ev({ eventId: 2717, class: "task.completed", cause: corr("f87a"), entity: task, summary: "task.completed: macOS version is 15.3.1", before: { status: "failed" }, after: { status: "done", summary: "macOS version is 15.3.1, read with `sw_vers -productVersion`. Nothing was changed.", terminal_reason: "verified" } }),
+  ].filter((e) => e.eventId <= upTo);
+}
+const PRESENT_INSTRUCTION = /now your decision|no longer needs you|is waiting for your|Reply "ok|— approve|give a new date|or close it/i;
+
+describe("Live activity is history: one story per unit of work, phrased by its final outcome (Slice 3 activity semantics)", () => {
+  it("task 137's seven units of work are ONE story, titled by how it ended, past tense, every step kept", () => {
+    const u = buildUnits(task137(), new Set());
+    expect(u).toHaveLength(1);
+    expect(u[0]!.title).toBe("Mac task 137: you approved step 406; task completed — macOS version is 15.3.1, read with `sw_vers -productVersion`. Nothing was…");
+    expect(u[0]!.outcome).toBeNull();                               // the stall was superseded by completion
+    expect(u[0]!.yours).toBe(false);
+    expect(u[0]!.parts).toBe(7);
+    // history is consolidated, not hidden: every visible step of every unit is in the story
+    expect(u[0]!.steps.map((e) => e.eventId)).toEqual([2672, 2676, 2677, 2685, 2708, 2709, 2710, 2711, 2713, 2715, 2717]);
+    expect(u[0]!.lastId).toBe(2717);
+    // no line of it reads as a current instruction
+    for (const t of [u[0]!.title, ...u[0]!.steps.map(historyText)]) expect(t).not.toMatch(PRESENT_INSTRUCTION);
+    expect(historyText(u[0]!.steps.find((e) => e.eventId === 2685)!)).toBe("Mac task 137 asked for your approval — step 406: Run the read-only command `sw_vers -productVersion` to get the macOS version");
+    expect(historyText(u[0]!.steps.find((e) => e.eventId === 2713)!)).toBe("result: 15.3.1");
+  });
+
+  it("while the approval is still open the story says what was asked — and ◆ appears only because the snapshot lists it", () => {
+    const evs = task137(2685);
+    const closed = buildUnits(evs, new Set());
+    expect(closed[0]!.title).toBe("Mac task 137: asked for your approval of step 406");
+    expect(closed[0]!.yours).toBe(false);                           // history alone never makes it Julian's
+    const open = openSubjects([{ id: ESC, key: KEY, followup_id: null, subject: task }]);
+    const u = buildUnits(evs, new Set(), { open });
+    expect(u[0]!.title).toBe("Mac task 137: asked for your approval of step 406");
+    expect(u[0]!.yours).toBe(true);
+    // ... and once Core resolves it, the same story is history: no ◆ even though an event said nextOwner julian
+    const after = buildUnits(task137(), new Set(), { open: openSubjects([]) });
+    expect(after[0]!.yours).toBe(false);
+  });
+
+  it("a stale open-set never lies about the past: the title follows the recorded outcome", () => {
+    const open = openSubjects([{ id: ESC, key: KEY, followup_id: null, subject: task }]);
+    expect(buildUnits(task137(), new Set(), { open })[0]!.title).toMatch(/^Mac task 137: you approved step 406; task completed/);
+  });
+
+  it("decline → direction → cancel reads as what happened, in order", () => {
+    const T = "44444444-4444-4444-8444-444444444444", E1 = "e1000000-0000-4000-8000-000000000001", E2 = "e2000000-0000-4000-8000-000000000002";
+    const k1 = `mac:140:step:410@control_task:${T}`, k2 = `mac:140:rejected:1760000000000@control_task:${T}`;
     const u = buildUnits([
-      ev({ class: "workflow.invoked", cause: corr("t1"), action: "work_invoked", after: { what: "tool:control_mac" } }),
-      ev({ class: "task.created", cause: corr("t1"), entity: { type: "control_task", id: "33333333-3333-3333-3333-333333333333" }, summary: "task.created", after: { code: 137, request: "Report the macOS version" } }),
-      ev({ class: "workflow.invoked", cause: corr("t2"), action: "work_invoked", after: { what: "mac:/control/next" } }),
-      ev({ class: "task.step_proposed", cause: corr("t2"), summary: "task.step_proposed: Run sw_vers", after: { code: 406, summary: "Run sw_vers" } }),
-      ev({ class: "task.state_changed", cause: corr("t2"), nextOwner: "julian", entity: { type: "control_task", id: "33333333-3333-3333-3333-333333333333" }, summary: "task.state_changed: waiting_approval",
-        after: { status: "waiting_approval", reason: "step 406: Run the read-only command `sw_vers -productVersion`", waitingFor: "julian" } }),
+      ev({ class: "task.created", cause: corr("a"), entity: { type: "control_task", id: T }, after: { code: 140, request: "Send the reply" } }),
+      ev({ class: "escalation.opened", cause: corr("b"), entity: { type: "escalation", id: E1 }, after: { key: k1, summary: "Mac task 140 is waiting for your approval — step 410: Click Send. Reply \"ok 410\"" } }),
+      ev({ class: "escalation.resolved", cause: corr("c"), entity: { type: "escalation", id: E1 }, after: { key: k1, resolution: "step declined by Julian" } }),
+      ev({ class: "escalation.opened", cause: corr("c"), entity: { type: "escalation", id: E2 }, after: { key: k2, summary: "Mac task 140 is waiting for your direction after you declined a step — x. Reply in Messages" } }),
+      ev({ class: "escalation.resolved", cause: corr("d"), entity: { type: "escalation", id: E2 }, after: { key: k2, resolution: "task cancelled by Julian" } }),
+      ev({ class: "task.state_changed", cause: corr("d"), entity: { type: "control_task", id: T }, after: { status: "cancelled" } }),
     ], new Set());
-    expect(u.map((x) => [x.title, x.yours])).toEqual([
-      ["Mac task is waiting for your approval — Run the read-only command `sw_vers -productVersion`", true],
-      ["Mac task 137 started: Report the macOS version", false],
+    expect(u.map((x) => x.title)).toEqual(["Mac task 140: you declined step 410; you cancelled it"]);
+  });
+
+  it("a decision's story: opened, then resolved, then the outcome — instruction text never repeated", () => {
+    const F = "55555555-5555-4555-8555-555555555555", E = "e3000000-0000-4000-8000-000000000003";
+    const sum = "No answer from Beth Young by 2026-10-14 — approve a follow-up (Finagai drafts it; it goes out as you), give a new date, or close it";
+    const opened = [
+      ev({ class: "wait.expired", cause: corr("t1"), area: career, entity: { type: "followup", id: F }, after: { summary: "Waiting on Beth Young — Outcome of the panel" } }),
+      ev({ class: "escalation.opened", cause: corr("t1"), area: career, entity: { type: "escalation", id: E }, summary: `escalation.opened: ${sum}`, after: { key: `overdue:${F}:2026-10-14`, summary: sum } }),
+    ];
+    const open = buildUnits(opened, new Set(), { open: openSubjects([{ id: E, key: `overdue:${F}:2026-10-14`, followup_id: F, subject: null }]) });
+    expect(open.map((x) => [x.title, x.yours])).toEqual([["No answer from Beth Young by 2026-10-14 — became your decision", true]]);
+    const done = buildUnits([...opened,
+      ev({ class: "escalation.resolved", cause: corr("t2"), area: career, entity: { type: "escalation", id: E }, after: { key: `overdue:${F}:2026-10-14`, summary: sum, resolution: "Julian gave a new date" } }),
+      ev({ class: "wait.updated", cause: corr("t2"), area: career, entity: { type: "followup", id: F }, before: { due_at: "2026-10-14T00:00:00Z" }, after: { due_at: "2026-10-21T00:00:00Z" } }),
+    ], new Set());
+    expect(done.map((x) => [x.title, x.yours, x.parts])).toEqual([["No answer from Beth Young by 2026-10-14 — resolved (Julian gave a new date)", false, 2]]);
+    for (const e of done[0]!.steps) expect(historyText(e)).not.toMatch(PRESENT_INSTRUCTION);
+  });
+
+  it("routine work that only shares the Area never joins a story; the item is dated by the step its title speaks of", () => {
+    const F = "77777777-7777-4777-8777-777777777777", E = "e7000000-0000-4000-8000-000000000007", careerId = { type: "area", id: career.id };
+    const u = buildUnits([
+      ev({ eventId: 2411, at: "2026-10-14T18:02:00Z", class: "wait.expired", cause: corr("t1"), area: career, entity: { type: "followup", id: F }, after: { summary: "Waiting on Beth Young" } }),
+      ev({ eventId: 2413, at: "2026-10-14T18:04:00Z", class: "escalation.opened", cause: corr("t1"), area: career, entity: { type: "escalation", id: E }, after: { key: `overdue:${F}:2026-10-14`, summary: "No answer from Beth Young by 2026-10-14 — give a new date, or close it" } }),
+      ev({ eventId: 2414, at: "2026-10-14T18:04:01Z", class: "area.health_changed", cause: corr("t1"), area: career, entity: careerId, before: { color: "green" }, after: { color: "red" } }),
+      ev({ eventId: 2416, at: "2026-10-14T18:04:02Z", class: "escalation.notified", cause: corr("t1"), area: career, entity: { type: "escalation", id: E }, after: { key: `overdue:${F}:2026-10-14` } }),
+      // a later career sync with no changes, on the same Area (production events 2568–2572)
+      ev({ eventId: 2568, at: "2026-10-15T09:09:00Z", class: "evidence.observed", cause: corr("s"), entity: { type: "inbound_event", id: "3a25910a-d409-4cd5-b195-d48b253d4db7" }, summary: "evidence.observed: Career Copilot sheet changed" }),
+      ev({ eventId: 2571, at: "2026-10-15T09:09:02Z", class: "workflow.completed", action: "career_synced", cause: corr("s"), area: career, entity: careerId, after: { changes: [] } }),
+    ], new Set());
+    expect(u.map((x) => [x.title, x.steps.map((e) => e.eventId), x.at])).toEqual([
+      ["No answer from Beth Young by 2026-10-14 — became your decision", [2411, 2413, 2414, 2416], "2026-10-14T18:04:01Z"],
     ]);
+  });
+
+  it("decisionText keeps what a decision was about and drops only the instruction", () => {
+    const d = (summary: string, key = "x") => decisionText(ev({ class: "escalation.opened", after: { key, summary } }));
+    expect(d("Finagai couldn't clear this itself in 1 h: Gmail watcher failing — tell it to keep trying, or have it fixed")).toBe("Finagai couldn't clear this itself in 1 h: Gmail watcher failing");
+    expect(d("Finagai learned something that would change how it works — approve applying it? Follow up after 5 days")).toBe("Finagai learned something that would change how it works: Follow up after 5 days");
+    expect(d("Career: Acme — Analyst: evidence says interviewing but the job is withdrawn — interviewing reported after the job was withdrawn"))
+      .toBe("Career: Acme — Analyst: evidence says interviewing but the job is withdrawn — interviewing reported after the job was withdrawn");
+    expect(d("Your Mac has been unreachable for 2:10 and 1 Mac task(s) are waiting — wake it / open the Finagai helper (only you can)")).toBe("Your Mac has been unreachable for 2:10 and 1 Mac task(s) are waiting");
+  });
+
+  it("work about no object stays its own item; a minor fragment never becomes an item by itself", () => {
+    const u = buildUnits([
+      ev({ class: "workflow.completed", action: "job_finished", cause: corr("j"), after: { job: "daily_maintenance", status: "ok" } }),
+      ev({ class: "other.control_step_ran", action: "control_step_ran", cause: corr("m"), entity: { type: "control_step", id: "66666666-6666-4666-8666-666666666666" }, after: { result: "ok" } }),
+    ], new Set());
+    expect(u.map((x) => x.title)).toEqual(["Daily maintenance completed"]);
   });
 });

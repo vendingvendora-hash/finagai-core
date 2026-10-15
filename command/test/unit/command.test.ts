@@ -74,6 +74,11 @@ describe("canCannot", () => {
     expect(canCannot(need("x", null, { key: "overdue:abc:1" }))?.only).toMatch(/nudge/);
     expect(canCannot(need("x", null, { key: "something:else" }))).toBeNull();
   });
+  it("Mac waits (Core escalations): approval of a step vs. a commitment that goes out as Julian vs. a question", () => {
+    expect(canCannot(need("x", null, { key: "mac:137:step:406@control_task:t", needs: "authorization" }))).toEqual({ can: "run the step once you approve it, then check the result", only: "approve or decline the step (reply in Messages)" });
+    expect(canCannot(need("x", null, { key: "mac:140:step:410@control_task:t", needs: "principal_reserved" }))?.can).toMatch(/nothing goes out as you until you approve/);
+    expect(canCannot(need("x", null, { key: "mac:141:question:1760000000000@control_task:t", needs: "judgment" }))?.only).toBe("answer, resume or stop the task (in Messages)");
+  });
 });
 
 describe("time-driven state (production finding 2026-10-15)", () => {

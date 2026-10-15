@@ -110,6 +110,11 @@ export function canCannot(n: SnapshotNeed): { can: string; only: string } | null
   if (n.key.startsWith("exception:")) return n.needs === "judgment" ? { can: "keep retrying and report", only: "decide to keep trying or have it fixed" } : { can: "keep everything else running", only: "clear it — it needs your account, money or hands" };
   if (n.key.startsWith("lesson:")) return { can: "keep the lesson advisory", only: "approve or reject the change" };
   if (/offer/i.test(n.summary) && n.key.startsWith("followup:")) return { can: "gather the offer details and deadline", only: "accept, negotiate or decline" };
+  // a Mac task waiting for Julian (Core escalation, hotfix 45): the step waits; the Mac helper prompted him in Messages
+  if (/^mac:\d+:step:/.test(n.key)) return n.needs === "principal_reserved"
+    ? { can: "prepare the step and hold it — nothing goes out as you until you approve", only: "approve or decline the step (reply in Messages)" }
+    : { can: "run the step once you approve it, then check the result", only: "approve or decline the step (reply in Messages)" };
+  if (n.key.startsWith("mac:")) return { can: "keep the task paused and pick it up when you answer", only: "answer, resume or stop the task (in Messages)" };
   return null;
 }
 export const NEEDS_LABEL: Record<SnapshotNeed["needs"], string> = { judgment: "Your decision", authorization: "Your approval", principal_reserved: "Only you can do this" };

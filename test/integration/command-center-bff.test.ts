@@ -19,7 +19,7 @@ import { loadConfig } from "../../src/config/index.js";
 import { ensureArea } from "../../src/cos/operating.js";
 import { appendEvent } from "../../src/db/index.js";
 import { liveHandler } from "../../src/live/http.js";
-import { publish } from "../../src/live/stream.js";
+import { causalChain, publish } from "../../src/live/stream.js";
 import { createHandler } from "../../src/server/app.js";
 import { createLogger } from "../../src/server/log.js";
 import { createBff } from "../../command/server/index.js";
@@ -96,12 +96,37 @@ describe.skipIf(!admin || !migT || !appT)("Command Center BFF — auth and live 
     expect(body).toEqual(expect.objectContaining({ v: 2, cursor: expect.any(Number) }));
     // read-only: no other method, no other path
     expect((await b.go(`${bff.base}/api/live/snapshot`, { method: "POST" })).status).toBe(405);
-    expect((await b.go(`${bff.base}/api/live/chain/1`)).status).toBe(404);
+    for (const path of ["chain/abc", "chain/1/x", "chain/", "consequences/1", "acceptance"]) expect((await b.go(`${bff.base}/api/live/${path}`)).status).toBe(404);
+    // Slice 3: the Why inspector's chain is served through the BFF exactly as Core computes it
+    const a = await appendEvent(pool, { actor: "cos", action: "work_invoked", causeIds: [], after: { what: "engine:tick" } });
+    const c = await appendEvent(pool, { actor: "cos", action: "escalation_opened", entityType: "escalation", entityId: "00000000-0000-4000-8000-0000000000e1", causeIds: [a], after: { key: "k", needs: "judgment", summary: "s" } });
+    const via = await b.go(`${bff.base}/api/live/chain/${c}`);
+    expect(via.status).toBe(200);
+    expect((JSON.parse(via.text).chain as Array<{ eventId: number }>).map((e) => e.eventId)).toEqual((await causalChain(pool, c)).map((e) => e.eventId));
+    expect((JSON.parse(via.text).chain as Array<{ eventId: number }>).map((e) => e.eventId)).toEqual([a, c]);
+    expect((await b.go(`${bff.base}/api/live/chain/${c}`, { method: "POST" })).status).toBe(405);
     // the browser never sees a Core token or refresh token: not in any body, header or cookie it received
     for (const t of provider.issued) {
       for (const x of [...b.bodies, ...b.headers]) expect(x.includes(t)).toBe(false);
       for (const m of b.jar.values()) for (const v of m.values()) expect(v.includes(t)).toBe(false);
     }
+  });
+
+  it("a deep link survives sign-in (Slice 3: /?why=…), and the return address can only ever be the app's own root", async () => {
+    const b = browserLike();
+    const deep = await b.go(`${bff.base}/?why=escalation:00000000-0000-4000-8000-0000000000e1&diag`);
+    expect(deep.status).toBe(200);
+    expect(deep.url).toBe(`${bff.base}/?why=escalation:00000000-0000-4000-8000-0000000000e1&diag`);
+    expect([...(b.jar.get(new URL(bff.base).host)?.keys() ?? [])].some((k) => /return/.test(k))).toBe(false);   // used once, then cleared
+    for (const evil of ["//evil.example/x", "https://evil.example/", "/auth/logout", "/\\evil.example", "/?a=<script>"]) {
+      const c = browserLike();
+      const r = await c.go(`${bff.base}/auth/login?return=${encodeURIComponent(evil)}`);
+      expect(r.url).toBe(`${bff.base}/`);
+    }
+    const { returnPath } = await import("../../command/server/index.js");
+    expect(returnPath("/?why=123")).toBe("/?why=123");
+    expect(returnPath("/?why=escalation:ab-12&diag")).toBe("/?why=escalation:ab-12&diag");
+    for (const v of ["", "//x", "/x", "https://x", "/?why=a b", "/?x=\"", `/?${"a".repeat(400)}`]) expect(returnPath(v)).toBeNull();
   });
 
   it("streams live events through the BFF unbuffered, and resumes with Last-Event-ID without loss or duplicates", async () => {

@@ -154,3 +154,69 @@ implementation decisions and deviations.
 - The self-check at 17:38Z on `cb98826` passed. Reliability since the deploy is Healthy.
 - The 24-hour window shows Degraded until 2026-10-16 15:35Z; that is history, and the root cause is fixed.
 - The full handoff, including the matrix, deviations, limitations and the Slice 3 recommendation, is the project doc `FINAGAI_COMMAND_LIVE_HANDOFF_2026-10-15.md`. Slice 3 has not been started.
+
+## Slice 3 — the read-only Why inspector, and activity as history (hotfix 46)
+
+No Core change: Slice 3 uses Core's existing `/live/chain/<eventId>` and `/live/history`. The BFF allow-list gains `chain/<eventId>` (GET only, digits only).
+
+### Activity semantics (done first, as asked)
+
+- **One story per unit of work, phrased by how it ended, in the past tense.** The units of work (correlations) about one business object are consolidated into a single Live activity item. Examples:
+  - Mac task 137's seven units now read "Mac task 137: you approved step 406; task completed — macOS version is 15.3.1 …". Before, they read as "Active", "Changed", "now your decision" and "no longer needs you".
+  - A decision reads "No answer from Beth Young by 2026-10-14 — became your decision", and later "… — resolved (follow-up done)".
+- **Nothing is hidden.** Every step of every unit stays in the story's expanded list. Minor fragments, such as `control_step_ran`, join their story only through a recorded business object. They never join through a shared Area, tick, inbound item or tool. Production showed this matters: no-change career syncs on the Career Area had attached themselves to Beth Young's decision.
+- **History never reads as an instruction.** Instruction text that Core attached for while a decision was open ("— approve a follow-up …, give a new date, or close it", `Reply "ok 406" …`) is dropped from history. Mac waits are rephrased in the past tense ("asked for your approval"). The instruction still appears where it is current: on the Needs-you card, which comes from the snapshot.
+- **◆ comes only from the authoritative snapshot.** An item carries ◆ only while `needsJulian` lists its subject. It is never inferred from an event's `nextOwner`.
+- **Dating.** An item is dated, ordered and windowed by its latest significant step, which is the step its title describes. A later routine re-check does not make an old decision look new.
+
+### Why inspector (spec §6)
+
+- **Entry points:**
+  - Review and Why? on every Needs-you card (Review also appears in the overflow list).
+  - Why? on every activity item, which roots at its most significant step.
+  - Why? on every expanded step.
+  - Clicking an ancestor re-roots the inspector, with a breadcrumb back.
+- **State lives in the URL.**
+  - `?why=<eventId>` or `?why=<type>:<id>`. An object resolves to its latest event through `/live/history?entityType&entityId&order=desc&limit=1`.
+  - Deep links survive sign-in. The BFF keeps only a same-origin `/?<plain query>` return address in a short-lived HttpOnly cookie, so it cannot be an open redirect.
+  - Browser back closes the inspector or steps back through re-roots. Esc closes it and returns focus to where it was opened.
+- **"How it got here" is exactly Core's chain:** the root and every recorded ancestor, by id, each line with an event id behind it.
+  - A cause that an event cites but the chain lacks is shown as missing: "An earlier cause was recorded but isn't available — it is older than Finagai keeps, or further back than the explanation follows". It is never filled in.
+  - A recorded starting point says "Started here".
+  - Lines may rephrase recorded classes (the `workflow.invoked` triggers become "Finagai's regular 5-minute check ran", "The Mac helper passed on your reply"), but they never add a step.
+- **What else it shows:**
+  - before → after;
+  - evidence (the chain's `evidence` events);
+  - the owner now, from the snapshot only (needs, waits, tasks, problems). Otherwise "Nothing about this is open now", plus what was true when it was recorded;
+  - "Finagai can / Only you can" while a decision is open. Spec §6.4 copy now covers `mac:` keys;
+  - authorization (passkey), verification, confidence and provenance, each shown only when present.
+- Event, sequence and correlation ids appear only under "Technical details", which is closed by default.
+- **Not shown: consequences.** Core has no `/live/consequences` (D2c), and none is inferred. The inspector says "What happened after this step isn't shown yet."
+- **Layout:** a 480 px right panel below the top bar, so connection and health stay visible. On mobile (≤ 900 px) it is a full-screen sheet. Its 180 ms open is the only motion, and it happens on Julian's action.
+- **Read-only:** two GETs, and no actions (no approve, reject or close). Internal-testing events stay in a chain (it is Core's chain) with their content withheld.
+
+### Proof
+
+- **Unit tests:** stories built from the production event sequence for task 137 (2671–2717), decline → cancel, decision lifecycle, instruction stripping, Area-only linkage, and ◆ only from the snapshot. Inspector model tests cover the exact chain, missing causes, internal redaction, ownership from the snapshot only, record facts, the loader making two GETs, and failure states.
+- **BFF integration:** `/api/live/chain/<id>` equals `causalChain` and other paths stay 404. A deep link survives sign-in, and hostile return addresses land on `/`.
+- **Browser end-to-end:**
+  - Review opens the inspector rooted at the decision's latest event, and the chain equals Core's and the BFF's.
+  - Technical details stay hidden until opened. Re-rooting, the breadcrumb, Esc with focus return, and back all work.
+  - Activity Why? roots at the item.
+  - After resolution, the item is past tense with no ◆, and the inspector says nothing is open.
+  - Twenty random events each show exactly Core's chain.
+  - A depth-9 chain and a cause outside retention show as missing, and an object deep link resolves.
+  - Mobile is full-screen.
+  - Throughout, the page makes only GETs, and no business row, event or stream entry changes.
+
+### Governance note (recorded; not changed in Slice 3)
+
+- **Finding:** Mac task 137's `sw_vers -productVersion` needed Julian's approval as `HIGH_RISK`. Two classifications of the same step disagree:
+  - `isReadOnlyCommand` (j6/control.ts) marks it `risk: read`;
+  - `governance/authority.ts` classifies every `run` as `HIGH_RISK`, because `run` ∈ `HIGH`.
+- **Proposal, before Mac autonomy is broadened.** This is a proposal for Julian's approval. Nothing changes ad hoc.
+  1. **One effect-based classifier for `run`, used by both paths.** The command is parsed into argv with no shell. It must name an allow-listed program with an allow-listed argument grammar: no metacharacters, no redirection, no interpreters (`sh`, `python`, `osascript`), no network clients, no package managers, no write flags.
+  2. **Effect tiers.** R0, system metadata with no user content (`sw_vers`, `uname`, `date`, `uptime`, `whoami`, `df`, `pwd`) → `OBSERVE` (automatic). R1, reads user content on unprotected user paths (`ls`, `stat`, `cat`, `head`, `grep`, `mdfind`, `mdls`) → `OBSERVE` only inside an active principal envelope. Otherwise ask. Everything else → `HIGH_RISK`, as today.
+  3. **Helper enforcement.** The Mac helper runs an R0/R1 command with `execFile` (no shell) under a sandbox profile that denies file writes and network, with a timeout and an output cap. If the helper cannot enforce this, the class falls back to `HIGH_RISK`.
+  4. **Shadow first.** For N days, record what the new classifier would have decided next to the current decision. Report the approvals it would have saved and every disagreement, then switch only on Julian's explicit approval.
+  5. **Tests:** a table of allowed and refused commands, including adversarial ones: `sw_vers && rm -rf ~`, `$(…)`, `~/.finagai`, `/etc/passwd`, `../`, `cat ~/Library/Keychains/…`.

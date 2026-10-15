@@ -1,11 +1,15 @@
 /**
- * ADR-089 slices 1–2 — the Command screen in a real browser (headless Chromium), end to end:
+ * ADR-089 slices 1–3 — the Command screen and the Why inspector in a real browser (headless Chromium), end to end:
  *   real Core HTTP handler + test database  ←  BFF (session cookie, server-held tokens)  ←  the built SPA (command/dist/web)
  * signed in through a stand-in OIDC provider. Proves the Command Live acceptance points that can be proven off production:
  * calm state, ownership line, Needs you only from open escalations, no internal-Area/canary/low-value leakage, a real
  * engine-raised decision appears within 2 s (with motion only for that real event), a disconnect goes reconnecting →
  * offline/stale → resumes from the cursor with exactly the missed events and a fresh snapshot, mobile layout, zero
  * business writes and zero semantic events from the UI, and no Core token anywhere the browser can reach.
+ * Slice 3: activity reads as history (one story per unit of work, past tense, ◆ only while Needs you lists it); the Why
+ * inspector's chain on screen equals Core's /live/chain for every event tried, missing causes are shown as missing,
+ * technical ids are hidden until asked for, it is deep-linkable (also across sign-in), Esc/back close it, it is
+ * full-screen on mobile, and opening and reading it changes nothing in Core.
  *
  * Needs `npm ci && npm run build` in command/ (skipped otherwise). Set CC_E2E_SHOTS=<dir> to save screenshots.
  */
@@ -27,6 +31,7 @@ import { appendEvent } from "../../src/db/index.js";
 import { runTick } from "../../src/events/index.js";
 import type { AreaModule } from "../../src/events/types.js";
 import { liveHandler } from "../../src/live/http.js";
+import { causalChain } from "../../src/live/stream.js";
 import { createHandler } from "../../src/server/app.js";
 import { createLogger } from "../../src/server/log.js";
 import { createBff } from "../../command/server/index.js";
@@ -45,6 +50,8 @@ const coreEnv = { NODE_ENV: "test", DATABASE_URL: "postgres://unused", ANTHROPIC
 const empty: AreaModule = { watchers: [], subscriptions: [], workflows: [] };
 const tick = () => runTick(pool, { now: new Date(), dryRun: false }, { modules: [empty], exceptions: { budget: async () => ({ monthToDateUsd: 1, targetUsd: 30, ceilingUsd: 36 }) } }, "manual");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Text that would make history read like a current instruction. */
+const PRESENT_INSTRUCTION = /now your decision|no longer needs you|is waiting for your|Reply "ok|— approve a follow-up|give a new date, or close it/;
 
 async function listen(): Promise<[http.Server, string]> {
   const s = http.createServer(); servers.push(s);
@@ -59,11 +66,16 @@ async function businessFingerprint() {
   return out;
 }
 
-describe.skipIf(!admin || !migT || !appT || !haveUi)("Command screen in a browser (ADR-089 slices 1–2)", () => {
+describe.skipIf(!admin || !migT || !appT || !haveUi)("Command screen in a browser (ADR-089 slices 1–3)", () => {
   let provider: Awaited<ReturnType<typeof startFakeOidc>>; let bffBase = "";
   let browser: any; let page: any; let career = ""; let bethWait = "";
   const bodies: string[] = []; const urls: string[] = [];
-  const shot = async (p: any, name: string) => { if (SHOTS) { mkdirSync(SHOTS, { recursive: true }); await p.screenshot({ path: join(SHOTS, `${name}.png`), fullPage: false }); } };
+  const shot = async (p: any, name: string) => {
+    if (!SHOTS) return;
+    mkdirSync(SHOTS, { recursive: true });
+    await p.waitForFunction(() => document.getAnimations().length === 0, null, { timeout: 2_000 }).catch(() => {});
+    await p.screenshot({ path: join(SHOTS, `${name}.png`), fullPage: false });
+  };
   const text = async (sel: string) => (await page.locator(sel).allInnerTexts()).join("\n");
   const state = () => page.evaluate(() => { const s = (window as any).__finagaiLive.state(); return { conn: s.conn, lastSeq: s.lastSeq, ids: s.events.map((e: any) => e.eventId), caughtUp: s.caughtUp, gaps: s.gaps }; });
 
@@ -157,7 +169,10 @@ describe.skipIf(!admin || !migT || !appT || !haveUi)("Command screen in a browse
     expect(await text(".needs .card .card__kind")).toMatch(/Only you can do this · Career/);
     expect(await text(".needs-count")).toBe("1 needs you");
     expect(await text(".areas__row")).toMatch(/◆\s*Career/);
-    await page.locator(".activity .unit", { hasText: "now your decision" }).first().waitFor({ timeout: 2_000 });
+    // Live activity: the decision as history ("became your decision"), ◆ because Needs you lists it right now
+    const bethUnit = page.locator(".activity .unit", { hasText: "No answer from Beth Young" });
+    await bethUnit.locator(".unit__title", { hasText: "— became your decision" }).waitFor({ timeout: 2_000 });
+    expect(await bethUnit.locator(".owner-mark--julian").count()).toBe(1);
     // ownership: Julian's card above the line, Finagai's wait below it (Beth's wait is not counted twice)
     const cardY = (await page.locator(".needs .card").first().boundingBox()).y, lineY = (await page.locator(".main > .ownership-line").boundingBox()).y;
     expect(cardY).toBeLessThan(lineY);
@@ -201,7 +216,12 @@ describe.skipIf(!admin || !migT || !appT || !haveUi)("Command screen in a browse
     await page.locator(".calm__statement").waitFor({ timeout: 5_000 });
     expect(await page.locator(".activity .gap").count()).toBe(1);
     expect(await text(".activity .gap")).toMatch(/^Disconnected .+ · \d+ changes? caught up$/);
-    expect(await page.locator(".activity .unit", { hasText: "no longer needs you" }).count()).toBe(1);
+    // the decision's story is now history in the past tense: one item, resolved, no ◆, no instruction repeated
+    const story = page.locator(".activity .unit", { hasText: "No answer from Beth Young" });
+    expect(await story.count()).toBe(1);
+    expect(await story.locator(".unit__title").innerText()).toMatch(/— resolved \(follow-up done\)$/);
+    expect(await story.locator(".owner-mark--julian").count()).toBe(0);
+    expect(await page.locator(".activity").innerText()).not.toMatch(PRESENT_INSTRUCTION);
     await shot(page, "4-desktop-resumed");
   }, 120_000);
 
@@ -236,15 +256,161 @@ describe.skipIf(!admin || !migT || !appT || !haveUi)("Command screen in a browse
     expect(await page.locator(".calm__statement").count()).toBe(0);
     expect(await text(".needs-count")).toBe("1 needs you");
     expect(await page.locator(".main").innerText()).not.toMatch(/Nothing needs you/);
-    // the wait is also in Live activity, marked as Julian's
-    await page.locator(".activity .unit", { hasText: "waiting for your approval" }).first().waitFor({ timeout: 2_000 });
-    expect(await page.locator(".activity .unit", { hasText: "waiting for your approval" }).locator(".owner-mark--julian").count()).toBeGreaterThan(0);
+    // the wait is also one Live activity story, past tense, with ◆ because Needs you lists it right now
+    const story = page.locator(".activity .unit", { hasText: `Mac task ${t.code}:` });
+    await story.locator(".unit__title", { hasText: `Mac task ${t.code}: asked for your approval of step ${s.code}` }).waitFor({ timeout: 2_000 });
+    expect(await story.locator(".owner-mark--julian").count()).toBe(1);
     // Julian approves: the escalation resolves with the step, and Command is calm again
     expect((await decideStep(pool, s.code, true)).status).toBe("approved");
     await page.locator(".calm__statement").waitFor({ timeout: 3_000 });
     expect(await page.locator(".needs .card").count()).toBe(0);
+    // ... and the same story now says what happened — one item, not "Active" / "Changed" / "no longer needs you" fragments
+    await story.locator(".unit__title", { hasText: `Mac task ${t.code}: you approved step ${s.code}` }).waitFor({ timeout: 3_000 });
+    expect(await page.locator(".activity .unit", { hasText: `Mac task ${t.code}` }).count()).toBe(1);
+    expect(await story.locator(".owner-mark--julian").count()).toBe(0);
+    expect(await page.locator(".activity").innerText()).not.toMatch(PRESENT_INSTRUCTION);
     await q(`UPDATE control_task SET status = 'done' WHERE id = $1`, [t.id]);
   }, 30_000);
+
+  it("Why inspector (Slice 3): Review opens it on the decision; the chain on screen is exactly Core's; technical details stay hidden; nothing in Core changes", async () => {
+    const w = (await q(`INSERT INTO followup (area_id, summary, counterparty, state, due_at, origin) VALUES ($1, 'Waiting on Priya about the case study', 'Priya', 'waiting', now() - interval '1 hour', 'julian') RETURNING id`, [career]))[0].id;
+    await sweepOverdue(pool); await tick();
+    const card = page.locator(".needs .card", { hasText: "Priya" });
+    await card.waitFor({ timeout: 5_000 });
+    const escId = (await q(`SELECT id FROM escalation WHERE status = 'open' AND key LIKE $1`, [`overdue:${w}:%`]))[0].id as string;
+    const latest = (await q(`SELECT max(id)::int AS id FROM event WHERE entity_type = 'escalation' AND entity_id = $1`, [escId]))[0].id as number;
+    await sleep(1_000);
+    const before = { fp: await businessFingerprint(), maxEvent: (await q(`SELECT max(id)::int AS m FROM event`))[0].m, maxSeq: (await q(`SELECT max(seq)::int AS m FROM live_event`))[0].m };
+    const calls: string[] = []; const onReq = (r: any) => { if (r.url().includes("/api/")) calls.push(`${r.method()} ${new URL(r.url()).pathname}`); };
+    page.on("request", onReq);
+
+    await card.getByRole("link", { name: "Review" }).click();
+    const why = page.locator(".why");
+    await why.locator(".chain").waitFor({ timeout: 5_000 });
+    expect(new URL(page.url()).searchParams.get("why")).toBe(`escalation:${escId}`);              // deep-linkable state
+    // the chain on screen == Core's chain for the decision's latest event (and == what the BFF served), root last
+    const shown = async () => (await why.locator(".chain .chain__item").evaluateAll((els: Element[]) => els.map((e) => Number(e.getAttribute("data-event-id")))));
+    const core = await causalChain(pool, latest);
+    expect(await shown()).toEqual(core.map((e) => e.eventId));
+    expect(await shown()).toEqual(await page.evaluate(async (id: number) => (await (await fetch(`/api/live/chain/${id}`)).json()).chain.map((e: any) => e.eventId), latest));
+    expect(await why.locator(".chain__item--root").getAttribute("data-event-id")).toBe(String(latest));
+    // every recorded starting point says so; nothing is shown as missing when nothing is
+    for (const e of core.filter((x) => x.cause.eventIds.length === 0)) expect(await why.locator(`.chain__item[data-event-id="${e.eventId}"] .chain__start`).count()).toBe(1);
+    expect(await why.locator(".chain__missing").count()).toBe(0);
+    // what it says: the decision (no instruction), Julian's now (from the snapshot), what only he can do while it is open
+    expect(await why.locator(".why__title").innerText()).toMatch(/^No answer from Priya by \d{4}-\d{2}-\d{2}$/);
+    expect(await why.locator(".why__status").innerText()).toMatch(/◆\s*Yours now · Only you can do this · Career/);
+    const owner = await why.locator("section[aria-labelledby=why-owner]").innerText();
+    expect(owner).toMatch(/You — open in Needs you since/);
+    expect(owner).toMatch(/Finagai can\s+draft the follow-up/); expect(owner).toMatch(/Only you can\s+decide whether to nudge/);
+    expect(await why.locator(".chain").innerText()).toMatch(/Became your decision/);
+    // evidence = exactly the chain's evidence events
+    expect(await why.locator(".why__evidence li").evaluateAll((els: Element[]) => els.map((e) => Number(e.getAttribute("data-event-id")))))
+      .toEqual(core.filter((e) => e.domain === "evidence").map((e) => e.eventId));
+    expect(await why.innerText()).not.toMatch(/What happened next|Consequences/);               // no endpoint → no consequences shown
+    // technical details: hidden by default; ids only once asked for
+    const corr = core.find((e) => e.eventId === latest)!.cause.correlationId!;
+    expect(await why.locator(".why__tech").evaluate((d: HTMLDetailsElement) => d.open)).toBe(false);
+    expect(await why.innerText()).not.toContain(corr);
+    expect(await why.innerText()).not.toContain(escId);
+    await shot(page, "7-desktop-why-review");
+    await why.locator(".why__tech summary").click();
+    expect(await why.locator(".why__tech").innerText()).toContain(corr);
+    // re-root on an ancestor: its own chain, breadcrumb back
+    const ancestor = why.locator(".chain__item:has(.chain__row--link)").last();
+    const ancId = Number(await ancestor.getAttribute("data-event-id"));
+    await ancestor.locator(".chain__row--link").click();
+    await page.locator(`.why[data-why="${ancId}"] .chain`).waitFor({ timeout: 5_000 });
+    expect(new URL(page.url()).searchParams.get("why")).toBe(String(ancId));
+    expect(await shown()).toEqual((await causalChain(pool, ancId)).map((e) => e.eventId));
+    expect(await why.locator(".why__trail").innerText()).toMatch(/No answer from Priya/);
+    await why.locator(".why__trail button").first().click();
+    await page.locator(`.why[data-why="escalation:${escId}"] .chain`).waitFor({ timeout: 5_000 });
+    // Esc closes and gives focus back to Review
+    await page.keyboard.press("Escape");
+    await why.waitFor({ state: "detached", timeout: 3_000 });
+    expect(new URL(page.url()).searchParams.has("why")).toBe(false);
+    expect(await page.evaluate(() => document.activeElement?.textContent)).toBe("Review");
+    // Why? from the activity story opens it on the story's most significant event; the browser's back closes it
+    const priya = page.locator(".activity .unit", { hasText: "No answer from Priya" });
+    await priya.locator(".unit__why").click();
+    const rootId = Number(new URL(page.url()).searchParams.get("why"));
+    await page.locator(`.why[data-why="${rootId}"] .chain`).waitFor({ timeout: 5_000 });
+    expect(await shown()).toEqual((await causalChain(pool, rootId)).map((e) => e.eventId));
+    await page.goBack();
+    await why.waitFor({ state: "detached", timeout: 3_000 });
+
+    // read-only: only GETs, and Core has not changed — no business row, no semantic event, no stream entry
+    page.off("request", onReq);
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) expect(c).toMatch(/^GET \/api\/live\/(snapshot|history|chain\/\d+|summary\/reliability|stream|events)$/);
+    await sleep(1_000);
+    expect(await businessFingerprint()).toEqual(before.fp);
+    expect((await q(`SELECT max(id)::int AS m FROM event`))[0].m).toBe(before.maxEvent);
+    expect((await q(`SELECT max(seq)::int AS m FROM live_event`))[0].m).toBe(before.maxSeq);
+
+    // once Priya answers, the same decision is history: past tense, no ◆, and the inspector says nothing is open now
+    await closeFollowup(pool, w, "Priya replied"); await tick();
+    await priya.locator(".unit__title", { hasText: "— resolved" }).waitFor({ timeout: 5_000 });
+    await page.locator(".needs .card", { hasText: "Priya" }).waitFor({ state: "detached", timeout: 3_000 });   // the snapshot caught up
+    expect(await priya.locator(".owner-mark--julian").count()).toBe(0);                                   // ◆ follows the snapshot
+    await priya.locator(".unit__why").click();
+    await why.locator(".chain").waitFor({ timeout: 5_000 });
+    const text = await why.innerText();
+    expect(text).toMatch(/Nothing about this is open now\./);
+    expect(text).not.toMatch(/Yours now|Only you can|◆/);
+    expect(text).not.toMatch(PRESENT_INSTRUCTION);
+    await shot(page, "8-desktop-why-resolved");
+    await why.locator(".why__close").click();
+    await why.waitFor({ state: "detached", timeout: 3_000 });
+  }, 90_000);
+
+  it("Why inspector: for 20 events, the chain on screen equals /live/chain; a cause Core doesn't have is shown as missing; deep links open it", async () => {
+    // a recorded chain longer than Core follows (8 levels), whose first event cites a cause Core no longer has
+    const chimes = (await q(`SELECT id FROM followup WHERE counterparty = 'Chimes'`))[0].id;
+    let prev = await appendEvent(pool, { actor: "job", action: "work_invoked", causeIds: [987_654_321], after: { what: "job:daily_maintenance" } });
+    const ids = [prev];
+    for (let i = 0; i < 10; i++) { prev = await appendEvent(pool, { actor: "cos", action: "followup_updated", entityType: "followup", entityId: chimes, areaId: career, causeIds: [prev], before: { n: i }, after: { n: i + 1 } }); ids.push(prev); }
+    const open = async (target: string) => {
+      await page.evaluate((t: string) => { history.pushState(null, "", `/?diag&why=${t}`); dispatchEvent(new PopStateEvent("popstate")); }, target);
+      await page.locator(`.why[data-why="${target}"] .chain, .why[data-why="${target}"] .why__title`).first().waitFor({ timeout: 5_000 });
+      await page.locator(`.why[data-why="${target}"] [role=status]`).waitFor({ state: "detached", timeout: 5_000 }).catch(() => {});
+    };
+    const shown = () => page.locator(".why .chain .chain__item").evaluateAll((els: Element[]) => els.map((e) => Number(e.getAttribute("data-event-id"))));
+    // deepest: Core walks 8 levels; the 9th cause back is recorded but not in the chain → shown as missing, not invented
+    await open(String(prev));
+    const core = await causalChain(pool, prev);
+    expect(core).toHaveLength(8);
+    expect(await shown()).toEqual(core.map((e) => e.eventId));
+    const missing = page.locator(".why .chain__missing");
+    expect(await missing.count()).toBe(1);
+    expect(await missing.getAttribute("data-missing-causes")).toBe(String(ids[ids.length - 9]));
+    expect(await page.locator(".why .chain__item").first().locator(".chain__missing").count()).toBe(1);
+    // the first event cites a cause outside what Core keeps
+    await open(String(ids[0]));
+    expect(await shown()).toEqual([ids[0]]);
+    expect(await page.locator(".why .chain__missing").getAttribute("data-missing-causes")).toBe("987654321");
+    expect(await page.locator(".why .chain__start").count()).toBe(0);                              // it had a cause: not a starting point
+    await shot(page, "9-desktop-why-missing");
+    // 20 events across the store: every line on screen has an event id behind it, and the ids are Core's chain
+    const sample = (await q(`SELECT e.id::int AS id FROM event e JOIN live_event l ON l.event_id = e.id ORDER BY random() LIMIT 20`)).map((r) => r.id as number);
+    for (const id of sample) {
+      await open(String(id));
+      const items = page.locator(".why .chain .chain__item");
+      expect(await items.count()).toBe((await items.evaluateAll((els: Element[]) => els.filter((e) => e.getAttribute("data-event-id")).length)));
+      expect(await shown()).toEqual((await causalChain(pool, id)).map((e) => e.eventId));
+    }
+    // an object deep link resolves to its latest event; a malformed one says so
+    const anyEsc = (await q(`SELECT entity_id::text AS id FROM event WHERE entity_type = 'escalation' AND area_id = $1 ORDER BY id DESC LIMIT 1`, [career]))[0].id as string;
+    await page.goto(`${bffBase}/?diag&why=escalation:${anyEsc}`);                                   // a real page load from the link
+    await page.locator(`.why[data-why="escalation:${anyEsc}"] .chain`).waitFor({ timeout: 10_000 });
+    const latest = (await q(`SELECT max(id)::int AS id FROM event WHERE entity_type = 'escalation' AND entity_id = $1`, [anyEsc]))[0].id as number;
+    expect(await page.locator(".why .chain__item--root").getAttribute("data-event-id")).toBe(String(latest));
+    await page.evaluate(() => { history.pushState(null, "", "/?diag&why=nonsense!"); dispatchEvent(new PopStateEvent("popstate")); });
+    await page.locator('.why[data-why="invalid"]', { hasText: "doesn't point to anything Finagai recorded" }).waitFor({ timeout: 3_000 });
+    await page.locator(".why__close").click();
+    await page.locator(".why").waitFor({ state: "detached", timeout: 3_000 });
+  }, 120_000);
 
   it("renders the mobile layout at 390×844: Needs you / ownership line / handling / recent changes / Areas, no horizontal scroll", async () => {
     const m = await signedInPage({ width: 390, height: 844 });
@@ -263,6 +429,16 @@ describe.skipIf(!admin || !migT || !appT || !haveUi)("Command screen in a browse
     const order = await m.evaluate(() => [".needs", ".main > .ownership-line", ".handling", ".mobile-recent", ".mobile-areas"].map((s) => document.querySelector(s)!.getBoundingClientRect().top));
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     await shot(m, "6-mobile-needs-julian");
+    // the inspector is a full-screen sheet on mobile; back (gesture) closes it
+    await m.locator(".needs .card").first().getByRole("link", { name: "Review" }).click();
+    await m.locator(".why .chain").waitFor({ timeout: 5_000 });
+    await m.waitForFunction(() => document.getAnimations().length === 0);                        // the 180 ms open (user action) has finished
+    expect(await m.locator(".why").boundingBox()).toEqual({ x: 0, y: 0, width: 390, height: 844 });
+    expect(await m.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+    expect(await m.evaluate(() => { const el = document.querySelector(".why__body")!; return el.scrollWidth <= el.clientWidth; })).toBe(true);
+    await shot(m, "10-mobile-why");
+    await m.goBack();
+    await m.locator(".why").waitFor({ state: "detached", timeout: 3_000 });
     await closeFollowup(pool, w, "answered"); await tick();
     await m.context().close();
   }, 60_000);
