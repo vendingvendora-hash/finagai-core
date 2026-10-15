@@ -13,6 +13,7 @@ import type { Log, Prompter } from "./io.js";
 import { GitHub } from "./providers/github.js";
 import { Neon, needsPlanUpgrade } from "./providers/neon.js";
 import { authkitDiscovery, Cloudflare, probeClientSecret, Resend, validateAnthropicKey, WorkOS } from "./providers/others.js";
+import { workosOAuthAppSteps } from "./oauth-client.js";
 import { Render } from "./providers/render.js";
 import { Secret } from "./secret.js";
 import type { StateFile } from "./state.js";
@@ -305,11 +306,7 @@ export const STEPS: Step[] = [
       }
       const redirect = `${base}/approve/callback`;
       if (!ctx.state.get("approval_client_id")) {
-        await ctx.prompt.act("workos_oauth_app", { title: "Create the approval-page application (dashboard only)", url: "https://dashboard.workos.com", steps: [
-          "Applications > Create application > OAuth (confidential), named \"Finagai approval page\".",
-          `Redirect URI: ${redirect}`,
-          "Generate a client secret; keep the page open for the next two prompts.",
-        ] });
+        await ctx.prompt.act("workos_oauth_app", { title: "Create the approval-page application (dashboard only)", url: "https://dashboard.workos.com", steps: workosOAuthAppSteps("Finagai approval page", redirect) });
         ctx.state.set("approval_client_id", await ctx.prompt.ask("approval_client_id", "Its client ID (client_...):"));
       }
       if (!ctx.vault.get("approval_client_secret") && !ctx.state.get("approval_secret_stored")) {

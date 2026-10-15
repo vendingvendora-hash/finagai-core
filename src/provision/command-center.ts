@@ -13,6 +13,7 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { api } from "./http.js";
 import { consoleLog, TerminalPrompter } from "./io.js";
+import { askOAuthClient, workosOAuthAppSteps } from "./oauth-client.js";
 import { probeClientSecret, authkitDiscovery } from "./providers/others.js";
 import { Render } from "./providers/render.js";
 import { Secret } from "./secret.js";
@@ -54,17 +55,12 @@ consoleLog(`  ✓ ${url}`);
 // 2. its own sign-in client
 consoleLog(`\n▶ WorkOS application for the Command Center`);
 const redirect = `${url}/auth/callback`;
-if (!state.get("command_client_id")) {
-  await prompt.act("command_oauth_app", { title: "Create the Command Center's sign-in application (WorkOS dashboard)", url: "https://dashboard.workos.com", steps: [
-    "Applications > Create application > OAuth (confidential), named \"Finagai Command Center\".",
-    `Redirect URI: ${redirect}`,
-    "Generate a client secret and keep the page open for the next two prompts.",
-  ] });
-  state.set("command_client_id", await prompt.ask("command_client_id", "Its client ID (client_...):"));
-}
-const clientId = need("command_client_id");
+if (!state.get("command_client_id")) await prompt.act("command_oauth_app", { title: "Create the Command Center's sign-in application (WorkOS dashboard)",
+  url: "https://dashboard.workos.com", steps: workosOAuthAppSteps("Finagai Command Center", redirect) });
 const disco = await authkitDiscovery(issuer);
-const clientSecret = await prompt.askSecret("command_client_secret", "Its client secret", (s) => probeClientSecret(disco.oidc.token_endpoint, clientId, s, redirect));
+const { clientId, secret: clientSecret } = await askOAuthClient(prompt, consoleLog, { idKey: "command_client_id", secretKey: "command_client_secret",
+  stored: state.get("command_client_id"), probe: (id, s) => probeClientSecret(disco.oidc.token_endpoint, id, s, redirect) });
+state.set("command_client_id", clientId);
 
 // 3. settings (service-level; replaces the service's own variables)
 consoleLog(`\n▶ Settings`);

@@ -54,6 +54,11 @@ implementation decisions and deviations.
   - It creates the Render service and asks Julian to create the WorkOS application (a dashboard step).
   - It sets the service's settings and adds the client to Core's allow-list if Core pins clients.
   - It deploys and checks `/healthz`.
+- **Setup fix (found live on 2026-10-15).** WorkOS has two pages called "Applications":
+  - The sidebar's page holds AuthKit applications. Their API keys are not OAuth client secrets.
+  - **Connect > Applications** holds OAuth clients. This is the one that works.
+
+  The setup steps now name Connect explicitly. The client ID and secret are asked as a pair, and the ID is kept only once WorkOS accepts the pair (`src/provision/oauth-client.ts`). A client created in the wrong place can now be replaced without editing the state file.
 - **Spike page:** `/spike.html`, signed-in only, read-only. It shows the snapshot, live events with their latency, resume after a simulated 20 s interruption, and a scan for token-like strings visible to JavaScript.
 
 ## Slice 2 — Command (wireframes A and B)

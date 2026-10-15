@@ -45,6 +45,7 @@ export async function authkitDiscovery(issuer) {
     const as = (await api("WorkOS", `${issuer.replace(/\/$/, "")}/.well-known/oauth-authorization-server`)).json;
     return { oidc, as };
 }
+export const CLIENT_REJECTED = "WorkOS rejected that client ID and secret";
 /** invalid_grant on a bogus code means the client ID and secret are right; invalid_client means they are not. */
 export async function probeClientSecret(tokenEndpoint, clientId, secret, redirectUri) {
     try {
@@ -56,7 +57,7 @@ export async function probeClientSecret(tokenEndpoint, clientId, secret, redirec
         if (err instanceof ProviderError && /invalid_grant/.test(err.message))
             return null;
         if (err instanceof ProviderError && /invalid_client|unauthorized_client/.test(err.message))
-            return "WorkOS rejected that client ID and secret";
+            return CLIENT_REJECTED;
         return err instanceof Error ? err.message : "could not verify";
     }
 }
