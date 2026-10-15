@@ -268,3 +268,21 @@ Task 138 was `sw_vers -productVersion`, one `run` step, approved by Julian with 
   - Fix: a current-state title quotes only the history the snapshot already reflects (`seq ≤ snapshot.cursor`). Until the snapshot is re-read, the title says what the snapshot says, consistently with the Needs-you card from the same snapshot.
   - Proof: a unit test replays task 138's production sequence (ids and seqs) through waiting → lag → running → completed. It fails on hotfix 47 and passes on 48.
 - **Residual, by design:** an item reflects Core as of the latest snapshot. A brand-new task can show its recorded start ("started — …") for about a second before Command re-reads the snapshot and shows it as "Open now". Nothing is presented as finished.
+
+## Status: Slice 3 CLOSED (2026-10-15 21:30Z, on `e5a9e2c`)
+
+Production acceptance on hotfix 48 (Core and Command `e5a9e2cea834`, MCP digest `bb1861cd165d` unchanged). No new Mac task was started. The checks used task 138's recorded sequence and the current production state.
+
+1. **No contradiction, even with the stream ahead of the snapshot.**
+   - The deployed model code (byte-identical to `e5a9e2c`) was run in the production page on task 138's events as Core holds them (2755–2773). It was tried at every prefix, with a snapshot both caught up and one event behind: 38 renderings, 0 problems.
+   - The exact hotfix-47 moment (the approval transaction streamed, snapshot still at 2762) now reads "Mac task 138 — waiting for your approval of step 407: …" together with its Needs-you card. When the completion has streamed but the snapshot still says running, it reads "running … (earlier: you approved step 407)". Once caught up it is the past-tense story.
+2. **Catches up with nothing suppressed.** The hold applies only to an open item's history clause, until the snapshot re-read that the same event already triggers: 150 ms for decisions, 300 ms for other state, plus the 60 s poll and a re-read when the tab becomes visible. Every step is listed immediately: 11 steps plus the artifact item, for task 138's 12 visible events. Production `/api/live/snapshot` takes 200–500 ms.
+3. **Active stays active; finished becomes history.** Checked in the 38-case replay and in the live task 138 run on 47 (waiting → running → completed).
+4. **Why chains are exactly Core's.** 26 of 26 were equal, including every event of task 138. Every line has an event id. Beth Young's chain is 2408 → 2416: evidence = Core's evidence events (2408, 2409), "Started here" only on the uncaused root, and the owner taken from the snapshot. A nonexistent id and a malformed link fail honestly. No production chain has a missing cause (about 580 scanned), so that path is proven by the browser end-to-end test against real Core.
+5. **Zero writes.** During roughly 40 inspector opens and the replay, Core appended 2 events, both from Finagai's inbound watcher. None came from Command, and the page made GETs only. All 344 events in the page are byte-identical to Core's history, with no duplicated event or item.
+6. **Existing checks still hold:**
+   - After the deploy signed Julian out, a deep link (`/?why=escalation:…`) went through WorkOS sign-in and landed on the same inspector.
+   - The session cookie is not readable by JS, and no token-shaped string appears in storage, IndexedDB, the DOM, 94 resource URLs, or the bodies and headers of every endpoint.
+   - Mobile: at Chrome's minimum width (614 px), Command keeps its mobile order with no sideways scrolling, and the inspector is full-screen (0, 0, 614, 701). Back closes it.
+   - Needs you equals the snapshot, and no internal-test text appears.
+   - A 70 s interruption went Reconnecting → Offline with the stale banner and an "as of" count → resumed from the cursor ("Caught up — 0 changes"), with a gap marker and a fresh snapshot.
