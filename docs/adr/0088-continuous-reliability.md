@@ -1,6 +1,6 @@
 # ADR-088 — Phase 8: continuous reliability on the Live State Stream
 
-Status: Decided (builder, under Julian's 2026-10-09 Phase 0–8 mandate). Increment 1 shipped as hotfix 36.
+Status: **CLOSED 2026-10-15 04:56Z** (Phase 8 complete on hotfix 41, Core `a22aba884712`). Increments 1–3 passed live acceptance.
 Date: 2026-10-12
 
 ## Context
@@ -328,3 +328,34 @@ Before this, failure mining was manual (current-state audit §19). The reliabili
   - Each call now writes exactly one record, `outcome` ok | error. The domain result is a `result` field, and an error carries its sanitized message.
   - The report and the learner count only ok/error records. Legacy second records classify as `tool.answered`.
 - Tests: `test/integration/phase8-failures.test.ts` (2), additions to `mcp.test.ts`, `live-contract.test.ts` and `phase8.test.ts`. Full suites: 526 unit, 289 integration, all passing. No migration, and the MCP tool surface is unchanged.
+
+
+## Increment 3 + Phase 8: PASS — ADR-088 CLOSED (2026-10-15 04:56Z, hotfix 41, Core `a22aba884712`, started 04:51:18Z)
+| Criterion | Live evidence |
+|---|---|
+| Stable, normalized classes with evidence | `finagai-job: failures 30` finds 21 recorded failures in 3 classes. Example: self_check stateEventQuality, ×19, evidence 2123…2150, "not seen since restart". A new class `tool:control_mac "no bootstrap proposal #."` grouped three different ids (999999/999998/999997) as one key `631d768fca`, with evidence 2523/2525/2526. |
+| Threshold: 3+ in 24 h on the running version | That class reached count 3, last24h 3, sinceStart 3 and status `recurring`. The 19 pre-fix stateEventQuality failures are `sinceStart 0` and stay "not seen since restart" with no exception. |
+| Only Finagai's own failures open exceptions | The recurring class is `system: false` (a request error). After the 04:52Z tick, exceptions read "All normal — nothing is wrong", with no `failure:*` exception. Sleeping-Mac abandonment and watcher problems are excluded in code and the integration test proves it. |
+| Failure-mining exceptions cite their failures | No internal failure has recurred live, and none can be induced safely. The integration test proves an opened `failure:<key>` exception's `cause_ids` equal its failure events (`phase8-failures.test.ts`). |
+| One record per tool call, errors keep their message | `resolve_reference`: one record, `{outcome: ok, result: resolved}` (2521). `mac_status`: one record (2522). A real error: `{outcome: error, error: "No bootstrap proposal 999999."}` (2523, `tool.failed`). |
+| No false class from the old `resolve_reference` double record | The 30-day mining has no `resolve_reference` class. The report counts only ok/error records. |
+| Duplicate workflow-decision line is gone | Brief at 04:52Z: the only decision is Beth Young. The resolved 4B judgment no longer appears, and the 4A test decision resolved at 04:34Z. |
+| Increment 1 and 2 checks still green | live-acceptance at 04:56Z: 10 PASS. The 2 email chains are PENDING only because the post-deploy window restarted at 04:51Z; both passed at 04:34Z on hotfix 40. Ticks run every 5 min with no failures; exceptions open 0; publisher lag 0; daily canary green on 10-13 and 10-14. |
+| Nothing new for Julian | needs-Julian holds one item: `overdue:…:2026-10-14`, Beth Young (a real decision). |
+
+**Side effect of the live test (expected, self-clearing).** The three deliberate request errors put `control_mac` at 3 of 23 calls in 24 h. That breaches the Increment 1 tool budget (>10%), so the brief shows one risk line: "Finagai reliability (last 24 h) is degraded: tool calls failing 11% …". It is a risk, not a decision, and it clears when failures fall below 10% of calls, within at most 24 h.
+
+**Not observable live at close.**
+- The 14-day expiry of a workflow judgment.
+- A detector-opened exception citing its evidence.
+- A recurring internal failure opening `failure:<key>`.
+
+None of these occurred naturally, and none can be safely induced in production. Each is proven by integration tests against the real engine. The next daily canary (~17:00Z) is the first to exercise the `project_archived` label live.
+
+**Phase 8 delivered.** All of the following are measured from the Live State Stream; there is no separate monitoring store:
+- an hourly ADR-087 self-check and a daily internal canary;
+- scheduled jobs and tool calls on the stream, with their outcomes;
+- a reliability report with a budget, a `since` window, and failure classes;
+- reliability problems handled as Phase 7 exceptions, which cite their evidence, are owned by Finagai, and reach Julian only as a judgment if they persist;
+- workflow judgments that resolve themselves or expire;
+- an executive brief that is silent when healthy, says each thing once, and keeps Finagai's own testing out.
