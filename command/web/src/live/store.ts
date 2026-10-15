@@ -29,7 +29,7 @@ export interface LiveState {
 export const MAX_EVENTS = 2000;
 const STATE_DOMAINS = new Set(["entity", "relationship", "area", "objective", "project", "task", "wait", "exception", "escalation", "approval", "rule", "lesson", "procedure", "authority"]);
 const URGENT_DOMAINS = new Set(["escalation", "exception", "approval", "authority"]);
-export const WATCHDOG_MS = 30_000, OFFLINE_MS = 60_000;
+export const WATCHDOG_MS = 30_000, OFFLINE_MS = 60_000, SNAPSHOT_POLL_MS = 60_000;
 
 export const useLive = create<LiveState>(() => ({
   snapshot: null, snapshotAt: null, reliability: null, reliabilityAt: null, events: [], arrivedLive: {}, lastSeq: 0,
@@ -78,7 +78,13 @@ export class LiveController {
     void this.loadReliability();
     this.connect();
     this.watchdog = setInterval(() => this.tick(), 5_000);
-    this.relPoll = setInterval(() => { if (document.visibilityState === "visible") void this.loadReliability(); }, 60_000);
+    // Some authoritative fields change with no semantic event (a quiet check writes no event; it only moves the event
+    // loop's last-check time). Re-read the snapshot and the report every minute while visible, and at once on return.
+    // While disconnected the snapshot is deliberately left as it was (the screen says "as of" the disconnect); the
+    // catch-up after reconnecting refreshes it once.
+    const poll = () => { if (document.visibilityState === "visible" && useLive.getState().conn === "live") { this.scheduleRefresh(0); void this.loadReliability(); } };
+    this.relPoll = setInterval(poll, SNAPSHOT_POLL_MS);
+    document.addEventListener("visibilitychange", poll);
     window.addEventListener("online", () => this.reconnectNow());
     window.addEventListener("offline", () => this.markDown());
   }
@@ -107,8 +113,9 @@ export class LiveController {
   }
 
   private async backfill() {
-    const from = new Date(this.now() - (this.deps.backfillHours ?? 12) * 3_600_000).toISOString();
-    const r = await this.getJson<{ events: LiveEvent[] }>(`/api/live/history?order=desc&limit=400&from=${encodeURIComponent(from)}`);
+    // 24 h of context so that what the rail shows (12 h) can be linked to what caused it (e.g. internal test objects)
+    const from = new Date(this.now() - (this.deps.backfillHours ?? 24) * 3_600_000).toISOString();
+    const r = await this.getJson<{ events: LiveEvent[] }>(`/api/live/history?order=desc&limit=1000&from=${encodeURIComponent(from)}`);
     useLive.setState((s) => ({ events: mergeEvents(s.events, r.events) }));
   }
 

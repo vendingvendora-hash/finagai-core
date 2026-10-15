@@ -98,15 +98,68 @@ function titleOf(top: LiveEvent, events: LiveEvent[]): string {
   return `${verbOf(top.class)}${t ? `: ${t}` : tr ? `: ${tr}` : ""}`;
 }
 
-/** Group events into units of work; drop internal (Finagai Test / canary) units and units with nothing meaningful. */
-export function buildUnits(events: LiveEvent[], internalAreaIds: Set<string>, opts: { everything?: boolean } = {}): Unit[] {
+/** Business objects that can carry "internal" from one event to another (never ticks, Areas or tools, which are shared). */
+const LINKABLE = new Set(["opportunity", "project", "followup", "escalation", "inbound_event", "lesson", "control_task"]);
+const SUBJECT = /@([a-z_]+):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+/** The business objects an event is about: its entity, a decision's subject (key `…@type:uuid`), and referenced objects. */
+function objectsOf(e: LiveEvent): string[] {
+  const out: string[] = [];
+  if (e.entity.id && e.entity.type && LINKABLE.has(e.entity.type)) out.push(e.entity.id);
+  for (const side of [e.after, e.before] as Array<Record<string, unknown> | null>) {
+    if (!side) continue;
+    const key = typeof side.key === "string" ? SUBJECT.exec(side.key) : null;
+    if (key && LINKABLE.has(key[1]!)) out.push(key[2]!);
+    for (const k of ["opportunity_id", "project_id", "followup_id"]) if (typeof side[k] === "string") out.push(side[k] as string);
+  }
+  return out;
+}
+const RUN_WIDE = new Set(["workflow.started", "workflow.completed", "workflow.invoked", "evidence.observed", "evidence.classified", "evidence.ignored", "notification.suppressed", "notification.delivered"]);
+const isCanaryRun = (e: LiveEvent) => e.action === "canary_ran" || (e.action === "work_invoked" && String((e.after as Record<string, unknown> | null)?.what ?? "").startsWith("canary:"));
+
+/**
+ * Objects tied to Finagai's internal test Area: those an internal-Area event touched (plus the inbound evidence it came
+ * from), then — to a fixed point — everything about them, such as a decision about an internal opportunity whose own row
+ * carries no Area (rows Core created before it recorded one) and that decision's later resolution.
+ */
+export function internalLinks(events: LiveEvent[], internalAreaIds: Set<string>): Set<string> {
+  const links = new Set<string>();
+  for (const e of events) if (e.area && internalAreaIds.has(e.area.id)) {
+    for (const id of objectsOf(e)) links.add(id);
+    const src = (e.after as Record<string, unknown> | null)?.sourceId;
+    if (typeof src === "string") links.add(src);
+  }
+  for (let pass = 0, grew = true; grew && pass < 5; pass++) {
+    grew = false;
+    for (const e of events) {
+      const ids = objectsOf(e);
+      if (ids.some((id) => links.has(id))) for (const id of ids) if (!links.has(id)) { links.add(id); grew = true; }
+    }
+  }
+  return links;
+}
+/** An event that belongs to Finagai's internal testing (its Area, an object linked to it, or a canary run). */
+export function internalEvent(e: LiveEvent, internalAreaIds: Set<string>, links: Set<string>): boolean {
+  return (!!e.area && internalAreaIds.has(e.area.id)) || isCanaryRun(e) || objectsOf(e).some((id) => links.has(id));
+}
+
+/**
+ * Group events into units of work. Internal events (test Area, linked objects, canary runs) and hidden routine events
+ * are not steps; a unit with no remaining steps is not shown — so a run that touched both a real job and the canary
+ * still shows the real job, and nothing of the canary.
+ */
+export function buildUnits(events: LiveEvent[], internalAreaIds: Set<string>, opts: { everything?: boolean; links?: Set<string> } = {}): Unit[] {
+  const links = opts.links ?? internalLinks(events, internalAreaIds);
   const groups = new Map<string, LiveEvent[]>();
   for (const e of events) { const k = e.cause.correlationId ?? `e${e.eventId}`; const g = groups.get(k); if (g) g.push(e); else groups.set(k, [e]); }
   const units: Unit[] = [];
-  for (const [key, evs] of groups) {
-    evs.sort((a, b) => a.eventId - b.eventId);
-    const internal = evs.some((e) => (e.area && internalAreaIds.has(e.area.id)) || e.action === "canary_ran" || (e.action === "work_invoked" && String((e.after as Record<string, unknown> | null)?.what ?? "").startsWith("canary:")));
-    if (internal && !opts.everything) continue;
+  for (const [key, all] of groups) {
+    all.sort((a, b) => a.eventId - b.eventId);
+    // a canary run is internal from start to finish; any other run loses only its internal events
+    if (!opts.everything && all.some(isCanaryRun)) continue;
+    let evs = opts.everything ? all : all.filter((e) => !internalEvent(e, internalAreaIds, links));
+    // A run that also did internal work: its run-wide summaries (change lists) and its intake of evidence describe the
+    // internal part too, so only the outcomes on real objects are kept.
+    if (evs.length < all.length) evs = evs.filter((e) => !RUN_WIDE.has(e.class));
     const steps = opts.everything ? evs : evs.filter((e) => !hiddenEvent(e));
     if (!steps.length) continue;
     const top = steps.reduce((b, e) => (rankOf(e) > rankOf(b) ? e : b), steps[0]!);

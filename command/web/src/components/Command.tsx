@@ -8,14 +8,17 @@ import { fmtAgo, fmtDay, fmtDue, fmtShortDay, fmtTime, fmtWhen } from "../format
 interface Props {
   view: CommandView; events: LiveEvent[]; arrivedLive: Record<number, number>; conn: Conn; now: number;
   gaps: Array<{ from: number; to: number; missed: number }>; everything: boolean; setEverything?: (v: boolean) => void;
-  lastSeen: number; reliabilityWhy: string[]; reliabilityVerdict: string | null;
+  lastSeen: number; reliabilityWhy: string[]; reliabilityVerdict: string | null; links: Set<string>;
 }
+const RAIL_MS = 12 * 3_600_000;
 
 export function CommandScreen(p: Props) {
   const v = p.view;
   const live = p.conn === "live";
   // units touching Finagai's internal test Area are dropped (spec §2.1); "Everything" (diagnostic) shows them
-  const units = useMemo(() => buildUnits(p.events, v.internalAreaIds, { everything: p.everything }), [p.events, v.internalAreaIds, p.everything]);
+  // the rail covers 12 hours; older events are kept only as context (linking units to internal test objects)
+  const units = useMemo(() => buildUnits(p.events, v.internalAreaIds, { everything: p.everything, links: p.links }).filter((u) => Date.parse(u.firstAt) >= p.now - RAIL_MS),
+    [p.events, v.internalAreaIds, p.everything, p.links, Math.floor(p.now / 60_000)]);
   const since = units.filter((u) => u.firstId > p.lastSeen).length;
   // a decision card may move (fade in) only when its escalation.opened event just arrived over the live stream
   const openedLive = useMemo(() => new Set(p.events.filter((e) => e.class === "escalation.opened" && e.entity.id && p.now - (p.arrivedLive[e.eventId] ?? -Infinity) < 10_000).map((e) => e.entity.id!)),

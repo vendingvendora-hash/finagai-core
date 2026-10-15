@@ -75,6 +75,19 @@ describe.skipIf(!admin || !migT || !appT || !haveUi)("Command screen in a browse
     // Finagai's internal test Area: a decision and a wait that must never reach Command
     await q(`INSERT INTO escalation (key, area_id, needs, summary) VALUES ('career.sync:leak@opportunity:00000000-0000-0000-0000-0000000000aa', $1, 'judgment', 'LEAKCHECK internal decision')`, [test]);
     await q(`INSERT INTO followup (area_id, summary, counterparty, state, due_at, origin) VALUES ($1, 'LEAKCHECK internal wait', 'Canary', 'waiting', now() + interval '2 days', 'julian')`, [test]);
+    // production finding 2026-10-15: decisions about internal test objects created before Core recorded an Area on
+    // decisions — no Area on the row or its events; only the subject in the key ties them to the internal Area
+    const opp = (await q(`INSERT INTO opportunity (kind, area_id, org, title, status, source, dedupe_key) VALUES ('job', $1, 'LEAKCHECK-CANARY', 'Canary role', 'interviewing', 'test', 'leak|canary') RETURNING id`, [test]))[0].id;
+    await appendEvent(pool, { actor: "cos", action: "opportunity_evidence_added", entityType: "opportunity", entityId: opp, areaId: test, after: { opportunity_id: opp, summary: "LEAKCHECK interview evidence" } });
+    for (const [k, open] of [["leak-resolved", false], ["leak-open", true]] as const) {
+      const key = `career.sync:${k}@opportunity:${opp}`, summary = `LEAKCHECK area-less decision (${k})`;
+      const id = (await q(`INSERT INTO escalation (key, area_id, needs, summary) VALUES ($1, NULL, 'judgment', $2) RETURNING id`, [key, summary]))[0].id;
+      await appendEvent(pool, { actor: "cos", action: "escalation_opened", entityType: "escalation", entityId: id, after: { key, needs: "judgment", summary } });
+      if (!open) {
+        await q(`UPDATE escalation SET status = 'resolved', resolved_at = now(), resolution = 'moved on' WHERE id = $1`, [id]);
+        await appendEvent(pool, { actor: "cos", action: "escalation_resolved", entityType: "escalation", entityId: id, before: { key, status: "open" }, after: { key, status: "resolved", summary } });
+      }
+    }
     // low-value traffic that must stay out of Live activity
     for (let i = 0; i < 30; i++) await appendEvent(pool, { actor: "system", action: "tool_called", entityType: "tool", after: { tool: "LEAKCHECK_tool", outcome: "ok" } });
     await tick();
@@ -198,6 +211,15 @@ describe.skipIf(!admin || !migT || !appT || !haveUi)("Command screen in a browse
     expect([...seen]).toEqual(["live"]);
     expect((await state()).gaps.length).toBe(g0);
   }, 60_000);
+
+  it("a check that writes no event still moves 'last check' (the snapshot is re-read every minute)", async () => {
+    const before = (await q(`SELECT max(id)::int AS m FROM event`))[0].m;
+    const at = (await q(`INSERT INTO event_tick (started_at, finished_at, trigger, status) VALUES (now() + interval '3 minutes', now() + interval '3 minutes', 'interval', 'done') RETURNING started_at`))[0].started_at as Date;
+    expect((await q(`SELECT max(id)::int AS m FROM event`))[0].m).toBe(before);                     // a quiet check: no event at all
+    const want = await page.evaluate((iso: string) => new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(iso)), at.toISOString());
+    await page.locator(".calm__line", { hasText: `last at ${want}` }).waitFor({ timeout: 75_000 });
+    await q(`UPDATE event_tick SET status = 'skipped' WHERE started_at > now() + interval '1 minute'`);
+  }, 90_000);
 
   it("renders the mobile layout at 390×844: Needs you / ownership line / handling / recent changes / Areas, no horizontal scroll", async () => {
     const m = await signedInPage({ width: 390, height: 844 });

@@ -75,3 +75,21 @@ describe("canCannot", () => {
     expect(canCannot(need("x", null, { key: "something:else" }))).toBeNull();
   });
 });
+
+describe("time-driven state (production finding 2026-10-15)", () => {
+  it("claims Finagai's checks stopped only from a snapshot read in the last two minutes", () => {
+    const s = snapshot({ eventLoopLastTick: "2026-10-15T11:40:00Z" });               // 20 min before NOW
+    expect(deriveCommand(s, healthy, NOW, NOW - 30_000).stalled).toBe(true);           // fresh read: it really stopped
+    const old = deriveCommand(s, healthy, NOW, NOW - 10 * 60_000);                     // a 10-minute-old read proves nothing
+    expect(old.stalled).toBe(false);
+    expect(old.health).toBe("healthy");
+  });
+  it("decisions and waits linked to Finagai's internal test work are excluded even without an Area on their row", () => {
+    const opp = "39a63fc3-9421-4708-8af9-e96a53adc536";
+    const v = deriveCommand(snapshot({ areas: [career],
+      needsJulian: [need("n-canary", null, { subject: { type: "opportunity", id: opp } }), need("n-real", "c")],
+      waits: [wait("w-canary", null, { opportunity_id: opp }), wait("w-real", "c")] }), healthy, NOW, NOW, new Set([opp]));
+    expect(v.needs.map((n) => n.id)).toEqual(["n-real"]);
+    expect(v.waits.map((w) => w.id)).toEqual(["w-real"]);
+  });
+});

@@ -4,6 +4,7 @@ import { CommandScreen } from "./components/Command";
 import { TopBar } from "./components/TopBar";
 import { LiveController, useLive } from "./live/store";
 import { deriveCommand } from "./model/command";
+import { internalLinks } from "./model/units";
 import type { LiveEvent } from "./model/types";
 
 const DIAG = new URLSearchParams(location.search).has("diag");
@@ -39,7 +40,9 @@ export function App() {
     return () => clearTimeout(t);
   }, [s.loadError]);
 
-  const view = useMemo(() => (s.snapshot ? deriveCommand(s.snapshot, s.reliability, now) : null), [s.snapshot, s.reliability, now]);
+  const internalAreas = useMemo(() => new Set((s.snapshot?.areas ?? []).filter((a) => a.internal).map((a) => a.id)), [s.snapshot]);
+  const links = useMemo(() => internalLinks(s.events, internalAreas), [s.events, internalAreas]);
+  const view = useMemo(() => (s.snapshot ? deriveCommand(s.snapshot, s.reliability, now, s.snapshotAt, links) : null), [s.snapshot, s.reliability, now, s.snapshotAt, links]);
   const quietHeld = useMemo(() => heldForQuietHours(s.events, s.snapshot?.needsJulian.map((n) => n.key) ?? [], now), [s.events, s.snapshot, now]);
 
   return (
@@ -48,7 +51,7 @@ export function App() {
         asOf={s.snapshotAt} quietHeld={quietHeld} />
       <Banner conn={s.conn} disconnectedAt={s.disconnectedAt} caughtUp={s.caughtUp} now={now} signedOut={s.signedOut} loadError={s.loadError} />
       {view ? <CommandScreen view={view} events={s.events} arrivedLive={s.arrivedLive} conn={s.conn} now={now} gaps={s.gaps}
-        everything={everything} {...(DIAG ? { setEverything } : {})} lastSeen={lastSeen} reliabilityWhy={s.reliability?.why ?? []} reliabilityVerdict={s.reliability?.verdict ?? null} />
+        everything={everything} {...(DIAG ? { setEverything } : {})} lastSeen={lastSeen} links={links} reliabilityWhy={s.reliability?.why ?? []} reliabilityVerdict={s.reliability?.verdict ?? null} />
         : !s.signedOut && !s.loadError && <p className="loading">Loading Finagai's state…</p>}
     </div>
   );

@@ -43,6 +43,7 @@ async function startCore(issuer: string, jwk: import("jose").JWK, allowed: strin
     { keys: createLocalJWKSet({ keys: [jwk] }), live: liveHandler(pool, { pollMs: 100, heartbeatMs: 1000, maxStreamMs: 20_000 }) }));
   return base;
 }
+const bffLogs: string[] = [];
 async function startBff(core: string, issuer: string, staticDir: string) {
   let base = "";
   const s = http.createServer(); servers.push(s);
@@ -50,7 +51,7 @@ async function startBff(core: string, issuer: string, staticDir: string) {
   base = `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
   const cfg = (await import("../../command/server/config.js")).loadConfig({ CC_PUBLIC_URL: base, OAUTH_ISSUER: issuer, CC_CLIENT_ID: "cc-client", CC_CLIENT_SECRET: "cc-secret",
     CORE_URL: core, CORE_RESOURCE: `${core}/mcp`, PRINCIPAL_SUBJECT: "user_julian", CC_STATE_SECRET: "s".repeat(40), CC_INSECURE_COOKIES: "1", CC_STATIC_DIR: staticDir });
-  const bff = createBff(cfg, { log: () => {} });
+  const bff = createBff(cfg, { log: (m, f) => { bffLogs.push(JSON.stringify({ msg: m, ...f })); } });
   s.on("request", bff.handler);
   return { base, bff };
 }
@@ -137,6 +138,13 @@ describe.skipIf(!admin || !migT || !appT)("Command Center BFF — auth and live 
     expect((await b.go(`${bff2.base}/api/live/contract`)).status).toBe(200);
     expect((await b.go(`${bff2.base}/api/live/contract`)).status).toBe(200);
     expect(p2.state.refreshCalls).toBeGreaterThanOrEqual(2);
+    // each renewal is logged as operational evidence (timings, rotation) — and no log line carries a token
+    const renewals = bffLogs.filter((l) => l.includes('"access renewed"')).map((l) => JSON.parse(l));
+    expect(renewals.length).toBeGreaterThanOrEqual(2);
+    expect(renewals[0]).toEqual(expect.objectContaining({ forced: false, refreshRotated: true, validForSeconds: expect.any(Number), secondsLeftBefore: expect.any(Number) }));
+    for (const t of p2.issued) for (const l of bffLogs) expect(l.includes(t)).toBe(false);
+    // the browser saw none of the renewed tokens either
+    for (const t of p2.issued) { for (const x of [...b.bodies, ...b.headers]) expect(x.includes(t)).toBe(false); for (const m of b.jar.values()) for (const v of m.values()) expect(v.includes(t)).toBe(false); }
     await p2.close();
   });
 

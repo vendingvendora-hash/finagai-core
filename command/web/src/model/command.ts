@@ -28,16 +28,23 @@ export interface CommandView {
   internalAreaIds: Set<string>;
 }
 
-export const STALL_MS = 15 * 60_000;
+export const STALL_MS = 15 * 60_000, FRESH_MS = 2 * 60_000;
 const COLOR_ORDER = { red: 0, yellow: 1, green: 2 } as const;
 
-export function deriveCommand(s: Snapshot, rel: Reliability | null, now: number): CommandView {
+/**
+ * `snapshotAt` is when the snapshot was read: "Finagai's checks stopped" is only claimed from a snapshot read in the last
+ * two minutes (an old snapshot says nothing about whether checks continue — the connection state covers that).
+ * `internalLinked` are objects tied to Finagai's internal test Area through the events (see units.ts `internalLinks`):
+ * decisions about them are internal even when their own row carries no Area (rows created before Core recorded one).
+ */
+export function deriveCommand(s: Snapshot, rel: Reliability | null, now: number, snapshotAt: number | null = now, internalLinked: Set<string> = new Set()): CommandView {
   const internal = new Set(s.areas.filter((a) => a.internal).map((a) => a.id));
   const visible = (areaId: string | null) => !areaId || !internal.has(areaId);
   const names = new Map(s.areas.map((a) => [a.id, a.name]));
-  const needs = s.needsJulian.filter((n) => visible(n.area_id))
+  const linked = (...ids: Array<string | null | undefined>) => ids.some((id) => !!id && internalLinked.has(id));
+  const needs = s.needsJulian.filter((n) => visible(n.area_id) && !linked(n.id, n.subject?.id, n.followup_id))
     .sort((a, b) => (a.due_at ?? "9999").localeCompare(b.due_at ?? "9999") || a.created_at.localeCompare(b.created_at));
-  const waits = s.waits.filter((w) => w.owner === "finagai" && visible(w.area_id) && (w.state === "waiting" || w.state === "open"))
+  const waits = s.waits.filter((w) => w.owner === "finagai" && visible(w.area_id) && !linked(w.id, w.opportunity_id, w.project_id) && (w.state === "waiting" || w.state === "open"))
     .sort((a, b) => (a.due_at ?? "9999").localeCompare(b.due_at ?? "9999"));
   const dated = waits.filter((w) => w.due_at);
   const firstDay = dated[0]?.due_at?.slice(0, 10);
@@ -46,7 +53,8 @@ export function deriveCommand(s: Snapshot, rel: Reliability | null, now: number)
   const julianProblems = s.exceptions.filter((x) => x.owner === "julian" && visible(x.area_id));
   const tasksRunning = s.tasks.filter((t) => t.status === "active");
   const lastTick = s.eventLoopLastTick;
-  const stalled = !!lastTick && now - Date.parse(lastTick) > STALL_MS;
+  const fresh = snapshotAt !== null && now - snapshotAt < FRESH_MS;
+  const stalled = fresh && !!lastTick && now - Date.parse(lastTick) > STALL_MS;
 
   let health: Health; const healthWhy: string[] = [];
   if (julianProblems.length) { health = "attention"; healthWhy.push(...julianProblems.map((x) => x.summary)); }

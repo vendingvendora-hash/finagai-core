@@ -10,7 +10,8 @@ interface Session { tokens: Tokens; createdAt: number; lastSeen: number; refresh
 
 export class Sessions {
   private readonly map = new Map<string, Session>();
-  constructor(private readonly oidc: Oidc, private readonly idleMs: number, private readonly now = () => Date.now()) {}
+  constructor(private readonly oidc: Oidc, private readonly idleMs: number, private readonly now = () => Date.now(),
+    private readonly log: (msg: string, fields: Record<string, unknown>) => void = () => {}) {}
 
   create(tokens: Tokens): string {
     const id = randomBytes(32).toString("base64url");
@@ -28,11 +29,19 @@ export class Sessions {
     if (!s) return null;
     if (!force && s.tokens.accessExp - this.now() > 60_000) return s.tokens.access;
     if (!s.tokens.refresh) { this.map.delete(id!); return null; }
+    const before = s.tokens;
     try {
+      const first = !s.refreshing;
       s.refreshing ??= this.oidc.refresh(s.tokens.refresh).finally(() => { s.refreshing = undefined; });
       s.tokens = await s.refreshing;
+      // operational evidence only: timings and whether the refresh token rotated — never a token
+      if (first) this.log("access renewed", { forced: force, secondsLeftBefore: Math.round((before.accessExp - this.now()) / 1000),
+        validForSeconds: Math.round((s.tokens.accessExp - this.now()) / 1000), refreshRotated: s.tokens.refresh !== before.refresh, sessionAgeMinutes: Math.round((this.now() - s.createdAt) / 60_000) });
       return s.tokens.access;
-    } catch { this.map.delete(id!); return null; }
+    } catch (e) {
+      this.log("renewal failed; session ended", { reason: String((e as Error)?.message ?? e).slice(0, 160) });
+      this.map.delete(id!); return null;
+    }
   }
 
   private live(id: string): Session | null {

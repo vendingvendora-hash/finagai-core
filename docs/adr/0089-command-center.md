@@ -97,3 +97,21 @@ implementation decisions and deviations.
   - No "All Areas" or "Earlier" links (slices 4 and 5).
   - Between 900 and 1180 px the three columns narrow instead of the activity rail becoming a drawer.
   - The reset state shows "Loading Finagai's state…" instead of "Reloading…".
+
+## Production acceptance findings (2026-10-15) — fixed in hotfix 44
+
+- **Canary decision in Live activity (acceptance point 5).**
+  - Seen: a canary judgment opened before hotfix 41 recorded an Area on decisions. Its later resolution had no Area and showed as "Career: ADR088-CANARY… — no longer needs you".
+  - Root cause: the client dropped only units whose events carried the internal Area.
+  - Fix: a pure linkage computed from the events (`internalLinks`).
+    - Objects an internal-Area event touched are internal, and so is everything about them (a decision whose key names one as its subject, and its resolution).
+    - Each event is classified on its own. A run that did both real and test work shows only its outcomes on real objects; its run-wide summaries, which list both, are dropped.
+    - A canary run stays internal from start to finish.
+    - The same links exclude such decisions and waits from Needs you and Finagai is handling.
+  - The client keeps 24 h of events as context and shows 12 h.
+- **False "Finagai's checks stopped" (correctness).**
+  - Root cause: a quiet check writes no event; it only moves `eventLoopLastTick`. The client re-read the snapshot only when events arrived, so after 15 quiet minutes it would have claimed the checks had stopped and shown Degraded.
+  - Fix: while live and visible, the snapshot and the reliability report are re-read every 60 s and when the tab returns to view. While disconnected the snapshot is left "as of" the disconnect.
+  - "Stopped" is claimed only from a snapshot read in the last 2 minutes.
+- **Token renewal is now observable.** The BFF logs `access renewed` with timings and whether the refresh token rotated, and `renewal failed; session ended` with the reason. No token is ever logged.
+- **Core-side gap (classified B, not built).** Decision rows created before hotfix 41 have no Area, so their events carry none. The envelope could derive an Area from the decision's subject. The client linkage covers this, and new rows are correct.

@@ -28,7 +28,7 @@ export function createBff(cfg: CcConfig, deps: { fetchFn?: typeof fetch; log?: (
   const fetchFn = deps.fetchFn ?? fetch;
   const log = deps.log ?? ((m, f) => console.log(JSON.stringify({ level: "info", msg: m, ...f })));
   const oidc = new Oidc(cfg, fetchFn);
-  const sessions = new Sessions(oidc, cfg.sessionIdleMs);
+  const sessions = new Sessions(oidc, cfg.sessionIdleMs, undefined, log);
   const SESSION = cfg.secureCookies ? "__Host-fcc" : "fcc";
   const STATE = cfg.secureCookies ? "__Host-fcc-signin" : "fcc-signin";
   // SameSite=Lax (not Strict): the sign-in callback is a top-level navigation coming back from the identity provider;
