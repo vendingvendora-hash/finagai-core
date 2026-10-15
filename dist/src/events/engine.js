@@ -183,6 +183,10 @@ async function tick(ctx, deps, result) {
                     after: { workflow: name, events: evs.length, changes: r.changes.slice(0, 30), escalations: r.escalations.length } });
             }
             // ADR-087: a judgment the workflow raised is caused by that workflow run.
+            // A judgment about an object belongs to that object's Area (live 2026-10-15: Canary 4B's judgment had no Area).
+            for (const x of r.escalations)
+                if (x.areaId === undefined && x.subject && SUBJECT_AREA[x.subject.type])
+                    x.areaId = (await pool.query(`SELECT area_id FROM ${SUBJECT_AREA[x.subject.type]} WHERE id = $1::uuid`, [x.subject.id]).catch(() => ({ rows: [] }))).rows[0]?.area_id ?? null;
             needs.push(...r.escalations.map((x) => ({ ...x, key: subjectKey(x), detail: x.detail ?? `from ${evs.length} event(s): ${evs.slice(0, 3).map((e) => e.summary).join(" | ")}`,
                 ...(x.causeIds?.length ? {} : completedId ? { causeIds: [completedId] } : {}) })));
         }
@@ -325,6 +329,8 @@ async function reconcileEscalations(ctx, needs, result) {
 }
 /** Phase 8 (ADR-088): how long a workflow-raised judgment waits for Julian before it expires (resolved, with that reason). */
 export const WORKFLOW_ESCALATION_TTL_DAYS = 14;
+/** Objects a workflow judgment can be about, and the table that holds their Area. */
+const SUBJECT_AREA = { opportunity: "opportunity", project: "project", followup: "followup" };
 const SUBJECT = /@([a-z_]+):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 /** A workflow need's identity includes the object it is about (so the engine can tell when that object moves on). */
 export const subjectKey = (n) => (n.subject && !SUBJECT.test(n.key) ? `${n.key}@${n.subject.type}:${n.subject.id}` : n.key);

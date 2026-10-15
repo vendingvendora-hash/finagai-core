@@ -285,7 +285,7 @@ describe.skipIf(!admin || !migT || !appT)("Live State Stream (ADR-087)", () => {
 
   it("hotfix 34 — a held (quiet-hours) notification cites the escalation it holds", async () => {
     const mod: AreaModule = { watchers: [], subscriptions: [], workflows: [] };
-    const kim = (await q(`INSERT INTO followup (area_id, summary, counterparty, state, due_at, origin) VALUES ($1, 'Waiting on Kim', 'Kim', 'waiting', now() - interval '2 days', 'julian') RETURNING id`, [careerId]))[0];
+    const kim = (await q(`INSERT INTO followup (area_id, summary, counterparty, state, due_at, origin) VALUES ($1, 'Waiting on Kim', 'Kim', 'waiting', '2026-10-11T03:00:00Z', 'julian') RETURNING id`, [careerId]))[0];
     await withCause({ correlationId: randomUUID(), causeIds: [], root: { actor: "julian", what: "tool:track_waiting" } },
       () => appendEvent(pool, { actor: "julian", action: "followup_created", entityType: "followup", entityId: kim.id, after: { summary: "Waiting on Kim", state: "waiting" } }));
     await runTick(pool, { now: new Date("2026-10-13T03:00:00Z"), dryRun: false }, { modules: [mod], exceptions: { budget: async () => ({ monthToDateUsd: 1, targetUsd: 30, ceilingUsd: 36 }) },

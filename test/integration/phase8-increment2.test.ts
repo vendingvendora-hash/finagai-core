@@ -107,6 +107,19 @@ describe.skipIf(!admin || !migT || !appT)("Phase 8 increment 2 (ADR-088)", () =>
     expect(res.after).toEqual(expect.objectContaining({ resolution: "moved on (opportunity_evidence_added)" }));
     expect(res.before).toEqual(expect.objectContaining({ status: "open" }));
     expect(res.cause_ids.map(Number)).toEqual([moved]);
+    // live 2026-10-15 (Canary 4B): the brief listed the judgment twice (the escalation AND the last career_synced
+    // event's decisions), and kept the second copy for 48 h after the judgment resolved itself
+    await appendEvent(pool, { actor: "cos", action: "career_synced", entityType: "area", entityId: careerId, after: { dryRun: false, decisions: ["Vallum: c arrived after the job was rejected"] } });
+    const mod2 = { ...mod("c", true) };
+    mod2.workflows = [{ name: "wf-c", async run() { return { changes: [], escalations: [{ key: "career.sync:c", needs: "judgment" as const, summary: "Career: Vallum: c arrived after the job was rejected", subject: { type: "opportunity", id: o.id } }] }; } }];
+    await tick({}, new Date(), [mod2]);
+    const c = (await q(`SELECT id, area_id FROM escalation WHERE key LIKE 'career.sync:c@%'`))[0];
+    expect(c.area_id).toBe(careerId);                                                            // the job's own Area
+    expect((await executiveBriefV2(pool)).decisions.filter((d) => /c arrived after/.test(d))).toHaveLength(1);
+    await withCause({ correlationId: randomUUID(), causeIds: [], root: { actor: "julian", what: "tool:record_opportunity_update" } },
+      () => appendEvent(pool, { actor: "julian", action: "opportunity_evidence_added", entityType: "opportunity", entityId: o.id, after: { kind: "note" } }));
+    await tick({}, new Date(), [empty]);
+    expect((await executiveBriefV2(pool)).decisions.filter((d) => /c arrived after/.test(d))).toEqual([]);
     // without a subject it expires after the TTL (the tick's clock), resolved with that reason
     await tick({}, new Date(), [mod("b", false)]);
     const b = (await q(`SELECT id FROM escalation WHERE key = 'career.sync:b' AND status = 'open'`))[0];

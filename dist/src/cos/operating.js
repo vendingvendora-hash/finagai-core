@@ -251,9 +251,9 @@ export async function executiveBriefV2(pool, now = new Date()) {
     // event engine from state — the single list both the brief and the escalation digest use.
     for (const e of (await pool.query(`SELECT e.summary, e.due_at, e.needs, a.name AS area FROM escalation e LEFT JOIN area a ON a.id = e.area_id WHERE e.status = 'open' AND e.needs <> 'requested' ORDER BY e.due_at NULLS LAST, e.created_at LIMIT 10`)).rows)
         decisions.push(`${e.area ? `[${e.area}] ` : ""}${e.summary}${e.due_at ? ` (by ${new Date(e.due_at).toISOString().slice(0, 10)})` : ""}`);
-    const sync = (await pool.query(`SELECT after FROM event WHERE action = 'career_synced' AND occurred_at > now() - interval '48 hours' AND (after->>'dryRun')::boolean IS NOT TRUE ORDER BY occurred_at DESC LIMIT 1`)).rows[0]?.after;
-    for (const d of (sync?.decisions ?? []).slice(0, 5))
-        decisions.push(`Career: ${d}`);
+    // Career sync's judgment calls arrive above as escalations (Phase 5), which resolve themselves when the job moves on
+    // (Phase 8). Re-listing the last sync's decisions here showed each one twice, and kept showing it for 48 h after it
+    // resolved (live 2026-10-15, Canary 4B).
     const blocked = [];
     for (const f of (await pool.query(`SELECT f.counterparty, f.summary, f.due_at FROM followup f LEFT JOIN project p ON p.id = f.project_id
       WHERE f.state = 'overdue' AND COALESCE(f.area_id, p.area_id) IS DISTINCT FROM $1::uuid
