@@ -38,6 +38,8 @@ export interface Current {
   request?: string;
   /** what it is, as Core holds it now (a wait's or a problem's summary) */
   about?: string;
+  /** the stream position this state is consistent with (the snapshot's cursor): history newer than it is not mixed in */
+  asOf?: number;
 }
 export type CurrentOf = (subject: string, evs: LiveEvent[]) => Current | null;
 
@@ -389,8 +391,12 @@ function finalOutcome(steps: LiveEvent[]): Unit["outcome"] {
  * "Mac task 141 — waiting for your approval of step 412: Report the macOS version" · "No answer from Beth Young by
  * 2026-10-14 — waiting for you (only you can do this)" · "Waiting on Chimes … — still waiting on Chimes".
  */
-function currentTitle(subject: string, evs: LiveEvent[], cur: Current, past: string): string {
+function currentTitle(subject: string, all: LiveEvent[], cur: Current, past: string): string {
   const after = (e: LiveEvent | undefined) => (e?.after ?? e?.before ?? {}) as Record<string, unknown>;
+  // One time base per title: the current state is as of the snapshot, so only history the snapshot already reflects is
+  // quoted with it. (Production 2026-10-15, task 138: for ~2 s after "ok 407" the stream had the approval but the
+  // snapshot not yet, and the title read "waiting for your approval of step 407 … (earlier: you approved step 407)".)
+  const evs = cur.asOf === undefined ? all : all.filter((e) => e.seq <= cur.asOf!);
   if (subject.startsWith("control_task:")) {
     const id = subject.slice("control_task:".length);
     const created = evs.find((e) => e.class === "task.created");

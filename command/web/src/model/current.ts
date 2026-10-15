@@ -25,7 +25,8 @@ export function currentResolver(snapshot: Snapshot, view: CommandView): CurrentO
   const tasks = new Map(snapshot.tasks.map((t) => [Number(t.code), t]));   // pg serves a bigint code as a string
   const waits = new Map(snapshot.waits.filter((w) => visible(w.area_id)).map((w) => [`followup:${w.id}`, w]));
   const exceptions = new Map(snapshot.exceptions.filter((x) => visible(x.area_id)).map((x) => [x.key, x]));
-  return (subject, evs) => {
+  const asOf = snapshot.cursor;
+  const resolve: CurrentOf = (subject, evs) => {
     // 1) open in Needs you
     const escIds = new Set(evs.filter((e) => e.domain === "escalation" && e.entity.id).map((e) => `escalation:${e.entity.id}`));
     const need = needs.find(({ subjects }) => subjects.has(subject) || [...escIds].some((id) => subjects.has(id)));
@@ -56,6 +57,7 @@ export function currentResolver(snapshot: Snapshot, view: CommandView): CurrentO
     }
     return null;
   };
+  return (subject, evs) => { const c = resolve(subject, evs); return c ? { ...c, asOf } : null; };
 }
 
 /** A Mac task's number, from what Core recorded about it: an open decision's key, an escalation key, or its creation. */

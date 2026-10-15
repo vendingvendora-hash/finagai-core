@@ -276,6 +276,8 @@ describe("Live activity is history: one story per unit of work, phrased by its f
 
 /** Slice 3 acceptance invariant 2: unfinished work reads in its CURRENT state, which only the snapshot decides. */
 describe("unfinished work is shown in its current state (from the snapshot), never as finished history", () => {
+  /** a snapshot that already reflects every event in the fixture (its cursor is past them all) */
+  const snapAt = (p: Partial<Snapshot> = {}) => snapshot({ cursor: 1e9, ...p });
   const units = (evs: ReturnType<typeof task137>, snap: Snapshot) => {
     const v = deriveCommand(snap, null, Date.parse("2026-10-15T17:00:00Z"));
     return buildUnits(evs, v.internalAreaIds, { open: openSubjects(v.needs), current: currentResolver(snap, v) });
@@ -284,29 +286,74 @@ describe("unfinished work is shown in its current state (from the snapshot), nev
   const task = (status: string, awaiting_kind: string | null = null) => ({ code: "137" as unknown as number, status, verification_status: null, awaiting_kind, request: "Read-only check: report the macOS version", updated_at: "" });
 
   it("a task waiting for Julian's approval: present tense, ◆, the request — not 'asked for your approval'", () => {
-    const snap = snapshot({ needsJulian: [need(ESC, null, { key: KEY, needs: "authorization", subject: { type: "control_task", id: TASK } })], tasks: [task("waiting_approval", "approval")] });
+    const snap = snapAt({ needsJulian: [need(ESC, null, { key: KEY, needs: "authorization", subject: { type: "control_task", id: TASK } })], tasks: [task("waiting_approval", "approval")] });
     const u = units(task137(2685), snap);
     expect(u.map((x) => [x.title, x.yours, x.current?.owner])).toEqual([["Mac task 137 — waiting for your approval of step 406: Read-only check: report the macOS version", true, "julian"]]);
   });
 
   it("a running task after Julian approved: 'running', with what already happened kept as history", () => {
-    const u = units(task137(2711), snapshot({ tasks: [task("active")] }));
+    const u = units(task137(2711), snapAt({ tasks: [task("active")] }));
     expect(u.map((x) => [x.title, x.yours, x.outcome])).toEqual([["Mac task 137 — running: Read-only check: report the macOS version (earlier: you approved step 406)", false, null]]);
   });
 
   it("recovering after a stall: Core lists it active again → running (the earlier failure is not its final word)", () => {
-    const u = units(task137(2715), snapshot({ tasks: [task("active")] }));
+    const u = units(task137(2715), snapAt({ tasks: [task("active")] }));
     expect(u[0]!.title).toMatch(/^Mac task 137 — running/);
     expect(u[0]!.outcome).toBeNull();
   });
 
   it("blocked on the model budget: paused, Finagai's — not Julian's", () => {
-    const u = units(task137(2672), snapshot({ tasks: [task("paused", "budget")] }));
+    const u = units(task137(2672), snapAt({ tasks: [task("paused", "budget")] }));
     expect(u.map((x) => [x.title, x.yours])).toEqual([["Mac task 137 — paused until the model budget allows: Read-only check: report the macOS version", false]]);
   });
 
+  it("one time base: while the snapshot predates the approval, the title is the snapshot's state without the newer history (production, task 138)", () => {
+    // the stream already carries "ok 406" (events 2707–2711, seq > cursor) but the snapshot (cursor before them) still lists the wait
+    const evs = task137(2711).map((e) => ({ ...e, seq: e.eventId }));
+    const snap = snapAt({ cursor: 2700, needsJulian: [need(ESC, null, { key: KEY, needs: "authorization", subject: { type: "control_task", id: TASK } })], tasks: [task("waiting_approval", "approval")] });
+    const u = units(evs, snap);
+    expect(u[0]!.title).toBe("Mac task 137 — waiting for your approval of step 406: Read-only check: report the macOS version");
+    expect(u[0]!.title).not.toMatch(/you approved/);
+    // the refreshed snapshot (cursor past them) moves it on, with the approval as history
+    expect(units(evs, snapAt({ cursor: 2711, tasks: [task("active")] }))[0]!.title).toBe("Mac task 137 — running: Read-only check: report the macOS version (earlier: you approved step 406)");
+  });
+
+  it("production replay, Mac task 138 (events 2755–2773, seq 2724–2742): waiting → (lag) → running → completed, each title on one time base", () => {
+    const T = "bad1b009-89bd-4ada-8eb5-bc4914a99f6c", E = "c45fd3d4-a60f-46e9-a2d6-057cfc4b0e4a", K = `mac:138:step:407@control_task:${T}`;
+    const S = "Mac task 138 is waiting for your approval — step 407: Run the read-only command `sw_vers -productVersion` to get the macOS version. Reply \"ok 407\" or \"no 407\" in Messages, or \"stop 138\".";
+    const req = "Controlled read-only acceptance check (Julian authorized exactly one): run the single read-only command `sw_vers -productVersion` as one `run` step and report the macOS version number.";
+    const at = (id: number, seq: number, p: Parameters<typeof ev>[0]) => ev({ eventId: id, seq, ...p });
+    const all = [
+      at(2755, 2724, { class: "workflow.invoked", action: "work_invoked", actor: "julian", cause: corr("547d"), after: { what: "tool:control_mac" } }),
+      at(2756, 2725, { class: "task.created", actor: "julian", cause: { correlationId: "547d", eventIds: [2755], requestId: null }, entity: { type: "control_task", id: T }, summary: "task.created", after: { code: 138, request: req } }),
+      at(2758, 2727, { class: "workflow.invoked", action: "work_invoked", actor: "j6", cause: corr("8eab"), after: { what: "mac:/control/next" } }),
+      at(2760, 2729, { class: "task.step_proposed", actor: "j6", cause: { correlationId: "8eab", eventIds: [2758], requestId: null }, entity: { type: "control_step", id: "57e9aaaa-0000-4000-8000-000000000407" }, summary: "task.step_proposed: Run the read-only command", after: { code: 407, kind: "run", risk: "read" } }),
+      at(2761, 2730, { class: "task.state_changed", actor: "j6", cause: { correlationId: "8eab", eventIds: [2758], requestId: null }, entity: { type: "control_task", id: T }, nextOwner: "julian", summary: "task.state_changed: waiting_approval", before: { status: "active" }, after: { status: "waiting_approval", awaiting_kind: "approval" } }),
+      at(2762, 2731, { class: "escalation.opened", cause: { correlationId: "8eab", eventIds: [2761], requestId: null }, entity: { type: "escalation", id: E }, nextOwner: "julian", summary: `escalation.opened: ${S}`, after: { key: K, needs: "authorization", summary: S } }),
+      at(2763, 2732, { class: "workflow.invoked", action: "work_invoked", actor: "j6", cause: corr("bc4b"), after: { what: "mac:/control/decision" } }),
+      at(2764, 2733, { class: "task.state_changed", actor: "julian", cause: { correlationId: "bc4b", eventIds: [2763], requestId: null }, entity: { type: "control_task", id: T }, summary: "task.state_changed: active", before: { status: "waiting_approval" }, after: { status: "active", decision: "step approved" } }),
+      at(2765, 2734, { class: "task.state_changed", actor: "j6", cause: { correlationId: "bc4b", eventIds: [2763], requestId: null }, entity: { type: "control_task", id: T }, summary: "task.state_changed", before: { awaiting_kind: "approval" }, after: { awaiting_kind: null } }),
+      at(2766, 2735, { class: "escalation.resolved", cause: { correlationId: "bc4b", eventIds: [2765], requestId: null }, entity: { type: "escalation", id: E }, summary: `escalation.resolved: ${S}`, before: { status: "open" }, after: { key: K, status: "resolved", summary: S, resolution: "step approved by Julian" } }),
+      at(2769, 2738, { class: "other.control_step_ran", action: "control_step_ran", actor: "j6", cause: corr("2968"), entity: { type: "control_step", id: "57e9aaaa-0000-4000-8000-000000000407" }, summary: "other.control_step_ran", after: { result: "15.3.1\n" } }),
+      at(2771, 2740, { class: "task.completed", actor: "j6", cause: corr("f762"), entity: { type: "control_task", id: T }, summary: "task.completed: macOS version is 15.3.1", before: { status: "active" }, after: { status: "done", summary: "macOS version is 15.3.1 (from the single read-only `sw_vers -productVersion` command; nothing changed).", terminal_reason: "verified" } }),
+    ];
+    const t138 = (status: string, awaiting_kind: string | null = null) => ({ code: "138" as unknown as number, status, verification_status: null, awaiting_kind, request: req.slice(0, 200), updated_at: "" });
+    const open = [need(E, null, { key: K, needs: "authorization", subject: { type: "control_task", id: T } })];
+    const titleAt = (upTo: number, snap: Snapshot) => { const u = units(all.filter((e) => e.eventId <= upTo), snap); expect(u).toHaveLength(1); return [u[0]!.title, u[0]!.yours, u[0]!.current ? "open" : "done"]; };
+    // 1) waiting (snapshot read after the escalation opened)
+    expect(titleAt(2762, snapshot({ cursor: 2731, needsJulian: open, tasks: [t138("waiting_approval", "approval")] })))
+      .toEqual([expect.stringMatching(/^Mac task 138 — waiting for your approval of step 407: Controlled read-only/), true, "open"]);
+    // 2) the lag window observed live on hotfix 47: approval events streamed, snapshot not yet re-read → still the snapshot's state, no "you approved"
+    const lag = titleAt(2766, snapshot({ cursor: 2731, needsJulian: open, tasks: [t138("waiting_approval", "approval")] }));
+    expect(lag[0]).toMatch(/^Mac task 138 — waiting for your approval of step 407: /); expect(lag[0]).not.toMatch(/you approved/);
+    // 3) running (snapshot re-read): the approval is history
+    expect(titleAt(2769, snapshot({ cursor: 2738, tasks: [t138("active")] }))).toEqual([expect.stringMatching(/^Mac task 138 — running: .*\(earlier: you approved step 407\)$/), false, "open"]);
+    // 4) completed: past tense with the verified outcome
+    expect(titleAt(2771, snapshot({ cursor: 2740 }))).toEqual(["Mac task 138: you approved step 407; task completed — macOS version is 15.3.1 (from the single read-only `sw_vers -productVersion`…", false, "done"]);
+  });
+
   it("finished (Core no longer lists it): the past-tense story", () => {
-    expect(units(task137(), snapshot())[0]!.title).toMatch(/^Mac task 137: you approved step 406; task completed — /);
+    expect(units(task137(), snapAt())[0]!.title).toMatch(/^Mac task 137: you approved step 406; task completed — /);
   });
 
   it("an open decision, an open wait and a problem being fixed each read as still open", () => {
@@ -318,7 +365,7 @@ describe("unfinished work is shown in its current state (from the snapshot), nev
       ev({ class: "wait.started", cause: corr("w"), area: { id: career.id, name: "Career" }, entity: { type: "followup", id: W }, summary: "wait.started: Waiting on Chimes to respond to the Controller application", after: { summary: "Waiting on Chimes to respond to the Controller application" } }),
       ev({ class: "exception.opened", cause: corr("x"), entity: { type: "operating_exception", id: "77777777-7777-4777-8777-777777777777" }, after: { key: "watcher:gmail", summary: "Gmail watcher failing (3 polls in a row)" } }),
     ];
-    const snap = snapshot({ areas: [career], needsJulian: [need(E, career.id, { key: `overdue:${F}:2026-10-14`, followup_id: F, summary: sum })], waits: [wait(W, career.id, { counterparty: "Chimes", summary: "Waiting on Chimes to respond to the Controller application" })],
+    const snap = snapAt({ areas: [career], needsJulian: [need(E, career.id, { key: `overdue:${F}:2026-10-14`, followup_id: F, summary: sum })], waits: [wait(W, career.id, { counterparty: "Chimes", summary: "Waiting on Chimes to respond to the Controller application" })],
       exceptions: [{ key: "watcher:gmail", detector: "watcher", area_id: null, owner: "finagai", severity: "warning", needs: null, summary: "Gmail watcher failing (3 polls in a row)", first_seen_at: "", remediation: null, remediation_attempts: 1 }] });
     expect(units(evs, snap).map((x) => [x.title, x.yours]).sort()).toEqual([
       ["Gmail watcher failing (3 polls in a row) — Finagai is fixing it", false],
@@ -326,7 +373,7 @@ describe("unfinished work is shown in its current state (from the snapshot), nev
       ["Waiting on Chimes to respond to the Controller application — still waiting", false],
     ]);
     // ... and once the snapshot no longer lists them, they read as history (the instruction is never repeated)
-    expect(units(evs, snapshot({ areas: [career] })).map((x) => x.title).sort()).toEqual([
+    expect(units(evs, snapAt({ areas: [career] })).map((x) => x.title).sort()).toEqual([
       "Finagai found a problem: Gmail watcher failing (3 polls in a row)",
       "No answer from Beth Young by 2026-10-14 — became your decision",
       "Started waiting: Waiting on Chimes to respond to the Controller application",

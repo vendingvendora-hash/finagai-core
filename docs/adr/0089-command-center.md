@@ -241,3 +241,30 @@ No Core change: Slice 3 uses Core's existing `/live/chain/<eventId>` and `/live/
     - The browser end-to-end test checks a real approval wait reading "waiting for your approval of step N" with ◆. After Julian approves it reads "running … (earlier: you approved step N)" without ◆. After a real cancel it becomes "Mac task N: you approved step N; task was cancelled".
 - **Invariant 1 (presentation only)** holds on 46 in production. All 311 events in the page's store were byte-identical to Core's `/live/history` records after every presentation pass, and 20 of 20 sampled chains equalled `/live/chain`. A unit test runs the story, current-state and Why models on deeply frozen events and snapshot and finds them byte-identical afterwards.
 - **Known item (B, not built):** `snapshot.tasks` carries a task's number but not its id. Command maps a task story to its current state through an open decision's key or the task's creation event in the 24-hour window. A task created more than 24 hours earlier, with no open decision, keeps its past-tense story. In practice tasks stall within minutes and approvals expire within 24 hours.
+
+### Slice 3 live run on hotfix 47: one controlled read-only Mac task (2026-10-15, authorized by Julian)
+
+Task 138 was `sw_vers -productVersion`, one `run` step, approved by Julian with "ok 407". It covered events 2755–2773 (seq 2724–2742). Command was traced every 250 ms.
+
+| Time (UTC) | Core state | Command |
+|---|---|---|
+| 20:53:13 | task created (2756) | 20:53:14.8: "Mac task 138: started — …". The snapshot was not yet re-read, so the item was not marked "Open now". |
+| 20:53:15 | task active | 20:53:15.7: "Mac task 138 — running: …", Open now |
+| 20:53:26 | step 407 proposed; waiting for approval; one escalation `mac:138:step:407@…`, `authorization` (2760–2762, one transaction) | 20:53:29.2: "Mac task 138 — waiting for your approval of step 407: …", Open now, ◆. The Needs-you card reads "◆ Your approval", with the Finagai-can / only-you-can copy. The count is "2 need you". `needsJulian` holds exactly one `mac:` escalation. |
+| 20:54:28.6 | "ok 407": active; escalation resolved "step approved by Julian" (2763–2767) | **20:54:29.7–20:54:31.6: "Mac task 138 — waiting for your approval of step 407: … (earlier: you approved step 407)"**. This was a self-contradiction for about 2 s (see below). |
+| 20:54:28.6 | (snapshot re-read) | 20:54:31.7: "Mac task 138 — running: … (earlier: you approved step 407)", Open now, no ◆. The Needs-you card is gone, and the count is "1 needs you". |
+| 20:54:37.1 | task completed, verified (2771) | 20:54:39.7: "Mac task 138: you approved step 407; task completed — macOS version is 15.3.1 (from the single read-only `sw_vers -productVersion` …)". It is no longer open, and one item holds 11 steps. |
+
+- **Why inspector, throughout:**
+  - While waiting, Review opened the escalation's latest event (2762). The chain was 2758 → 2761 → 2762, equal to `/live/chain`. Owner: "You — open in Needs you". The panel showed "Finagai can / only you can".
+  - After completion, the same root showed the identical chain (history intact).
+  - The escalation object now resolves to 2766 (chain 2763 → 2765 → 2766, equal to Core) and reads "Nothing about this is open now", with no instruction.
+  - Chains for 2771 (2770 → 2771) and 2769 (2768 → 2769) are equal to Core.
+- **Read-only:**
+  - 23 events were appended during the run: 19 are task 138's lifecycle and 4 are Finagai's own watchers. None came from Command.
+  - The page made GETs only (snapshot, history, chain, reliability).
+  - All 337 events in the page are byte-identical to Core's history, and there is no duplicated event or item.
+- **Finding, fixed in hotfix 48:** the 2-second contradiction mixed two time bases. The current state came from the snapshot (still waiting), while the history clause came from newer streamed events (the approval).
+  - Fix: a current-state title quotes only the history the snapshot already reflects (`seq ≤ snapshot.cursor`). Until the snapshot is re-read, the title says what the snapshot says, consistently with the Needs-you card from the same snapshot.
+  - Proof: a unit test replays task 138's production sequence (ids and seqs) through waiting → lag → running → completed. It fails on hotfix 47 and passes on 48.
+- **Residual, by design:** an item reflects Core as of the latest snapshot. A brand-new task can show its recorded start ("started — …") for about a second before Command re-reads the snapshot and shows it as "Open now". Nothing is presented as finished.
