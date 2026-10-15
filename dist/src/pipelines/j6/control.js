@@ -546,7 +546,7 @@ async function decideStepTx(pool, code, approve) {
         const before = await rowState(tx, "control_task", s.task_id);
         await tx.query(`UPDATE control_task SET status = $2, updated_at = now() WHERE id = $1`, [s.task_id, approve ? "active" : "paused"]);
         await recordTransition(tx, { actor: "julian", action: "control_task_state", table: "control_task", id: s.task_id, before, context: { decision: approve ? "step approved" : "step rejected" } });
-        await leaveAwaitingHuman(tx, s.task_id);
+        await leaveAwaitingHuman(tx, s.task_id, { resolution: approve ? "step approved by Julian" : "step declined by Julian" });
         if (!approve)
             await enterAwaitingHuman(tx, s.task_id, "rejected", "Julian declined the proposed step; waiting for direction (or stop)", "paused");
         await appendEvent(tx, { actor: "julian", action: approve ? "control_step_approved" : "control_step_rejected",
@@ -563,7 +563,7 @@ export async function cancelTask(pool, code) {
         await tx.query(`UPDATE control_task SET status = 'cancelled', updated_at = now() WHERE id = $1`, [t.id]);
         await tx.query(`UPDATE control_step SET status = 'superseded' WHERE task_id = $1 AND status IN ('proposed','approved')`, [t.id]);
         await recordTransition(tx, { actor: "julian", action: "control_task_cancelled", table: "control_task", id: t.id, before: beforeCancel, audit: { client: "imessage_helper" } });
-        await leaveAwaitingHuman(tx, t.id, { intervention: true });
+        await leaveAwaitingHuman(tx, t.id, { intervention: true, resolution: "task cancelled by Julian" });
         await completeForTask(tx, t.id, { ok: false, cancelled: true, summary: "Cancelled by Julian." });
         return { status: "cancelled" };
     });

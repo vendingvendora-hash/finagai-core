@@ -124,8 +124,25 @@ implementation decisions and deviations.
     - Both actions now classify as `workflow.skipped`; nothing is written differently.
     - A structural test scans every `appendEvent` call that names no object and requires that none of them classifies as a state change.
   - Known latent item, not changed: `concierge_draft_rejected` carries no after-state. Rejecting a draft would trip the same check.
-- **A Mac step waiting for Julian was invisible on Command (ownership).** Found while timing a real state change: Mac task 137 waited for his approval, but `task.state_changed` ranked below the display threshold, and Needs you shows only escalations.
-  - Fix (spec §14.1: Mac task transitions belong in the activity rail): Mac task units are shown, titled from Core's fields ("Mac task is waiting for your approval — …", "Mac task 137 started: …").
-  - A unit that ends waiting on Julian carries ◆ (spec §3.5).
-  - Still not in Needs you, because Core opens no escalation for Mac step approvals. That would be a Core change (B).
+- **A Mac step waiting for Julian was invisible on Command — an ownership-contract breach (a blocker, per Julian).** Found while timing a real state change: Mac task 137 waited for his approval of step 406, yet Command could say "Nothing needs you". Needs you comes only from Core escalations, and a Mac wait never opened one.
+  - Fix (Core, one ownership model, no new authority class, no change to the approval policy): every human wait a Mac task enters (`concierge/human-wait.ts`) has exactly one open escalation for that exact task or step.
+    - Key: `mac:<task>:step:<step>@control_task:<id>`, or `mac:<task>:<kind>:<since>@…`. It is linked to the task, and `snapshot.needsJulian` lists it with its subject.
+    - It is opened in the transaction that starts the wait. It is resolved in the transaction that ends it: approved, declined, resumed, cancelled or expired.
+    - A decline opens the next wait ("direction after a no") as its own escalation.
+    - The event loop re-derives the same needs from state each tick, as a safety net, with the same key. It never duplicates them.
+  - `needs` follows `governance/authority.ts`:
+
+    | Wait | `needs` |
+    |---|---|
+    | Step approval, `EXTERNAL_COMMITMENT` (goes out as Julian) | `principal_reserved` |
+    | Step approval, any other class | `authorization` |
+    | Question, loop, step limit, waiting after a "no" | `judgment` |
+
+  - Never escalated: Finagai-owned waits (active tasks, rows outside the human-wait lifecycle) and the `budget` pause, which the budget-ceiling escalation already covers.
+  - The Mac helper already prompts Julian in Messages, so these escalations are recorded as notified. They are authoritative state, not a second notification channel.
+  - Command needs no special logic: the card comes from `needsJulian` like any decision. Mac task transitions also show in Live activity, titled from Core's fields, with ◆ when the unit ends waiting on Julian (spec §3.5, §14.1).
+  - Proof:
+    - `test/integration/mac-escalations.test.ts` covers open, deduplication, each kind of resolution, `needs` mapping, the safety net and the never-escalate cases.
+    - The browser end-to-end test enters a real approval wait and checks for a Needs-you card within 2 s and no "Nothing needs you"; approving restores calm.
+    - A Command unit test checks that an open Mac-approval escalation means not calm.
 - **Latency.** State-bearing events other than decisions and problems now refresh the snapshot after 300 ms instead of 1 s. In production a Mac task's handling row took 2.1 s while the tab was in the background.

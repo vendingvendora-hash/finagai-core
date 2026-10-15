@@ -93,3 +93,14 @@ describe("time-driven state (production finding 2026-10-15)", () => {
     expect(v.waits.map((w) => w.id)).toEqual(["w-real"]);
   });
 });
+
+describe("one ownership model (hotfix 45): a Mac step waiting for Julian is a Core escalation, so Command is never calm meanwhile", () => {
+  it("an open Mac-approval escalation is a Needs-you item and Command is not calm", () => {
+    const mac = need("m", null, { key: "mac:137:step:406@control_task:33333333-3333-3333-3333-333333333333", needs: "authorization",
+      summary: "Mac task 137 is waiting for your approval — step 406: Run the read-only command", subject: { type: "control_task", id: "33333333-3333-3333-3333-333333333333" } });
+    const v = deriveCommand(snapshot({ needsJulian: [mac] }), healthy, NOW);
+    expect(v.calm).toBe(false);
+    expect(v.needs.map((n) => n.id)).toEqual(["m"]);
+    expect(calmSentences(v, (x) => x, (x) => x).join(" ")).not.toMatch(/Nothing needs you/);
+  });
+});

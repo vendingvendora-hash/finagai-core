@@ -1,5 +1,6 @@
 import { reportLifecycleError } from "../ops/lifecycle-errors.js";
 import { recordTransition, rowState } from "../db/state-events.js";
+import { openMacWaitEscalation, resolveMacWaitEscalations } from "./mac-escalations.js";
 const H = 3_600_000;
 /** Reminder offsets (from awaiting_since) and expiry, per kind. Bounded: never more reminders than listed. */
 export const HUMAN_WAIT_POLICY = {
@@ -18,7 +19,9 @@ export async function enterAwaitingHuman(db, taskId, kind, reason, status = "wai
     await db.query(`UPDATE control_task SET status = $2, awaiting_since = COALESCE(awaiting_since, now()), awaiting_kind = $3, awaiting_reason = $4,
             expires_at = COALESCE(awaiting_since, now()) + ($5 || ' milliseconds')::interval, updated_at = now()
       WHERE id = $1`, [taskId, status, kind, reason.slice(0, 500), String(ms)]);
-    await recordTransition(db, { actor: "j6", action: "control_task_state", table: "control_task", id: taskId, before, context: { waitingFor: "julian", kind, reason: reason.slice(0, 300) } });
+    const ev = await recordTransition(db, { actor: "j6", action: "control_task_state", table: "control_task", id: taskId, before, context: { waitingFor: "julian", kind, reason: reason.slice(0, 300) } });
+    // ADR-089 hotfix 45: waiting for Julian is an authoritative escalation (Needs you), opened with the wait itself
+    await openMacWaitEscalation(db, taskId, ev ? [ev] : []);
     await db.query(`UPDATE interaction SET state = 'awaiting_human', awaiting_since = COALESCE(awaiting_since, now()), progress_note = $2, updated_at = now()
       WHERE $1 = ANY(task_ids) AND state NOT IN ${TERMINAL_IX}`, [taskId, `Waiting for Julian (${kind}): ${reason}`.slice(0, 500)]);
 }
@@ -33,7 +36,8 @@ export async function leaveAwaitingHuman(db, taskId, opts = {}) {
     const before = await rowState(db, "control_task", taskId);
     await db.query(`UPDATE control_task SET awaiting_since = NULL, awaiting_kind = NULL, awaiting_reason = NULL, expires_at = NULL,
             reminders_sent = 0, last_reminded_at = NULL WHERE id = $1`, [taskId]);
-    await recordTransition(db, { actor: "j6", action: "control_task_state", table: "control_task", id: taskId, before, context: { waitEnded: true } });
+    const ev = await recordTransition(db, { actor: "j6", action: "control_task_state", table: "control_task", id: taskId, before, context: { waitEnded: true } });
+    await resolveMacWaitEscalations(db, taskId, opts.resolution ?? "the wait ended", ev ? [ev] : []);
 }
 /**
  * Sweep human waits: due reminders (returned for delivery; counted only when `deliver` is true, i.e. a helper
@@ -82,7 +86,8 @@ export async function expireTask(pool, taskId, summary) {
             result_summary = $2, completed_at = now(), updated_at = now(),
             final_response_status = CASE WHEN conversation = 'chat' THEN 'pending' ELSE final_response_status END
       WHERE $1 = ANY(task_ids) AND state NOT IN ('completed','failed','superseded','cancelled')`, [taskId, summary.slice(0, 1000)]);
-    await recordTransition(pool, { actor: "system", action: "control_task_expired", table: "control_task", id: taskId, before, context: { summary: summary.slice(0, 300) } });
+    const ev = await recordTransition(pool, { actor: "system", action: "control_task_expired", table: "control_task", id: taskId, before, context: { summary: summary.slice(0, 300) } });
+    await resolveMacWaitEscalations(pool, taskId, "expired without an answer", ev ? [ev] : []);
 }
 /**
  * Resume a waiting/expired task by code: the same task and interaction continue (never a duplicate). Any stale
@@ -102,7 +107,7 @@ export async function resumeTask(pool, code) {
     // The "expired" notice is superseded by the resumed work: it no longer needs delivering.
     await pool.query(`UPDATE interaction SET final_response_status = 'not_needed' WHERE $1 = ANY(task_ids) AND state = 'expired' AND final_response_status = 'pending'`, [t.id]);
     await recordTransition(pool, { actor: "julian", action: "control_task_resumed", table: "control_task", id: t.id, before, context: { from: t.status } });
-    await leaveAwaitingHuman(pool, t.id);
+    await leaveAwaitingHuman(pool, t.id, { resolution: "resumed by Julian" });
     return { status: "resumed", taskId: t.id };
 }
 //# sourceMappingURL=human-wait.js.map

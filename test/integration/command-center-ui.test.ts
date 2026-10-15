@@ -21,6 +21,8 @@ import { materialize } from "../../eval/runner/j3cases.js";
 import { loadConfig } from "../../src/config/index.js";
 import { ensureArea } from "../../src/cos/operating.js";
 import { closeFollowup, sweepOverdue } from "../../src/cos/followups.js";
+import { enterAwaitingHuman } from "../../src/concierge/human-wait.js";
+import { decideStep } from "../../src/pipelines/j6/control.js";
 import { appendEvent } from "../../src/db/index.js";
 import { runTick } from "../../src/events/index.js";
 import type { AreaModule } from "../../src/events/types.js";
@@ -221,17 +223,27 @@ describe.skipIf(!admin || !migT || !appT || !haveUi)("Command screen in a browse
     await q(`UPDATE event_tick SET status = 'skipped' WHERE started_at > now() + interval '1 minute'`);
   }, 90_000);
 
-  it("a Mac task waiting on Julian's approval appears in Live activity within 2 s, marked ◆ (production finding 2026-10-15)", async () => {
-    const id = "44444444-4444-4444-4444-444444444444";
-    await appendEvent(pool, { actor: "julian", action: "control_task_created", entityType: "control_task", entityId: id, after: { code: 901, request: "Report the macOS version", requester: "julian" } });
+  it("a Mac step waiting for Julian's approval is a Needs-you card within 2 s — Command never says \"Nothing needs you\" meanwhile; approving clears it (hotfix 45)", async () => {
+    await page.locator(".calm__statement").waitFor({ timeout: 5_000 });                   // starts calm
+    const t = (await q(`INSERT INTO control_task (request) VALUES ('Report the macOS version') RETURNING id, code::int AS code`))[0] as { id: string; code: number };
+    const s = (await q(`INSERT INTO control_step (task_id, seq, kind, params, risk, summary, status, authority_class, authority_decision) VALUES ($1, 1, 'run', '{}', 'write', 'Run the read-only command sw_vers -productVersion', 'proposed', 'HIGH_RISK', 'approve') RETURNING code::int AS code`, [t.id]))[0] as { code: number };
     const t0 = Date.now();
-    await appendEvent(pool, { actor: "j6", action: "control_task_state", entityType: "control_task", entityId: id, before: { status: "active" },
-      after: { status: "waiting_approval", reason: "step 1: Run the read-only command sw_vers", waitingFor: "julian", awaiting_kind: "approval" } });
-    const unit = page.locator(".activity .unit", { hasText: "Mac task is waiting for your approval — Run the read-only command sw_vers" });
-    await unit.waitFor({ timeout: 2_000 });
+    await enterAwaitingHuman(pool, t.id, "approval", `step ${s.code}: Run the read-only command sw_vers -productVersion`);   // the real lifecycle
+    const card = page.locator(".needs .card", { hasText: `Mac task ${t.code} is waiting for your approval — step ${s.code}` });
+    await card.waitFor({ timeout: 2_000 });
     expect(Date.now() - t0).toBeLessThan(2_000);
-    expect(await unit.locator(".owner-mark--julian").count()).toBe(1);
-    expect(await page.locator(".activity .unit", { hasText: "Mac task 901 started: Report the macOS version" }).count()).toBe(1);
+    expect(await card.locator(".card__kind").innerText()).toMatch(/^◆\s*Your approval/);
+    expect(await page.locator(".calm__statement").count()).toBe(0);
+    expect(await text(".needs-count")).toBe("1 needs you");
+    expect(await page.locator(".main").innerText()).not.toMatch(/Nothing needs you/);
+    // the wait is also in Live activity, marked as Julian's
+    await page.locator(".activity .unit", { hasText: "waiting for your approval" }).first().waitFor({ timeout: 2_000 });
+    expect(await page.locator(".activity .unit", { hasText: "waiting for your approval" }).locator(".owner-mark--julian").count()).toBeGreaterThan(0);
+    // Julian approves: the escalation resolves with the step, and Command is calm again
+    expect((await decideStep(pool, s.code, true)).status).toBe("approved");
+    await page.locator(".calm__statement").waitFor({ timeout: 3_000 });
+    expect(await page.locator(".needs .card").count()).toBe(0);
+    await q(`UPDATE control_task SET status = 'done' WHERE id = $1`, [t.id]);
   }, 30_000);
 
   it("renders the mobile layout at 390×844: Needs you / ownership line / handling / recent changes / Areas, no horizontal scroll", async () => {

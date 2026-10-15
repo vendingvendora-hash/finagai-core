@@ -52,6 +52,8 @@ export interface EscalationNeed {
   causeIds?: number[];
   /** Phase 8 (ADR-088): the object a workflow-raised need is about; the need resolves itself when that object moves on */
   subject?: { type: string; id: string } | null;
+  /** ADR-089 hotfix 45: Julian was already prompted elsewhere (the Mac helper in Messages) — recorded as notified, never emailed again */
+  prompted?: boolean;
 }
 
 export interface WorkflowResult { changes: string[]; escalations: EscalationNeed[] }

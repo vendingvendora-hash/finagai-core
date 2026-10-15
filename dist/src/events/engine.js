@@ -14,6 +14,7 @@ import { appendEvent, currentCause, withCause } from "../db/index.js";
 import { areaHealth } from "../cos/areas.js";
 import { deliverOnce } from "../notify/delivery.js";
 import { RULE_NEEDS } from "../cos/lifecycle.js";
+import { macWaitNeeds } from "../concierge/mac-escalations.js";
 import { routingOverride } from "../learning/apply.js";
 import { runExceptions } from "../exceptions/index.js";
 import { evaluateRules } from "../exceptions/rules.js";
@@ -257,6 +258,9 @@ export async function stateNeeds(db, now) {
         out.push({ key: `lesson:${l.key}:${l.pid}`, needs: "authorization", areaId: l.area_id,
             summary: `Finagai learned something that would change how it works — approve applying it? ${String(l.statement).slice(0, 300)}`,
             detail: `Learned-change proposal ${l.pid}: ask Finagai to show pending proposals; approving or rejecting uses request_proposal_decision (your passkey). Nothing changes until you approve.` });
+    // d) ADR-089 hotfix 45: a Mac task waiting for Julian (a step to approve, a question, a pause). Normally opened and
+    //    resolved in the same transaction as the wait (concierge/mac-escalations.ts); this is the safety net.
+    out.push(...await macWaitNeeds(db));
     return out;
 }
 async function reconcileEscalations(ctx, needs, result) {
@@ -280,7 +284,7 @@ async function reconcileEscalations(ctx, needs, result) {
         // Phase 8 (ADR-088): a judgment a WORKFLOW raised has no state to derive it from, so it used to stay open forever.
         // It now resolves when the object it is about moves on (a later event about that object, from another unit of
         // work), or after WORKFLOW_ESCALATION_TTL_DAYS without an answer — the same rule as every other wait on Julian.
-        if (!o.followup_id && !/^(followup|overdue|lesson|exception|rule):/.test(o.key)) {
+        if (!o.followup_id && !/^(followup|overdue|lesson|exception|rule|mac):/.test(o.key)) {
             const why = await workflowNeedMovedOn(pool, o, ctx.now);
             if (why) {
                 result.escalations.resolved.push(o.summary);
@@ -293,7 +297,7 @@ async function reconcileEscalations(ctx, needs, result) {
                 continue;
             }
         }
-        const stateDerived = /^(followup|overdue|lesson|exception):/.test(o.key);
+        const stateDerived = /^(followup|overdue|lesson|exception|mac):/.test(o.key);
         if ((o.followup_id && (o.fstate === "done" || o.fstate === "cancelled")) || (stateDerived && !want.has(o.key))) {
             result.escalations.resolved.push(o.summary);
             if (!ctx.dryRun) {
@@ -315,7 +319,7 @@ async function reconcileEscalations(ctx, needs, result) {
             continue; // resolved before: never re-escalated for the same key
         result.escalations.opened.push(`[${n.needs}] ${n.summary}`);
         if (!ctx.dryRun) {
-            const ins = await pool.query(`INSERT INTO escalation (key, area_id, needs, summary, detail, due_at, followup_id) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (key) DO NOTHING RETURNING id`, [n.key, n.areaId ?? null, n.needs, n.summary.slice(0, 500), n.detail?.slice(0, 1000) ?? null, n.dueAt ?? null, n.followupId ?? null]);
+            const ins = await pool.query(`INSERT INTO escalation (key, area_id, needs, summary, detail, due_at, followup_id, notified_at) VALUES ($1, $2, $3, $4, $5, $6, $7, CASE WHEN $8 THEN now() END) ON CONFLICT (key) DO NOTHING RETURNING id`, [n.key, n.areaId ?? null, n.needs, n.summary.slice(0, 500), n.detail?.slice(0, 1000) ?? null, n.dueAt ?? null, n.followupId ?? null, n.prompted === true]);
             let cause = ins.rowCount ? await needCause(pool, n) : [];
             if (ins.rowCount && !cause.length)
                 cause = await causeHere(pool);
