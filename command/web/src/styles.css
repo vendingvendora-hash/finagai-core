@@ -1,0 +1,157 @@
+/* Finagai Command Center — design tokens and Command layout (VISUAL PRODUCT SPEC v1 §12).
+   Color carries meaning only: violet = Julian's, teal = Finagai's, green/ochre/brick = outcome. Everything else is ink. */
+:root {
+  --ground: #F2F4F3; --surface: #FFFFFF; --ink: #18211E; --ink-muted: #5A6762; --rule: #D8DEDB;
+  --julian: #4B3FC4; --finagai: #1D6B66; --ok: #2E7A4D; --degraded: #946200; --failed: #A8322A;
+  --font: "Atkinson Hyperlegible Next", system-ui, sans-serif;
+  --r-panel: 8px; --r-card: 6px;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --ground: #121816; --surface: #1A221F; --ink: #E6ECE9; --ink-muted: #9AA8A2; --rule: #2B3532;
+    --julian: #9B90FF; --finagai: #5FBFB7; --ok: #6CC48F; --degraded: #E0B04A; --failed: #F07A6E; }
+}
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: var(--ground); color: var(--ink); font: 400 15px/22px var(--font); font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--julian); outline-offset: 2px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.muted { color: var(--ink-muted); }
+a { color: var(--julian); }
+
+.app { display: grid; grid-template-rows: 56px auto 1fr; height: 100%; }
+.loading { grid-row: 3; padding: 48px; color: var(--ink-muted); }
+/* explicit rows: the banner row stays reserved (empty when there is no banner) so the body always fills the viewport */
+.topbar { grid-row: 1; } .banner { grid-row: 2; } .command { grid-row: 3; }
+
+/* top bar */
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; border-bottom: 1px solid var(--rule); background: var(--surface); }
+.topbar__brand { font-weight: 600; font-size: 17px; letter-spacing: .01em; }
+.topbar__status { display: flex; align-items: center; gap: 20px; font-size: 13px; }
+.topbar__quiet { color: var(--ink-muted); }
+.conn--live { color: var(--ink); } .conn--wait { color: var(--degraded); } .conn--off { color: var(--failed); font-weight: 600; }
+.health--healthy span { color: var(--ok); } .health--degraded { color: var(--degraded); } .health--attention { color: var(--julian); font-weight: 600; } .health--unknown { color: var(--ink-muted); }
+.needs-count { color: #fff; background: var(--julian); border-radius: 999px; padding: 2px 10px; font-weight: 600; }
+@media (prefers-color-scheme: dark) { .needs-count { color: #121816; } }
+
+/* banner (only for the UI's own limits) */
+.banner { padding: 10px 24px; font-size: 14px; border-bottom: 1px solid var(--rule); }
+.banner--off { background: color-mix(in srgb, var(--failed) 10%, var(--surface)); color: var(--ink); border-left: 4px solid var(--failed); }
+.banner--ok { background: color-mix(in srgb, var(--ok) 10%, var(--surface)); border-left: 4px solid var(--ok); }
+
+/* Command grid: Areas rail · main · Live activity, with the context strip below */
+.command { display: grid; grid-template-columns: 232px minmax(0, 1fr) 360px; grid-template-rows: minmax(0, 1fr) auto; min-height: 0; }
+.areas { grid-column: 1; grid-row: 1; border-right: 1px solid var(--rule); padding: 20px 16px; overflow: auto; }
+.main { grid-column: 2; grid-row: 1; padding: 24px 32px; overflow: auto; min-width: 0; }
+.activity { grid-column: 3; grid-row: 1; border-left: 1px solid var(--rule); padding: 20px 16px; overflow: auto; background: var(--surface); }
+.strip { grid-column: 1 / -1; grid-row: 2; border-top: 1px solid var(--rule); background: var(--surface); }
+.mobile-recent, .mobile-areas { display: none; }
+
+.section-title { font-size: 13px; font-weight: 600; color: var(--ink-muted); margin: 0 0 12px; }
+.section-title--julian { color: var(--julian); }
+.section-title--finagai { color: var(--finagai); }
+
+/* ownership markers: shape + color, never color alone */
+.owner-mark { display: inline-block; width: 1em; text-align: center; }
+.owner-mark--julian { color: var(--julian); }
+.owner-mark--finagai { color: var(--finagai); }
+.dot { font-size: 11px; } .dot--green { color: var(--ok); } .dot--yellow { color: var(--degraded); } .dot--red { color: var(--failed); } .dot--grey { color: var(--ink-muted); }
+
+/* Areas rail */
+.areas ul { list-style: none; margin: 0; padding: 0; }
+.areas__row { display: grid; grid-template-columns: 1em 1fr auto; column-gap: 6px; padding: 8px 4px; border-radius: 6px; }
+.areas__name { font-weight: 500; }
+.areas__fact { grid-column: 2 / 4; font-size: 13px; color: var(--ink-muted); }
+
+/* Needs you */
+.needs { max-width: 720px; }
+.card { background: var(--surface); border: 1px solid var(--rule); border-left: 3px solid var(--julian); border-radius: var(--r-card); padding: 16px 20px; margin-bottom: 12px; }
+.card__head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 12px; font-size: 13px; color: var(--ink-muted); margin-bottom: 8px; }
+.card__kind { color: var(--julian); font-weight: 600; }
+.card__due.is-overdue { color: var(--failed); }
+.card__body { font-size: 17px; line-height: 26px; margin: 0 0 12px; max-width: 72ch; }
+.card__cc { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; font-size: 14px; }
+.card__cc dt { color: var(--ink-muted); } .card__cc dd { margin: 0; }
+.more summary { cursor: pointer; color: var(--julian); font-size: 14px; }
+.more ul { list-style: none; padding: 0; margin: 8px 0 0; font-size: 14px; }
+.resolved { color: var(--ink-muted); font-size: 14px; border-left: 3px solid var(--rule); padding: 8px 12px; }
+
+/* the ownership line: above is Julian's, below is Finagai's */
+.ownership-line { height: 2px; background: linear-gradient(90deg, var(--julian), var(--ink)); margin: 28px 0 20px; max-width: 720px; border-radius: 1px; }
+
+/* Finagai is handling */
+.handling { max-width: 720px; }
+.handling ul { list-style: none; margin: 0; padding: 0; }
+.handling__row { display: grid; grid-template-columns: 1.25em minmax(0, 1fr) auto; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--rule); }
+.handling__row.is-zero { color: var(--ink-muted); }
+.handling__row.is-warn { color: var(--failed); font-weight: 600; }
+.handling__fact { color: var(--ink-muted); font-size: 13px; text-align: right; max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* calm state */
+.command--calm .main { display: flex; flex-direction: column; justify-content: center; }
+.calm { max-width: 640px; margin: 0 auto; text-align: center; }
+.calm__statement { font-size: 44px; line-height: 52px; font-weight: 300; margin: 0; }
+.calm .ownership-line { margin: 28px auto; width: 60%; }
+.calm__line { margin: 6px 0; font-size: 17px; line-height: 26px; color: var(--ink-muted); }
+
+/* Live activity: units of work */
+.activity__head { display: flex; justify-content: space-between; align-items: baseline; }
+.activity__mode { font-size: 13px; color: var(--ink-muted); }
+.units { list-style: none; margin: 0; padding: 0; }
+.unit { border-bottom: 1px solid var(--rule); }
+.unit__head { display: grid; grid-template-columns: 64px 1fr; gap: 2px 8px; width: 100%; text-align: left; background: none; border: 0; padding: 10px 2px; cursor: pointer; }
+.unit__time { color: var(--ink-muted); font-size: 13px; grid-row: 1 / 3; }
+.unit__title { font-size: 14px; line-height: 20px; }
+.unit__meta { font-size: 12px; color: var(--ink-muted); }
+.unit--failed .unit__title { color: var(--failed); }
+.chip-new { color: var(--finagai); font-weight: 600; }
+.unit__title .owner-mark { width: auto; margin-right: 4px; }
+.steps { list-style: none; margin: 0 0 10px 74px; padding: 0; font-size: 13px; }
+.step { display: grid; grid-template-columns: 64px auto; gap: 0 8px; padding: 3px 0; }
+.step time { color: var(--ink-muted); grid-row: 1 / 3; }
+.step__verb { font-weight: 600; }
+.step__text { color: var(--ink-muted); overflow-wrap: anywhere; }
+.gap { font-size: 12px; color: var(--degraded); padding: 8px 2px; border-bottom: 1px dashed var(--rule); }
+
+/* context strip */
+.strip__tabs { display: flex; gap: 0; }
+.strip__tabs button { flex: 1; background: none; border: 0; border-right: 1px solid var(--rule); padding: 0 16px; height: 48px; font-size: 13px; cursor: pointer; text-align: left; }
+.strip__tabs button:last-child { border-right: 0; }
+.strip__tabs button[aria-selected="true"] { background: var(--ground); font-weight: 600; }
+.strip__drawer { max-height: 280px; overflow: auto; padding: 16px 24px; border-bottom: 1px solid var(--rule); }
+.list { list-style: none; margin: 0; padding: 0; font-size: 14px; }
+.list li { padding: 6px 0; border-bottom: 1px solid var(--rule); }
+.list__date { display: inline-block; min-width: 110px; color: var(--ink-muted); }
+
+.chip { display: inline-block; border: 1px solid var(--rule); border-radius: 999px; padding: 4px 12px; margin: 0 8px 8px 0; font-size: 14px; background: var(--surface); }
+.chip--red { border-color: var(--failed); } .chip--yellow { border-color: var(--degraded); }
+
+/* motion: only for real events (spec §12.5); none at all under reduced motion */
+@keyframes unit-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+@keyframes card-in { from { opacity: 0; } to { opacity: 1; } }
+.unit--new { animation: unit-in 200ms ease-out; }
+.card--new { animation: card-in 250ms ease-out; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* narrower desktops */
+@media (max-width: 1179px) { .command { grid-template-columns: 200px minmax(0, 1fr) 300px; } .main { padding: 20px; } }
+
+/* mobile (spec §4): Needs you → ownership line → Finagai is handling → recent changes → Areas */
+@media (max-width: 900px) {
+  .app { grid-template-rows: 48px auto 1fr; }
+  .topbar { padding: 0 16px; }
+  .topbar__status { gap: 12px; font-size: 12px; }
+  .topbar__quiet, .health__more { display: none; }
+  .command { display: block; overflow: auto; }
+  .areas, .activity, .strip { display: none; }
+  .main { padding: 16px; overflow: visible; }
+  .mobile-recent { display: block; margin-top: 28px; }
+  .mobile-areas { display: block; margin-top: 20px; }
+  .card { padding: 14px 16px; }
+  .card__body { font-size: 16px; line-height: 24px; }
+  .card__cc { grid-template-columns: 1fr; }
+  .calm__statement { font-size: 30px; line-height: 38px; }
+  .command--calm .main { display: block; padding-top: 40px; }
+  .handling__fact { max-width: 18ch; }
+}

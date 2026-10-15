@@ -1,5 +1,10 @@
+import "@fontsource/atkinson-hyperlegible-next/400.css";
+import "@fontsource/atkinson-hyperlegible-next/500.css";
+import "@fontsource/atkinson-hyperlegible-next/600.css";
+import "@fontsource/atkinson-hyperlegible-next/300.css";
+import "./styles.css";
+import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { App } from "./App";
 
-createRoot(document.getElementById("root")!).render(
-  <main className="placeholder"><h1>Finagai Command Center</h1><p>The Command view arrives with the next release. The auth and live-stream check is at /spike.html.</p></main>,
-);
+createRoot(document.getElementById("root")!).render(<StrictMode><App /></StrictMode>);

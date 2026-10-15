@@ -55,3 +55,40 @@ implementation decisions and deviations.
   - It sets the service's settings and adds the client to Core's allow-list if Core pins clients.
   - It deploys and checks `/healthz`.
 - **Spike page:** `/spike.html`, signed-in only, read-only. It shows the snapshot, live events with their latency, resume after a simulated 20 s interruption, and a scan for token-like strings visible to JavaScript.
+
+## Slice 2 — Command (wireframes A and B)
+
+- **One store, Core as the only truth** (`command/web/src/live/store.ts`).
+  - The snapshot is replaced whole and never patched from events. A snapshot at an older cursor never replaces a newer one.
+  - Events are kept for the activity rail only: deduplicated by event id, applied once (`seq ≤ lastSeq` is dropped), and capped at 2,000.
+  - State-bearing events schedule a snapshot read. Decisions and problems (`escalation`, `exception`, `approval`, `authority`) refresh after 150 ms, to meet the spec's 2 s target. Everything else coalesces for 1 s.
+- **Stream reader: fetch, not EventSource.** EventSource hides Core's heartbeat comments, and the UI needs them to tell "quiet" from "dead". Fetch also lets the UI control the resume cursor and the backoff.
+- **Connection states (spec §3.6).**
+  - `Reconnecting…` on an error or after 30 s without any byte.
+  - `Offline since HH:MM` after 60 s, with the stale banner. The Needs-you count reads "as of" and relative times switch to absolute ones.
+  - On resume, the UI shows `Caught up — N changes while disconnected` for 8 s, adds a gap marker in the activity rail, and refreshes the snapshot once.
+  - A stream that Core ends cleanly after its maximum duration resumes at once, without a reconnecting state.
+- **Command derivation** (`model/command.ts`) is pure and computes no business verdict. Area colours, wait owners and the reliability verdict all come from Core.
+  - Needs you comes only from `needsJulian` (open escalations).
+  - Below the ownership line: waits whose `owner` is Finagai, active Mac tasks, Finagai-owned problems at warning or above, armed rules, and the last check.
+  - Finagai's internal Area is excluded everywhere.
+- **Live activity** (`model/units.ts`). Events are grouped by `cause.correlationId` and titled by the most significant event (spec §3.5).
+  - The §14.2 hidden set, canary units and internal-Area units are dropped. "Everything" is available only with `?diag`.
+- **Motion.** A card fades in only when its own `escalation.opened` arrived over the live stream. An activity unit slides in only when every event in it arrived live.
+  - Nothing else animates, and nothing animates under `prefers-reduced-motion`.
+  - A settled page has no running animations (`document.getAnimations()` is empty).
+- **Proof** (`test/integration/command-center-ui.test.ts`) uses headless Chromium against the real Core handler, the BFF and the built app:
+  - **Calm state:** at most three sentences, no zero rows, and nothing from the internal Area, canary or low-value traffic. The UI writes zero business rows and zero events.
+  - **A decision raised by the engine** appears in under 2 s, with the card, the count, the rail ◆ and an activity unit. It sits above the ownership line.
+  - **Interruption:** 72 s, covering reconnecting → offline/stale → resume. Every missed event is present exactly once, and the fresh snapshot shows the resolution.
+  - **A clean stream end** resumes silently.
+  - **Mobile at 390×844:** the spec's order and no horizontal scroll.
+  - **Tokens:** no token in cookies, storage, IndexedDB, the DOM, URLs or response bodies, and the session cookie is HttpOnly.
+  - Model and stream unit tests are in `command/test/unit`.
+- **Deviations from the spec in this milestone** (all later slices or not needed yet):
+  - No command bar (slice 10).
+  - No Review / Why? buttons on cards (slice 3).
+  - No mobile tab bar (only Command exists).
+  - No "All Areas" or "Earlier" links (slices 4 and 5).
+  - Between 900 and 1180 px the three columns narrow instead of the activity rail becoming a drawer.
+  - The reset state shows "Loading Finagai's state…" instead of "Reloading…".
