@@ -276,7 +276,34 @@ Fixtures, all ACCEPTANCE-TEST DATA in Area Finagai Test, created through the nor
 
 The 14-day expiry cannot be observed live inside 14 days without moving a clock. It is proven by the integration test against the real engine (the tick's clock at 13 days: still open; at 15 days: resolved "expired: no answer in 14 days").
 
-## Increment 3 — failure mining (built off-production; held until Increment 2 passes live)
+## Increment 2: PASS (2026-10-15 04:35Z, hotfix 40, Core `23c50da27285`, started 04:19Z)
+
+**Canary 4.** Julian sent both emails at 04:20Z, from julian.perez_@hotmail.es to the monitored inbox. The 04:24:33Z tick processed them under correlation `975505e9…`.
+
+| Criterion | Live evidence |
+|---|---|
+| Career history label | 4A: `opportunity_status` 2487, before `{status: applied}`, after `offer`. History event 2488 records `"transition": "applied→offer"`, source gmail:1a13dc9eb5fbe156. Before increment 2 this read "analyzed→offer". |
+| Workflow judgment raised with its subject | 4B is withdrawn, so the interview evidence was recorded with `transition: null` (event 2489). The judgment was escalated as 2494, key `career.sync:2432a900…@opportunity:39a63fc3…`, citing workflow run 2493. |
+| Notified, or held for quiet hours | `notification_suppressed` 2496 ("quiet hours", 00:24 ET) cites 2494 and 2495. Julian was not woken. |
+| Auto-resolves when the object moves on | A note was recorded on 4B through the normal tool (event 2500, its own unit of work). The next tick wrote `escalation_resolved` 2504 at 04:29:33Z: `resolution: "moved on (opportunity_evidence_added)"`, before `{status: open}`, citing 2500. |
+| Expires at 14 days | Cannot be observed live inside 14 days. The integration test runs it on the real engine with the tick's clock: still open at 13 days, resolved at 15 ("expired: no answer in 14 days"). |
+| Cleanup | 4A was withdrawn through the normal tool (offer→withdrawn). Its follow-up closed and its "respond to the offer" escalation resolved at the 04:34Z tick ("follow-up done"). 4B stays withdrawn. Nothing was deleted, and no Canary 4 item is left on Julian's list. |
+| Self-check | `reliability_checked` at 04:34:36Z on `23c50da27285`: **failing [], pending []**. All 12 ADR-087 checks pass, including the two email chains that had been pending since the deploy. |
+| Finagai Test kept out of the brief | Brief at 04:25Z and 04:35Z: no "Finagai Test is yellow", no "area created: Finagai Test", and Finagai Test is absent from `rest.areas`. Beth's overdue wait appears once, as a decision; it is not under "blocked" and there is no "Career is RED" risk. |
+| Daily internal canary | Runs at 16:56Z on 10-13 and 16:59Z on 10-14 were both `ok`, with every step checked on the stream and cleanup done by archiving. |
+| Reliability brief line | 10-14 18:36Z: the 24-hour report was `healthy` and the brief had no reliability line. While degraded on 10-13 it showed exactly one line. |
+| `reliability since` | The window starts at the requested moment. Since 04:19:30Z: healthy, 5 ticks, 10 calls, 0 failures, 2 notices held for quiet hours. |
+| Increment 1 | The hourly self-check has passed in every run since hotfix 38 (24 of 24 on 10-14). No exception was open. `job_finished` daily_maintenance succeeded at 07:00Z daily. |
+| Detector evidence | No detector has fired since hotfix 40 went live, so there is no live instance yet. All five detector paths are proven by `phase8-increment2.test.ts`: the waiting Mac task, the dead event, the red Area or stale project, and the failing tick-ledger rows and spend reading recorded in `evidenceRefs`. |
+
+**Live finding, fixed in hotfix 41 (`e1df230`).** The brief listed the 4B judgment twice: the escalation, and again from the last `career_synced` event's `decisions`. The second copy outlives the judgment by up to 48 hours. It was still visible at 04:35Z, after the escalation had resolved.
+- Escalations are now the only list, and that re-listing is removed.
+- A judgment about an object is filed under that object's Area; event 2494 had no Area.
+- Tests cover it, and fail without the fix.
+
+Hotfix 41 carries this fix plus Increment 3.
+
+## Increment 3 — failure mining (released in hotfix 41)
 Before this, failure mining was manual (current-state audit §19). The reliability report counted failures; nothing said
 *what* keeps failing.
 
