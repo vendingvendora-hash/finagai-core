@@ -318,7 +318,9 @@ describe("unfinished work is shown in its current state (from the snapshot), nev
     expect(units(evs, snapAt({ cursor: 2711, tasks: [task("active")] }))[0]!.title).toBe("Mac task 137 — running: Read-only check: report the macOS version (earlier: you approved step 406)");
   });
 
-  it("production replay, Mac task 138 (events 2755–2773, seq 2724–2742): waiting → (lag) → running → completed, each title on one time base", () => {
+  /** The recorded production events of Mac task 138 (2755–2773). `a5` rewrites the three classes Core serves since ADR-090 A5:
+   *  step 407 (stored approval: true) → authority.boundary_encountered / julian; step decisions → task.step_*; completion verified. */
+  function task138(a5 = false) {
     const T = "bad1b009-89bd-4ada-8eb5-bc4914a99f6c", E = "c45fd3d4-a60f-46e9-a2d6-057cfc4b0e4a", K = `mac:138:step:407@control_task:${T}`;
     const S = "Mac task 138 is waiting for your approval — step 407: Run the read-only command `sw_vers -productVersion` to get the macOS version. Reply \"ok 407\" or \"no 407\" in Messages, or \"stop 138\".";
     const req = "Controlled read-only acceptance check (Julian authorized exactly one): run the single read-only command `sw_vers -productVersion` as one `run` step and report the macOS version number.";
@@ -337,6 +339,17 @@ describe("unfinished work is shown in its current state (from the snapshot), nev
       at(2769, 2738, { class: "other.control_step_ran", action: "control_step_ran", actor: "j6", cause: corr("2968"), entity: { type: "control_step", id: "57e9aaaa-0000-4000-8000-000000000407" }, summary: "other.control_step_ran", after: { result: "15.3.1\n" } }),
       at(2771, 2740, { class: "task.completed", actor: "j6", cause: corr("f762"), entity: { type: "control_task", id: T }, summary: "task.completed: macOS version is 15.3.1", before: { status: "active" }, after: { status: "done", summary: "macOS version is 15.3.1 (from the single read-only `sw_vers -productVersion` command; nothing changed).", terminal_reason: "verified" } }),
     ];
+    if (!a5) return all;
+    return all.map((e) => e.action === "control_step_proposed" ? { ...e, class: "authority.boundary_encountered", domain: "authority", verb: "boundary_encountered", nextOwner: "julian" as const, after: { ...(e.after ?? {}), approval: true, authority: "HIGH_RISK" } }
+      : e.action === "control_step_approved" ? { ...e, class: "task.step_approved", domain: "task", verb: "step_approved", nextOwner: "finagai" as const }
+      : e.action === "control_step_ran" ? { ...e, class: "task.step_ran", domain: "task", verb: "step_ran" }
+      : e.class === "task.completed" ? { ...e, verified: true, after: { ...(e.after ?? {}), verification_status: "verified" } } : e);
+  }
+  const replay138 = (a5: boolean) => {
+    const T = "bad1b009-89bd-4ada-8eb5-bc4914a99f6c", E = "c45fd3d4-a60f-46e9-a2d6-057cfc4b0e4a", K = `mac:138:step:407@control_task:${T}`;
+    const S = "Mac task 138 is waiting for your approval — step 407: Run the read-only command `sw_vers -productVersion` to get the macOS version. Reply \"ok 407\" or \"no 407\" in Messages, or \"stop 138\".";
+    const req = "Controlled read-only acceptance check (Julian authorized exactly one): run the single read-only command `sw_vers -productVersion` as one `run` step and report the macOS version number.";
+    const all = task138(a5);
     const t138 = (status: string, awaiting_kind: string | null = null) => ({ code: "138" as unknown as number, status, verification_status: null, awaiting_kind, request: req.slice(0, 200), updated_at: "" });
     const open = [need(E, null, { key: K, needs: "authorization", subject: { type: "control_task", id: T } })];
     const titleAt = (upTo: number, snap: Snapshot) => { const u = units(all.filter((e) => e.eventId <= upTo), snap); expect(u).toHaveLength(1); return [u[0]!.title, u[0]!.yours, u[0]!.current ? "open" : "done"]; };
@@ -350,7 +363,9 @@ describe("unfinished work is shown in its current state (from the snapshot), nev
     expect(titleAt(2769, snapshot({ cursor: 2738, tasks: [t138("active")] }))).toEqual([expect.stringMatching(/^Mac task 138 — running: .*\(earlier: you approved step 407\)$/), false, "open"]);
     // 4) completed: past tense with the verified outcome
     expect(titleAt(2771, snapshot({ cursor: 2740 }))).toEqual(["Mac task 138: you approved step 407; task completed — macOS version is 15.3.1 (from the single read-only `sw_vers -productVersion`…", false, "done"]);
-  });
+  };
+  it("production replay, Mac task 138 (events 2755–2773, seq 2724–2742): waiting → (lag) → running → completed, each title on one time base", () => replay138(false));
+  it("the same replay under Core's A5 classes (ADR-090): step 407 is Julian's boundary, step decisions are task.*; every title is unchanged", () => replay138(true));
 
   it("finished (Core no longer lists it): the past-tense story", () => {
     expect(units(task137(), snapAt())[0]!.title).toMatch(/^Mac task 137: you approved step 406; task completed — /);

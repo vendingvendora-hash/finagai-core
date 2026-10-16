@@ -137,7 +137,12 @@ describe.skipIf(!admin || !migT || !appT)("Live State Stream (ADR-087)", () => {
     expect(told.cause.eventIds).toContain(esc.eventId);
     expect((await causalChain(pool, told.eventId)).map((e) => e.action))
       .toEqual(expect.arrayContaining(["evidence_observed", "evidence_routed", "workflow_started", "workflow_completed", "escalation_opened", "notification_delivered"]));
-    expect(byAction("area_health_changed").map((e) => e.after)).toEqual([expect.objectContaining({ color: "green", area: "Career" })]);   // baseline recorded once
+    // baseline recorded once — and (A5, ADR-090) the colour on the stream IS the snapshot's verdict: this fixture has no open
+    // objective, so it is yellow with that warning, where the old green/red writer said green and disagreed with the snapshot
+    const health = byAction("area_health_changed").map((e) => e.after);
+    expect(health).toEqual([expect.objectContaining({ color: "yellow", area: "Career", breaches: [], warnings: [expect.stringMatching(/no open objective/)] })]);
+    const snapArea = (await snapshot(pool, {})).areas.find((a) => a.name === "Career")!;
+    expect(snapArea.health).toEqual(expect.objectContaining({ color: (health[0] as { color: string }).color, warnings: (health[0] as { warnings: string[] }).warnings }));
   });
 
   it("safe: secrets never leave, the principal is never exposed, human authorization is a boolean", async () => {

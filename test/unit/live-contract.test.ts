@@ -6,21 +6,39 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { KNOWN_ACTIONS, classify } from "../../src/live/ontology.js";
+import { DOMAINS, KNOWN_ACTIONS, LEGACY_ACTIONS, classify } from "../../src/live/ontology.js";
 import { coalesce, sanitize, type LiveEvent } from "../../src/live/stream.js";
 
 const SRC = resolve(__dirname, "../../src");
 const files = (d: string): string[] => readdirSync(d).flatMap((n) => { const p = join(d, n); return statSync(p).isDirectory() ? files(p) : p.endsWith(".ts") ? [p] : []; });
-/** Every literal action name written anywhere in src. */
-function writtenActions(): Set<string> {
+/**
+ * Every event action Finagai writes: the `action:` of each appendEvent / recordTransition / recordBulkTransitions call and
+ * the first argument of each `ev(...)` capture helper, with both branches of a ternary (A5: `control_step_approved` and
+ * friends were written through ternaries the old regex could not see, so they fell through to other.* unnoticed).
+ * Only event-writing calls count: `action: "route"` on a learning rule is not an event.
+ */
+/** Every string literal in the expression after `action:` (a literal, or a ternary of any depth). */
+const actionLiterals = (expr: string): string[] => {
+  const e = expr.trim();
+  if (/^"[a-z_]+"$/.test(e)) return [e.slice(1, -1)];
+  return [...e.matchAll(/[?:]\s*"([a-z_]+)"/g)].map((m) => m[1]!);   // ternary branches only, never the compared values
+};
+const ACTION_EXPR = /action:\s*([^,}\n]*(?:\?[^,}\n]*)*)/g;
+const EV_EXPR = /\bev\(\s*([^,\n]*(?:\?[^,\n]*)*),/g;
+export function writtenActions(): Set<string> {
   const out = new Set<string>();
   for (const f of files(SRC)) {
     const t = readFileSync(f, "utf8");
-    for (const m of t.matchAll(/action:\s*"([a-z_]+)"/g)) out.add(m[1]!);
-    for (const m of t.matchAll(/\bev\("([a-z_]+)"/g)) out.add(m[1]!);
-    for (const m of t.matchAll(/action: `lesson_\$\{status\}`/g)) { void m; ["lesson_approved", "lesson_rejected", "lesson_active"].forEach((a) => out.add(a)); }
+    for (const fn of ["appendEvent(", "recordTransition(", "recordBulkTransitions("]) {
+      for (let i = t.indexOf(fn); i >= 0; i = t.indexOf(fn, i + 1)) {
+        const open = t.indexOf("{", i); if (open < 0) break;
+        let depth = 0, j = open;
+        for (; j < t.length; j++) { if (t[j] === "{") depth++; else if (t[j] === "}" && --depth === 0) break; }
+        for (const m of t.slice(open, j + 1).matchAll(ACTION_EXPR)) actionLiterals(m[1]!).forEach((a) => out.add(a));
+      }
+    }
+    for (const m of t.matchAll(EV_EXPR)) actionLiterals(m[1]!).forEach((a) => out.add(a));
   }
-  for (const m of readFileSync(join(SRC, "pipelines/j2/capture.ts"), "utf8").matchAll(/\("(create|update|supersede|conflict_open|proposal_open)", "/g)) out.add(m[1]!);
   return out;
 }
 
@@ -40,7 +58,7 @@ function objectlessActions(): Map<string, string> {
   return out;
 }
 // the domains the ADR-087 stateEventQuality self-check treats as state changes (src/live/acceptance.ts)
-const STATE_DOMAINS = ["entity", "relationship", "project", "objective", "task", "wait", "inference", "lesson", "exception", "approval", "evidence"];
+const STATE_DOMAINS = ["entity", "relationship", "project", "objective", "task", "wait", "inference", "knowledge", "lesson", "exception", "approval", "evidence"];
 
 describe("ontology", () => {
   it("an event that names no object is never classified as a state change (live 2026-10-15: concierge_no_draft failed the self-check)", () => {
@@ -55,13 +73,25 @@ describe("ontology", () => {
     expect(classify({ action: "concierge_draft_created", entity_type: "concierge_draft", after: { status: "pending" }, before: null, approval_id: null }).domain).toBe("task");
   });
   it("every action Finagai writes is classified into a real domain (nothing falls through to other.*)", () => {
-    const missing = [...writtenActions()].filter((a) => classify({ action: a, entity_type: null, after: null, before: null, approval_id: null }).domain === "other");
+    const written = writtenActions();
+    for (const a of ["control_step_approved", "control_step_rejected", "control_step_ran", "control_step_failed", "status_change"]) expect(written.has(a), a).toBe(true);   // the A5 ternary writers are seen
+    const missing = [...written].filter((a) => classify({ action: a, entity_type: null, after: null, before: null, approval_id: null }).domain === "other");
     expect(missing).toEqual([]);
     expect(KNOWN_ACTIONS.length).toBeGreaterThan(60);
   });
+  it("every classification rule has a writer, or is declared legacy (A5: 10 rules named decisions and request kinds, never events)", () => {
+    const written = writtenActions();
+    const dead = KNOWN_ACTIONS.filter((a) => !written.has(a) && !(LEGACY_ACTIONS as readonly string[]).includes(a));
+    expect(dead).toEqual([]);
+  });
+  it("the contract advertises every domain the ontology can emit, and only those (A5: system was emitted but undeclared)", () => {
+    expect(DOMAINS).toContain("system");
+    const emitted = new Set([...writtenActions(), ...LEGACY_ACTIONS].map((a) => classify({ action: a, entity_type: null, after: null, before: null, approval_id: null }).domain));
+    for (const d of emitted) expect(DOMAINS, d).toContain(d);
+  });
   it("classification reads the stored row (pure): ownership, verification, confidence", () => {
     expect(classify({ action: "exception_opened", entity_type: "operating_exception", after: { owner: "julian" }, before: null, approval_id: null })).toEqual(expect.objectContaining({ class: "exception.opened", nextOwner: "julian" }));
-    expect(classify({ action: "control_task_done", entity_type: "control_task", after: { verification: "verified" }, before: null, approval_id: null }).verified).toBe(true);
+    expect(classify({ action: "control_task_done", entity_type: "control_task", after: { verification_status: "verified" }, before: null, approval_id: null }).verified).toBe(true);
     // Phase 8 live: call_tool's routing record (no outcome) was classified tool.failed — it is a routing note
     const row = (after: Record<string, unknown>) => ({ action: "tool_called", entity_type: "tool", after, before: null, approval_id: null });
     expect(classify(row({ tool: "call_tool", routedTo: "tell_me_when" })).class).toBe("tool.routed");

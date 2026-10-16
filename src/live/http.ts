@@ -12,7 +12,7 @@
  */
 import type http from "node:http";
 import type pg from "pg";
-import { KNOWN_ACTIONS } from "./ontology.js";
+import { DOMAINS, KNOWN_ACTIONS } from "./ontology.js";
 import { CONTRACT_VERSION, RETENTION_DAYS, causalChain, coalesce, history, publish, readAfter, snapshot, type Filter } from "./stream.js";
 import { reliabilityReport } from "./reliability.js";
 
@@ -96,7 +96,7 @@ export const CONTRACT = {
     verified: "true/false when the outcome was (not) independently verified, else null", confidence: "0..1 when relevant (lessons)",
     lowValue: "high-frequency, low-value; may be coalesced",
   },
-  ontology: { domains: ["entity", "relationship", "area", "objective", "project", "task", "wait", "workflow", "tool", "evidence", "inference", "lesson", "procedure", "capability", "exception", "escalation", "approval", "authority", "notification", "rule", "source", "other"], classifiedActions: KNOWN_ACTIONS.length },
+  ontology: { domains: [...DOMAINS], classifiedActions: KNOWN_ACTIONS.length },
   delivery: { snapshot: "/live/snapshot returns state + cursor from one repeatable-read snapshot", stream: "/live/stream (SSE) or /live/events (pages)", resume: "events after the cursor; a cursor older than retention gets a `reset` (409) — take a new snapshot", retentionDays: RETENTION_DAYS, history: "/live/history covers all stored events; filters (area, class, entityType, entityId) apply before the limit; order=desc with before=<eventId> pages newest-first",
     summaries: { reliability: "/live/summary/reliability?days=N | ?since=<ISO> — the Phase 8 report (read-only)" }, coalescing: "runs of ≥3 low-value events of one class are sent once with a count (seq = last)", ordering: "strictly increasing seq; apply idempotently by seq" },
   safety: "read-only (GET); bearer auth as /mcp; payload keys/values that look like secrets are redacted; the authenticated principal is never exposed",

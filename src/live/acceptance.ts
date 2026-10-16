@@ -138,7 +138,7 @@ export async function liveAcceptance(pool: pg.Pool, opts: { version?: string; po
   // 5) causal chains from REAL post-deploy inputs (hotfix 34: judged strictly — explicit cause links, not shared correlation)
   {
     const sinceIso = since.toISOString();
-    const STATE_DOMAINS = ["entity", "relationship", "project", "objective", "task", "wait", "inference", "lesson", "exception", "approval", "evidence"];
+    const STATE_DOMAINS = ["entity", "relationship", "project", "objective", "task", "wait", "inference", "knowledge", "lesson", "exception", "approval", "evidence"];
     const isStateChange = (e: LiveEvent) => STATE_DOMAINS.includes(e.domain) && !["evidence_observed", "evidence_routed"].includes(e.action);
     const CREATION = /(_created|_tracked|_open|_set|^create)$|^opportunity_evidence_added$|^objective_set$/;
     const groupOf = async (corr: string) => toEnvelopes(pool, (await pool.query(`SELECT l.seq, e.id, e.occurred_at, e.actor, e.action, e.entity_type, e.entity_id, e.before, e.after, e.request_id, e.approval_id, e.correlation_id, e.cause_ids, e.area_id

@@ -12,7 +12,7 @@ import { causeHere, recordBulkTransitions, recordTransition, rowState } from "..
 import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { appendEvent, currentCause, withCause } from "../db/index.js";
-import { areaHealth } from "../cos/areas.js";
+import { areaStatusRead } from "../cos/operating.js";
 import { deliverOnce, type DeliveryStore, type EmailSender } from "../notify/delivery.js";
 import { RULE_NEEDS } from "../cos/lifecycle.js";
 import { macWaitNeeds } from "../concierge/mac-escalations.js";
@@ -457,18 +457,20 @@ export async function proactivityStatus(pool: pg.Pool, limit = 25) {
   };
 }
 
-/** Append area_health_changed when an Area's health differs from the last recorded one (first time: a baseline). */
+/** Append area_health_changed when an Area's health differs from the last recorded one (first time: a baseline).
+ *  A5: the colour is the same three-colour verdict the snapshot serves (`areaStatusRead`: red = breach, yellow = warning,
+ *  green = neither), so the stream and the snapshot can no longer disagree; `warnings` travel with `breaches`. */
 async function recordAreaHealth(pool: pg.Pool) {
-  for (const a of (await pool.query(`SELECT id FROM area WHERE archived_at IS NULL AND status = 'active'`)).rows) {
-    const h = await areaHealth(pool, a.id);
+  for (const a of (await pool.query<{ id: string; name: string }>(`SELECT id, name FROM area WHERE archived_at IS NULL AND status = 'active'`)).rows) {
+    const h = await areaStatusRead(pool, a).catch(() => null);
     if (!h) continue;
-    const color = h.healthy ? "green" : "red";
+    const color = h.color;
     const last = (await pool.query(`SELECT after->>'color' AS color FROM event WHERE action = 'area_health_changed' AND entity_id = $1 ORDER BY id DESC LIMIT 1`, [a.id])).rows[0]?.color;
     if (last === color) continue;
     // Cause: the latest change in this Area during this unit of work (what moved its health), else the tick itself.
     const corr = currentCause()?.correlationId;
     const trigger = corr ? (await pool.query(`SELECT max(id) AS id FROM event WHERE correlation_id = $1 AND area_id = $2 AND action <> 'area_health_changed'`, [corr, a.id])).rows[0]?.id : null;
     await appendEvent(pool, { actor: "cos", action: "area_health_changed", entityType: "area", entityId: a.id, areaId: a.id, causeIds: trigger ? [Number(trigger)] : await causeHere(pool),
-      before: { color: last ?? null }, after: { color, area: h.name, breaches: h.breaches } }); // first time: no recorded health before
+      before: { color: last ?? null }, after: { color, area: h.area, breaches: h.breaches, warnings: h.warnings } }); // first time: no recorded health before
   }
 }

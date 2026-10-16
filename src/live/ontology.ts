@@ -4,29 +4,43 @@
  * human-authorized, verified, with what confidence). Classification is a pure function of the stored row, so the
  * ontology can evolve without rewriting history, and replay always agrees with the live stream.
  */
-export type Domain =
-  | "entity" | "relationship" | "area" | "objective" | "project" | "task" | "wait" | "workflow" | "tool" | "evidence"
-  | "inference" | "lesson" | "procedure" | "capability" | "exception" | "escalation" | "approval" | "authority"
-  | "notification" | "rule" | "source" | "system" | "other";
+/** Every domain the ontology can emit. The contract advertises exactly this list (A5: `system` was emitted but not declared). */
+export const DOMAINS = [
+  "entity", "relationship", "area", "objective", "project", "task", "wait", "workflow", "tool", "evidence",
+  "inference", "knowledge", "lesson", "procedure", "capability", "exception", "escalation", "approval", "authority",
+  "notification", "rule", "source", "system", "other",
+] as const;
+export type Domain = (typeof DOMAINS)[number];
 
 export interface Classified { class: string; domain: Domain; verb: string; nextOwner: "finagai" | "julian" | null; verified: boolean | null; confidence: number | null; lowValue: boolean }
 export interface StoredRow { action: string; entity_type: string | null; after: Record<string, unknown> | null; before: Record<string, unknown> | null; approval_id: string | null }
 
 const F = (domain: Domain, verb: string, extra: Partial<Classified> = {}) => ({ domain, verb, ...extra });
 type Rule = (r: StoredRow) => ReturnType<typeof F>;
-const ENTITY_BY_TYPE: Record<string, Domain> = { project: "project", work_item: "task", knowledge_item: "inference", entity: "entity", area: "area", objective: "objective", proposal: "approval", conflict: "evidence" };
+const ENTITY_BY_TYPE: Record<string, Domain> = { project: "project", work_item: "task", entity: "entity", area: "area", objective: "objective", proposal: "approval", conflict: "evidence" };
+/**
+ * A5: a knowledge item is an inference only when its stored epistemic status says so. Facts, documented claims and what
+ * Julian stated are `knowledge.*`; a creation that stored no status (seeded rows) is `knowledge.unclassified`, never a
+ * guessed fact. Updates change status, not epistemic nature, so they are `knowledge.updated` regardless.
+ */
+const INFERRED = new Set(["inference", "hypothesis"]);
+const knowledge = (r: StoredRow, verb: "created" | "updated") => {
+  if (verb === "updated") return F("knowledge", "updated");
+  const s = typeof r.after?.epistemic_status === "string" ? r.after.epistemic_status : null;
+  if (!s || s === "unknown") return F("knowledge", "unclassified");
+  return F(INFERRED.has(s) ? "inference" : "knowledge", "created");
+};
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : null);
 
 /** action → classification. Unknown actions still stream, as other.<action>. */
 const RULES: Record<string, Rule> = {
   // world model
-  create: (r) => F(ENTITY_BY_TYPE[r.entity_type ?? ""] ?? "entity", "created"),
-  update: (r) => F(ENTITY_BY_TYPE[r.entity_type ?? ""] ?? "entity", "updated"),
-  supersede: (r) => F(r.entity_type === "knowledge_item" ? "inference" : "entity", r.entity_type === "knowledge_item" ? "updated" : "superseded"),
-  archive_records: () => F("entity", "archived"),
+  create: (r) => r.entity_type === "knowledge_item" ? knowledge(r, "created") : F(ENTITY_BY_TYPE[r.entity_type ?? ""] ?? "entity", "created"),
+  update: (r) => r.entity_type === "knowledge_item" ? knowledge(r, "updated") : F(ENTITY_BY_TYPE[r.entity_type ?? ""] ?? "entity", "updated"),
+  supersede: (r) => F(r.entity_type === "knowledge_item" ? "knowledge" : "entity", "superseded"),
   archive: () => F("entity", "archived"),
   set_project: () => F("relationship", "changed"),
-  set_due: () => F("task", "updated"),
+  status_change: () => F("task", "state_changed"),
   opportunity_tracked: () => F("entity", "created"),
   opportunity_status: () => F("entity", "state_changed"),
   opportunity_archived: () => F("entity", "archived"),
@@ -53,15 +67,24 @@ const RULES: Record<string, Rule> = {
   followup_cancelled: () => F("wait", "cancelled"),
   followup_updated: (r) => F("wait", "updated", { nextOwner: r.after?.owner === "julian" ? "julian" : null }),
   followup_linked: () => F("relationship", "changed"),
+  followup_reply_received: () => F("wait", "updated", { lowValue: true }),   // legacy (written 2026-10-09 only); kept so history classifies
   // Mac tasks (J6) and their authority boundary
   control_task_created: () => F("task", "created", { nextOwner: "finagai" }),
-  control_step_proposed: (r) => F(r.after?.needsApproval || r.after?.risk === "write" ? "authority" : "task", r.after?.needsApproval || r.after?.risk === "write" ? "boundary_encountered" : "step_proposed",
-    { nextOwner: r.after?.needsApproval || r.after?.risk === "write" ? "julian" : "finagai" }),
-  control_task_done: (r) => F("task", "completed", { verified: r.after?.verification === "verified" ? true : r.after?.verification ? false : null }),
+  // A5: the writer stores `approval` (true = the step waits for Julian). It has done so since the first J6 writer
+  // (cc665da, 2026-10-03, before release #1 on 2026-10-04), so every production row carries it. A row without it has
+  // an UNKNOWN approval state: it is a step proposal with no owner, never an invented authority boundary.
+  control_step_proposed: (r) => typeof r.after?.approval === "boolean"
+    ? F(r.after.approval ? "authority" : "task", r.after.approval ? "boundary_encountered" : "step_proposed", { nextOwner: r.after.approval ? "julian" : "finagai" })
+    : F("task", "step_proposed", { nextOwner: null }),
+  control_step_approved: () => F("task", "step_approved", { nextOwner: "finagai" }),
+  control_step_rejected: () => F("task", "step_rejected", { nextOwner: "julian" }),
+  control_step_ran: () => F("task", "step_ran"),
+  control_step_failed: () => F("task", "step_failed", { nextOwner: "finagai" }),
+  // A5: the writer stores `verification_status` (hotfix A5) and, since hotfix 35, `terminal_reason` ('verified' when the verifier passed)
+  control_task_done: (r) => { const v = r.after?.verification_status;
+    return F("task", "completed", { verified: v === "verified" || (v == null && r.after?.terminal_reason === "verified") ? true : v && v !== "not_applicable" ? false : null }); },
   control_task_cancelled: () => F("task", "cancelled"),
   false_completion: () => F("task", "failed", { verified: false }),
-  recover: () => F("task", "recovered"),
-  terminal: () => F("task", "state_changed"),
   control_task_state: (r) => F("task", "state_changed", { nextOwner: ["waiting_approval", "paused"].includes(String(r.after?.status ?? "")) || r.after?.awaiting_kind ? "julian" : null,
     verified: r.after?.verification_status === "verified" ? true : r.after?.verification_status && r.after.verification_status !== "not_applicable" ? false : null }),
   control_task_expired: () => F("task", "expired"),
@@ -72,11 +95,10 @@ const RULES: Record<string, Rule> = {
   work_invoked: () => F("workflow", "invoked"),
   workflow_completed: () => F("workflow", "completed"),
   workflow_failed: () => F("workflow", "failed", { nextOwner: "finagai" }),
-  workflow_ran: () => F("workflow", "completed"),
+  workflow_ran: () => F("workflow", "completed"),   // legacy (2026-10-09 to 10-11); kept so history classifies
   career_synced: () => F("workflow", "completed"),
   learning_ran: () => F("workflow", "completed"),
   review_generated: () => F("workflow", "completed"),
-  promote_seed_batch: () => F("workflow", "completed"),
   // Phase 8 (ADR-088): scheduled job runs and the continuous self-check are on the stream
   job_finished: (r) => F("workflow", r.after?.status === "succeeded" ? "completed" : r.after?.status === "skipped" ? "skipped" : "failed",
     r.after?.status === "failed" ? { nextOwner: "finagai" } : { lowValue: true }),
@@ -104,7 +126,6 @@ const RULES: Record<string, Rule> = {
   evidence_observed: () => F("evidence", "observed"),
   evidence_routed: (r) => F("evidence", (r.after?.routes as unknown[] | undefined)?.length ? "classified" : "ignored", { lowValue: !(r.after?.routes as unknown[] | undefined)?.length }),
   conflict_open: () => F("evidence", "conflict_opened", { nextOwner: "julian" }),
-  resolve_conflict: () => F("evidence", "conflict_resolved"),
   conflict_resolve: () => F("evidence", "conflict_resolved"),
   // learning
   lesson_learned: (r) => F(String(r.after?.key ?? "").startsWith("perf:") ? "capability" : "lesson", String(r.after?.key ?? "").startsWith("perf:") ? "measured" : "learned", { confidence: num(r.after?.confidence) }),
@@ -134,7 +155,6 @@ const RULES: Record<string, Rule> = {
   // approvals / governance
   proposal_open: () => F("approval", "requested", { nextOwner: "julian" }),
   proposal_decide: () => F("approval", "resolved"),
-  decide_proposal: () => F("approval", "resolved"),
   governance_request_staged: () => F("approval", "requested", { nextOwner: "julian" }),
   governance_executed: () => F("approval", "resolved"),
   governance_rejected: () => F("approval", "resolved"),
@@ -144,10 +164,9 @@ const RULES: Record<string, Rule> = {
   governance_approval_refused: () => F("authority", "boundary_encountered"),
   passkey_enrolled: () => F("authority", "credential_enrolled"),
   credential_revoked: () => F("authority", "credential_revoked"),
-  confirm: () => F("approval", "resolved"),
-  route: () => F("evidence", "classified"),
-  ignore: () => F("evidence", "ignored", { lowValue: true }),
 };
+/** Rules kept only so stored history classifies; no current writer emits them. */
+export const LEGACY_ACTIONS = ["workflow_ran", "followup_reply_received"] as const;
 
 /**
  * The concierge's "looked at a message and did nothing" outcomes change no state: they are about a contact, carry no

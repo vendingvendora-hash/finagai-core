@@ -435,7 +435,10 @@ const ctxLine = ctx && (ctx.app || ctx.window || ctx.url)
     const beforeDone = await rowState(pool, "control_task", taskId);
     await pool.query(`UPDATE control_task SET status = 'done', terminal_reason = COALESCE(terminal_reason, 'verified'), result_summary = $2, result_detail = $3, result_image_b64 = COALESCE($4, result_image_b64), updated_at = now() WHERE id = $1`,
       [taskId, step.summary.slice(0, 1000), detail || null, screenshotB64 && screenshotB64.length < 8_000_000 ? screenshotB64 : null]);
-    await recordTransition(pool, { actor: "j6", action: "control_task_done", table: "control_task", id: taskId, before: beforeDone, context: { summary: step.summary.slice(0, 300) } });
+    // A5: `verification_status` was set before `beforeDone` was read (above, or by completeForTask), so the diff never
+    // carried it and the stream could not say "verified". It is part of the completion, so it goes in the context.
+    await recordTransition(pool, { actor: "j6", action: "control_task_done", table: "control_task", id: taskId, before: beforeDone,
+      context: { summary: step.summary.slice(0, 300), verification_status: epistemic } });
     await pool.query(`UPDATE mac_runtime SET last_success_at = now(), last_success_code = (SELECT code FROM control_task WHERE id = $1) WHERE id = 'primary'`, [taskId]).catch(observed(pool, "j6.lastSuccess", { taskId }));
     return task.requester ? { status: "done", message: step.summary, requester: task.requester } : { status: "done", message: step.summary };
     }
